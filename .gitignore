@@ -1,0 +1,37 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Debian packages (no binaries in git)
+*.deb
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/out/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / tokens
+*.env
+.env
+.env.*
+
+# Hivemind / model cache
+*.bin
+*.safetensors
+*.onnx
+bootstrap.id
