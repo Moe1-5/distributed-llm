@@ -103,8 +103,10 @@ class InferenceHandler:
             seq_len      = hidden_states.shape[1]
             position_ids = torch.arange(seq_len, device=self.device).unsqueeze(0)
 
+# THIS WAS CHANGED TOO -- FROM INFERENCE_MODE TO NO_GRAD 
+        
         with self._lock:
-            with torch.inference_mode():
+            with torch.no_grad():
                 for layer in self.layers:
                     out           = layer(
                         hidden_states,

@@ -111,7 +111,7 @@ class DistributedGenerator:
             node_trace:   list[str] = []
 
             for step in range(max_new_tokens):
-                with torch.inference_mode():
+                with torch.no_grad():
                     hidden_states = self.embed_tokens(generated_ids)
 
                 position_ids = torch.arange(
@@ -128,7 +128,9 @@ class DistributedGenerator:
 
                 hidden_states = hidden_states.to(self.device)
 
-                with torch.inference_mode():
+                hidden_states = hidden_states.to(self.dtype)
+
+                with torch.no_grad():
                     hidden_states = self.norm(hidden_states)
                     logits        = self.lm_head(hidden_states)
 
