@@ -91,14 +91,14 @@ class RPCServer:
 
             # BatchTensorDescriptor tells hivemind the per-sample tensor shape.
             # We pass (hidden_size,) — hivemind handles batching internally.
-            descriptor = BatchTensorDescriptor(hidden_size)
+            descriptor = BatchTensorDescriptor(2048, hidden_size)
 
             backend = ModuleBackend(
                 name=self._uid,
                 module=module,
                 args_schema=(descriptor,),
                 outputs_schema=(descriptor,),
-                max_batch_size=1,
+                max_batch_size=4096,
             )
 
             self._server = hivemind.moe.Server(

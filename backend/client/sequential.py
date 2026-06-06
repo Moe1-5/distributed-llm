@@ -134,15 +134,13 @@ class RemoteSequential:
 
         # Flatten [batch, seq_len, hidden] → [batch*seq_len, hidden]
         # hivemind experts expect 2D input
-        batch, seq_len, hidden = hidden_states.shape
-        flat = hidden_states.reshape(batch * seq_len, hidden)
+        # batch, seq_len, hidden = hidden_states.shape
+        # flat = hidden_states.reshape(batch * seq_len, hidden)
 
-        output_flat = expert.forward(flat)
+        output = expert.forward(hidden_states)
 
-        assert output_flat is not None, f"Node {rpc_uid} returned None"
-
-        # Restore to [batch, seq_len, hidden]
-        return output_flat.reshape(batch, seq_len, hidden)
+        assert output is not None, f"Node {rpc_uid} returned None"
+        return output
 
     # ------------------------------------------------------------------
     # DHT discovery
