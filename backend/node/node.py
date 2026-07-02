@@ -38,10 +38,16 @@ class Node:
         dtype:         torch.dtype = torch.float16,
         hf_token:      Optional[str] = None,
     ):
-        assert model_name.strip(),        "model_name must not be empty"
-        assert layer_end > layer_start,   f"layer_end ({layer_end}) must be > layer_start ({layer_start})"
-        assert dht_prefix.strip(),        "dht_prefix must not be empty"
-        assert device in ("cuda", "cpu"), f"device must be 'cuda' or 'cpu', got '{device}'"
+        if not model_name.strip():
+            raise ValueError("model_name must not be empty")
+        if layer_end <= layer_start:
+            raise ValueError(
+                f"layer_end ({layer_end}) must be > layer_start ({layer_start})"
+            )
+        if not dht_prefix.strip():
+            raise ValueError("dht_prefix must not be empty")
+        if device not in ("cuda", "cpu"):
+            raise ValueError(f"device must be 'cuda' or 'cpu', got '{device}'")
 
         if device == "cuda" and not torch.cuda.is_available():
             logger.warning("CUDA requested but not available — falling back to CPU")
@@ -82,7 +88,8 @@ class Node:
             start=True,
             use_ipfs=False,
         )
-        assert self.dht.peer_id is not None, "DHT started but peer_id is None"
+        if self.dht.peer_id is None:
+            raise RuntimeError("DHT started but peer_id is None")
         logger.info(f"DHT started. Peer ID: {self.dht.peer_id}")
 
         # Step 2: Load layers
@@ -96,7 +103,8 @@ class Node:
             hf_token=self.hf_token,
         )
         self.handler.load()
-        assert self.handler.is_loaded(), "handler.load() completed but is_loaded() is False"
+        if not self.handler.is_loaded():
+            raise RuntimeError("handler.load() completed but is_loaded() is False")
 
         # Step 3: RPC server
         logger.info("Step 3/4: Starting RPC server...")
@@ -106,7 +114,8 @@ class Node:
             dht_prefix=self.dht_prefix,
         )
         self.rpc.start()
-        assert self.rpc.is_running(), "rpc.start() completed but is_running() is False"
+        if not self.rpc.is_running():
+            raise RuntimeError("rpc.start() completed but is_running() is False")
 
         # Step 4: Announce
         logger.info("Step 4/4: Announcing to DHT...")

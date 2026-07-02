@@ -137,19 +137,78 @@ class RemoteSequential:
         dht:        hivemind.DHT,
         dht_prefix: str,
         num_layers: int,
+        model_name: Optional[str] = None,
     ):
-        assert dht        is not None, "dht must not be None"
-        assert num_layers >= 0,        f"num_layers must be >= 0, got {num_layers}"
+        if dht is None:
+            raise ValueError("dht must not be None")
+        if num_layers < 0:
+            raise ValueError(f"num_layers must be >= 0, got {num_layers}")
+        if model_name is not None and not model_name.strip():
+            raise ValueError("model_name must not be empty")
 
         self.dht        = dht
         self.dht_prefix = dht_prefix
         self.num_layers = num_layers
+        self.model_name = model_name
+
+    def _validate_node_metadata(self, info: dict, peer_id: str = "unknown") -> dict:
+        required = {"peer_id", "layer_start", "layer_end", "model_name", "rpc_uid"}
+        missing = required - set(info.keys())
+        if missing:
+            raise ValueError(f"Node {peer_id[:8]} missing fields: {sorted(missing)}")
+
+        metadata_peer_id = str(info["peer_id"])
+        model_name = str(info["model_name"]).strip()
+        if not model_name:
+            raise ValueError(f"Node {metadata_peer_id[:8]} has empty model_name")
+        if self.model_name is not None and model_name != self.model_name:
+            raise ValueError(
+                f"Node {metadata_peer_id[:8]} model_name {model_name!r} "
+                f"does not match generator model {self.model_name!r}"
+            )
+
+        try:
+            layer_start = int(info["layer_start"])
+            layer_end = int(info["layer_end"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Node {metadata_peer_id[:8]} has non-integer layer range: "
+                f"{info.get('layer_start')!r}-{info.get('layer_end')!r}"
+            ) from exc
+
+        if layer_start < 0:
+            raise ValueError(
+                f"Node {metadata_peer_id[:8]} has negative layer_start: {layer_start}"
+            )
+        if layer_end <= layer_start:
+            raise ValueError(
+                f"Node {metadata_peer_id[:8]} has invalid layer range: "
+                f"{layer_start}-{layer_end}"
+            )
+        if self.num_layers > 0 and layer_end > self.num_layers:
+            raise ValueError(
+                f"Node {metadata_peer_id[:8]} wants layers {layer_start}-{layer_end}, "
+                f"but model has {self.num_layers} layers"
+            )
+
+        rpc_uid = str(info["rpc_uid"]).strip()
+        if not rpc_uid:
+            raise ValueError(f"Node {metadata_peer_id[:8]} has empty rpc_uid")
+
+        return {
+            **info,
+            "peer_id": metadata_peer_id,
+            "model_name": model_name,
+            "layer_start": layer_start,
+            "layer_end": layer_end,
+            "rpc_uid": rpc_uid,
+        }
 
     def _plan_route(self, nodes: list[dict]) -> list[dict]:
         """Order nodes by layer start and enforce a contiguous, non-overlapping route."""
         ordered_nodes = sorted(
             nodes,
-            key=lambda n: (int(n["layer_start"]), int(n["layer_end"])),
+            key=lambda n: (n["layer_start"], n["layer_end"]),
         )
 
         if not ordered_nodes:
@@ -161,9 +220,10 @@ class RemoteSequential:
             layer_end = int(node["layer_end"])
             peer_id = str(node.get("peer_id", "unknown"))
 
-            assert layer_end > layer_start, (
-                f"Invalid layer range for peer {peer_id}: {layer_start}-{layer_end}"
-            )
+            if layer_end <= layer_start:
+                raise ValueError(
+                    f"Invalid layer range for peer {peer_id}: {layer_start}-{layer_end}"
+                )
             if layer_start != prev_end:
                 raise ValueError(
                     f"Route is not contiguous: expected next layer_start={prev_end}, "
@@ -191,13 +251,18 @@ class RemoteSequential:
                 "No nodes found on the DHT. Make sure at least one node is running."
             )
 
-        coverage = self._check_coverage(discovered_nodes)
+        validated_nodes = [
+            self._validate_node_metadata(node, str(node.get("peer_id", "unknown")))
+            for node in discovered_nodes
+        ]
+
+        coverage = self._check_coverage(validated_nodes)
         if not coverage["complete"]:
             raise RuntimeError(
                 f"Incomplete layer coverage — missing: {coverage['missing']}"
             )
 
-        ordered_nodes = self._plan_route(discovered_nodes)
+        ordered_nodes = self._plan_route(validated_nodes)
         route_str = " -> ".join(
             f"layers {n['layer_start']}–{n['layer_end']} @ {_peer_short(n['peer_id'])}"
             for n in ordered_nodes
@@ -216,9 +281,10 @@ class RemoteSequential:
         attention_mask: Optional[torch.Tensor] = None,
         position_ids:   Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, list[str]]:
-        assert hidden_states.dim() == 3, (
-            f"hidden_states must be [batch, seq_len, hidden_size], got {hidden_states.shape}"
-        )
+        if hidden_states.dim() != 3:
+            raise ValueError(
+                f"hidden_states must be [batch, seq_len, hidden_size], got {hidden_states.shape}"
+            )
  
         t_start = time.perf_counter()
         logger.info(
@@ -285,10 +351,11 @@ class RemoteSequential:
             )
  
             # ── ORIGINAL assert, kept exactly as-is ──────────────────────────
-            assert rpc_uid, (
-                f"Node {peer_id[:8]} has no rpc_uid in DHT metadata. "
-                f"Node may not have started its RPC server correctly."
-            )
+            if not rpc_uid:
+                raise RuntimeError(
+                    f"Node {peer_id[:8]} has no rpc_uid in DHT metadata. "
+                    f"Node may not have started its RPC server correctly."
+                )
  
             t_hop         = time.perf_counter()
             hidden_states = self._call_node(
@@ -361,9 +428,10 @@ class RemoteSequential:
         """Call remote node using its rpc_uid stored in DHT metadata."""
         experts = get_experts(self.dht, [rpc_uid])
 
-        assert experts and experts[0] is not None, (
-            f"Node uid={rpc_uid} not found in DHT. Node may have gone offline."
-        )
+        if not experts or experts[0] is None:
+            raise RuntimeError(
+                f"Node uid={rpc_uid} not found in DHT. Node may have gone offline."
+            )
 
         expert = experts[0]
 
@@ -380,7 +448,8 @@ class RemoteSequential:
         if isinstance(output, tuple):
             output = output[0]
 
-        assert output is not None, f"Node {rpc_uid} returned None"
+        if output is None:
+            raise RuntimeError(f"Node {rpc_uid} returned None")
         return output
 
     # ------------------------------------------------------------------
@@ -408,17 +477,11 @@ class RemoteSequential:
                 if result is None or not isinstance(result.value, dict):
                     continue
 
-                info     = result.value
-                required = {"peer_id", "layer_start", "layer_end", "model_name", "rpc_uid"}
-                missing  = required - set(info.keys())
-                if missing:
-                    logger.warning(f"Node {peer_id[:8]} missing fields: {missing}")
-                    continue
-
+                info = self._validate_node_metadata(result.value, str(peer_id))
                 nodes.append(info)
 
             except Exception as e:
-                logger.warning(f"Failed to fetch metadata for {peer_id[:8]}: {e}")
+                logger.warning(f"Failed to fetch or validate metadata for {peer_id[:8]}: {e}")
 
         logger.info(f"Discovered {len(nodes)} node(s) on '{self.dht_prefix}'")
         return nodes
@@ -429,8 +492,27 @@ class RemoteSequential:
 
     def _check_coverage(self, nodes: list[dict]) -> dict:
         covered: set[int] = set()
+        invalid: list[str] = []
         for node in nodes:
-            for i in range(node["layer_start"], node["layer_end"]):
+            try:
+                layer_start = int(node["layer_start"])
+                layer_end = int(node["layer_end"])
+            except (TypeError, ValueError):
+                invalid.append(
+                    f"{node.get('peer_id', 'unknown')}:{node.get('layer_start')}-{node.get('layer_end')}"
+                )
+                continue
+            if layer_start < 0 or layer_end <= layer_start:
+                invalid.append(
+                    f"{node.get('peer_id', 'unknown')}:{layer_start}-{layer_end}"
+                )
+                continue
+            if self.num_layers > 0 and layer_end > self.num_layers:
+                invalid.append(
+                    f"{node.get('peer_id', 'unknown')}:{layer_start}-{layer_end}"
+                )
+                continue
+            for i in range(layer_start, layer_end):
                 covered.add(i)
         all_layers = set(range(self.num_layers))
         missing    = sorted(all_layers - covered)
@@ -438,6 +520,7 @@ class RemoteSequential:
             "complete": len(missing) == 0,
             "covered":  sorted(covered),
             "missing":  missing,
+            "invalid":  invalid,
         }
 
     # ------------------------------------------------------------------

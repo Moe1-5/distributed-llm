@@ -37,7 +37,8 @@ class _HandlerModule(nn.Module):
 
     def __init__(self, handler: InferenceHandler):
         super().__init__()
-        assert handler.is_loaded(), "Handler must be loaded before wrapping"
+        if not handler.is_loaded():
+            raise RuntimeError("Handler must be loaded before wrapping")
         self._handler = handler
 
     def forward(
@@ -62,9 +63,12 @@ class RPCServer:
         dht:        hivemind.DHT,
         dht_prefix: str,
     ):
-        assert handler.is_loaded(),     "RPCServer requires a loaded InferenceHandler"
-        assert dht.peer_id is not None, "RPCServer requires a started DHT"
-        assert dht_prefix.strip(),      "dht_prefix must not be empty"
+        if not handler.is_loaded():
+            raise RuntimeError("RPCServer requires a loaded InferenceHandler")
+        if dht.peer_id is None:
+            raise RuntimeError("RPCServer requires a started DHT")
+        if not dht_prefix.strip():
+            raise ValueError("dht_prefix must not be empty")
 
         self.handler    = handler
         self.dht        = dht
@@ -79,6 +83,18 @@ class RPCServer:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def build_rpc_uid(dht_prefix: str, layer_start: int, layer_end: int) -> str:
+        if not dht_prefix.strip():
+            raise ValueError("dht_prefix must not be empty")
+        if layer_start < 0:
+            raise ValueError(f"layer_start must be >= 0, got {layer_start}")
+        if layer_end <= layer_start:
+            raise ValueError(
+                f"layer_end ({layer_end}) must be > layer_start ({layer_start})"
+            )
+        return f"{dht_prefix}.{layer_start}.{layer_end}"
+
     def start(self) -> None:
         with self._lock:
             if self._running:
@@ -88,7 +104,11 @@ class RPCServer:
             # UID must match: ^(([^.])+)([.](?:[0]|([1-9]([0-9]*))))+$
             # i.e. segments separated by dots, last segment must be a number
             # We use prefix.expert.0 — simple and always valid
-            self._uid   = f"{self.dht_prefix}.0.0"
+            self._uid = self.build_rpc_uid(
+                self.dht_prefix,
+                self.handler.layer_start,
+                self.handler.layer_end,
+            )
             hidden_size = self._get_hidden_size()
 
             logger.info(f"Starting RPC | uid={self._uid} | hidden_size={hidden_size}")
@@ -171,7 +191,8 @@ class RPCServer:
 
     def _get_hidden_size(self) -> int:
         """Infer hidden_size from first layer's weights."""
-        assert self.handler.layers is not None, "Handler layers are None"
+        if self.handler.layers is None:
+            raise RuntimeError("Handler layers are None")
 
         first_layer = self.handler.layers[0]
 

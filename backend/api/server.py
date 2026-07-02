@@ -35,13 +35,15 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 def _validate_environment() -> None:
-    assert sys.version_info >= (3, 12), (
-        f"Python 3.12+ required, got {sys.version_info.major}.{sys.version_info.minor}"
-    )
+    if sys.version_info < (3, 12):
+        raise RuntimeError(
+            f"Python 3.12+ required, got {sys.version_info.major}.{sys.version_info.minor}"
+        )
     for pkg in ("torch", "hivemind", "transformers"):
         try:
             mod = __import__(pkg)
-            assert getattr(mod, "__version__", None), f"{pkg} version string empty"
+            if not getattr(mod, "__version__", None):
+                raise RuntimeError(f"{pkg} version string empty")
         except ImportError as e:
             raise RuntimeError(f"{pkg} not installed: {e}") from e
 
@@ -61,6 +63,7 @@ gpu_monitor: Optional[GPUMonitor]           = None
 node:        Optional[Node]                 = None
 generator:   Optional[DistributedGenerator] = None
 client_dht:  Optional[hivemind.DHT]         = None
+client_dht_prefix: str = DHT_PREFIX
 
 
 @asynccontextmanager
@@ -108,29 +111,31 @@ class NodeStartRequest(BaseModel):
     @classmethod
     def model_must_be_supported(cls, v: str) -> str:
         v = v.strip()
-        assert v in SUPPORTED_MODELS, (
-            f"Unsupported model '{v}'. "
-            f"Supported: {list(SUPPORTED_MODELS.keys())}"
-        )
+        if v not in SUPPORTED_MODELS:
+            raise ValueError(
+                f"Unsupported model '{v}'. "
+                f"Supported: {list(SUPPORTED_MODELS.keys())}"
+            )
         return v
 
     @field_validator("layer_end")
     @classmethod
     def layer_range_valid(cls, v: int, info) -> int:
         start = info.data.get("layer_start", 0)
-        assert v > start, f"layer_end ({v}) must be > layer_start ({start})"
+        if v <= start:
+            raise ValueError(f"layer_end ({v}) must be > layer_start ({start})")
         model = info.data.get("model_name", "")
         if model in SUPPORTED_MODELS:
             max_layers = SUPPORTED_MODELS[model]["num_layers"]
-            assert v <= max_layers, (
-                f"layer_end ({v}) exceeds model depth ({max_layers})"
-            )
+            if v > max_layers:
+                raise ValueError(f"layer_end ({v}) exceeds model depth ({max_layers})")
         return v
 
     @field_validator("device")
     @classmethod
     def device_valid(cls, v: str) -> str:
-        assert v in ("cuda", "cpu"), f"device must be 'cuda' or 'cpu', got '{v}'"
+        if v not in ("cuda", "cpu"):
+            raise ValueError(f"device must be 'cuda' or 'cpu', got '{v}'")
         if v == "cuda" and not torch.cuda.is_available():
             return "cpu"
         return v
@@ -145,9 +150,10 @@ class GeneratorStartRequest(BaseModel):
     @classmethod
     def model_must_be_supported(cls, v: str) -> str:
         v = v.strip()
-        assert v in SUPPORTED_MODELS, (
-            f"Unsupported model '{v}'. Supported: {list(SUPPORTED_MODELS.keys())}"
-        )
+        if v not in SUPPORTED_MODELS:
+            raise ValueError(
+                f"Unsupported model '{v}'. Supported: {list(SUPPORTED_MODELS.keys())}"
+            )
         return v
 
 
@@ -161,27 +167,31 @@ class ChatRequest(BaseModel):
     @classmethod
     def message_not_empty(cls, v: str) -> str:
         v = v.strip()
-        assert v, "message must not be empty"
+        if not v:
+            raise ValueError("message must not be empty")
         return v
 
     @field_validator("max_new_tokens")
     @classmethod
     def max_tokens_valid(cls, v: Optional[int]) -> Optional[int]:
         if v is not None:
-            assert 1 <= v <= 2048
+            if not (1 <= v <= 2048):
+                raise ValueError("max_new_tokens must be between 1 and 2048")
         return v
 
     @field_validator("temperature")
     @classmethod
     def temperature_valid(cls, v: Optional[float]) -> Optional[float]:
         if v is not None:
-            assert 0.0 < v <= 2.0
+            if not (0.0 < v <= 2.0):
+                raise ValueError("temperature must be between 0 and 2")
         return v
     @field_validator("top_p")
     @classmethod
     def top_p_valid(cls, v: Optional[float]) -> Optional[float]:
         if v is not None:
-            assert 0.0 < v <= 1.0, "top_p must be between 0 and 1" 
+            if not (0.0 < v <= 1.0):
+                raise ValueError("top_p must be between 0 and 1")
         return v
 
 
@@ -192,7 +202,8 @@ class TokenRequest(BaseModel):
     @classmethod
     def token_valid(cls, v: str) -> str:
         v = v.strip()
-        assert v and v.startswith("hf_"), "Token must start with 'hf_'"
+        if not v or not v.startswith("hf_"):
+            raise ValueError("Token must start with 'hf_'")
         return v
 
 
@@ -214,7 +225,8 @@ async def get_status() -> dict:
 
 @app.get("/stats")
 async def get_stats() -> dict:
-    assert gpu_monitor is not None
+    if gpu_monitor is None:
+        raise HTTPException(status_code=503, detail="GPU monitor not ready.")
     return gpu_monitor.get_stats()
 
 
@@ -224,7 +236,22 @@ async def get_nodes() -> dict:
     if dht is None:
         return {"nodes": [], "warning": "No DHT connection yet."}
     try:
-        seq    = RemoteSequential(dht=dht, dht_prefix=DHT_PREFIX, num_layers=0)
+        active_prefix = (
+            getattr(node, "dht_prefix", None)
+            if node is not None
+            else client_dht_prefix
+        ) or DHT_PREFIX
+        active_model = (
+            getattr(node, "model_name", None)
+            if node is not None
+            else (generator.model_name if generator is not None else None)
+        )
+        seq = RemoteSequential(
+            dht=dht,
+            dht_prefix=active_prefix,
+            num_layers=0,
+            model_name=active_model,
+        )
         status = seq.get_network_status()
         return {"nodes": status["nodes"]}
     except Exception as e:
@@ -330,7 +357,8 @@ async def start_node(req: NodeStartRequest) -> dict:
         )
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, node.start)
-        assert node.is_running(), "node.start() completed but is_running() is False"
+        if not node.is_running():
+            raise RuntimeError("node.start() completed but is_running() is False")
         return {"status": "started", "info": node.get_info()}
 
     except AssertionError as e:
@@ -361,7 +389,7 @@ async def stop_node() -> dict:
 
 @app.post("/generator/start")
 async def start_generator(req: GeneratorStartRequest) -> dict:
-    global generator, client_dht
+    global generator, client_dht, client_dht_prefix
 
     model_info = SUPPORTED_MODELS[req.model_name]
     hf_token   = get_hf_token()
@@ -385,12 +413,15 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
             start=True,
             use_ipfs=False,
         )
-        assert client_dht.peer_id is not None
+        if client_dht.peer_id is None:
+            raise RuntimeError("Generator DHT started but peer_id is None")
+        client_dht_prefix = req.dht_prefix
 
         sequential = RemoteSequential(
             dht=client_dht,
             dht_prefix=req.dht_prefix,
             num_layers=model_info["num_layers"],
+            model_name=req.model_name,
         )
 
         generator = DistributedGenerator(
@@ -403,7 +434,8 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, generator.load)
-        assert generator.is_loaded()
+        if not generator.is_loaded():
+            raise RuntimeError("generator.load() completed but is_loaded() is False")
 
         return {"status": "ready"}
 

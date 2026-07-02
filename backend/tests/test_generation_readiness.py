@@ -13,10 +13,25 @@ from client.generation import DistributedGenerator
 from client.sequential import RemoteSequential
 from models.architecture_adapter import get_architecture_adapter
 from node.handler import InferenceHandler
+from node.rpc_server import RPCServer
 
 
 class DummyDHT:
     pass
+
+
+class DummyDHTResult:
+    def __init__(self, value):
+        self.value = value
+
+
+class MappingDHT:
+    def __init__(self, values: dict[str, object]):
+        self.values = values
+
+    def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
+        value = self.values.get(key)
+        return DummyDHTResult(value) if value is not None else None
 
 
 class RemoteSequentialRouteTests(unittest.TestCase):
@@ -50,6 +65,126 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "Incomplete layer coverage"):
             sequential.validate_route()
+
+    def test_discover_nodes_skips_non_integer_layer_metadata(self) -> None:
+        dht = MappingDHT(
+            {
+                "test-prefix.members": ["bad-peer", "good-peer"],
+                "test-prefix.node_info.bad-peer": {
+                    "peer_id": "bad-peer",
+                    "model_name": "facebook/opt-125m",
+                    "layer_start": "zero",
+                    "layer_end": 4,
+                    "rpc_uid": "test-prefix.0.0",
+                },
+                "test-prefix.node_info.good-peer": self.make_node(0, 8, "good-peer"),
+            }
+        )
+        sequential = RemoteSequential(
+            dht,
+            "test-prefix",
+            num_layers=8,
+            model_name="facebook/opt-125m",
+        )
+
+        nodes = sequential._discover_nodes()
+
+        self.assertEqual([node["peer_id"] for node in nodes], ["good-peer"])
+
+    def test_wrong_model_node_metadata_is_rejected(self) -> None:
+        sequential = RemoteSequential(
+            DummyDHT(),
+            "test-prefix",
+            num_layers=8,
+            model_name="facebook/opt-125m",
+        )
+        nodes = [
+            {
+                **self.make_node(0, 8),
+                "model_name": "meta-llama/Llama-3.2-1B",
+            }
+        ]
+
+        with self.assertRaisesRegex(ValueError, "model_name"):
+            sequential.validate_route(nodes)
+
+    def test_negative_layer_ranges_do_not_count_as_valid_coverage(self) -> None:
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
+
+        coverage = sequential._check_coverage([self.make_node(-2, 8)])
+
+        self.assertFalse(coverage["complete"])
+        self.assertEqual(coverage["covered"], [])
+        self.assertEqual(coverage["invalid"], ["peer:-2-8"])
+
+    def test_missing_rpc_uid_is_explicit_runtime_error(self) -> None:
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
+        node = self.make_node(0, 8)
+        node["rpc_uid"] = ""
+
+        with self.assertRaisesRegex(ValueError, "rpc_uid"):
+            sequential.validate_route([node])
+
+    def test_rpc_forward_missing_expert_uses_runtime_error(self) -> None:
+        import client.sequential as sequential_module
+
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
+        original_get_experts = sequential_module.get_experts
+        sequential_module.get_experts = lambda dht, uids: []
+        try:
+            with self.assertRaisesRegex(RuntimeError, "not found"):
+                sequential._rpc_forward(
+                    rpc_uid="test-prefix.0.0",
+                    peer_id="peer",
+                    hidden_states=torch.zeros(1, 1, 8),
+                )
+        finally:
+            sequential_module.get_experts = original_get_experts
+
+    def test_rpc_uid_includes_layer_slice_for_uniqueness(self) -> None:
+        uid_a = RPCServer.build_rpc_uid("test-prefix", layer_start=0, layer_end=4)
+        uid_b = RPCServer.build_rpc_uid("test-prefix", layer_start=4, layer_end=8)
+
+        self.assertNotEqual(uid_a, uid_b)
+        self.assertEqual(uid_a, "test-prefix.0.4")
+        self.assertEqual(uid_b, "test-prefix.4.8")
+
+    def test_nodes_endpoint_uses_active_node_prefix(self) -> None:
+        from api import server as api_server
+
+        seen_prefixes: list[str] = []
+
+        class DummyNode:
+            dht = object()
+            dht_prefix = "custom-prefix"
+
+        class CaptureSequential:
+            def __init__(
+                self,
+                dht,
+                dht_prefix: str,
+                num_layers: int,
+                model_name: str | None = None,
+            ):
+                seen_prefixes.append(dht_prefix)
+
+            def get_network_status(self) -> dict:
+                return {"nodes": []}
+
+        original_node = api_server.node
+        original_client_dht = api_server.client_dht
+        original_sequential = api_server.RemoteSequential
+        api_server.node = DummyNode()
+        api_server.client_dht = None
+        api_server.RemoteSequential = CaptureSequential
+        try:
+            asyncio.run(api_server.get_nodes())
+        finally:
+            api_server.node = original_node
+            api_server.client_dht = original_client_dht
+            api_server.RemoteSequential = original_sequential
+
+        self.assertEqual(seen_prefixes, ["custom-prefix"])
 
     def test_prepare_hidden_states_adds_position_embeddings(self) -> None:
         generator = DistributedGenerator("facebook/opt-125m", sequential=object())

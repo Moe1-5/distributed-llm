@@ -35,8 +35,10 @@ class DistributedGenerator:
         dtype:      torch.dtype   = torch.float32,
         hf_token:   Optional[str] = None,
     ):
-        assert model_name.strip(),   "model_name must not be empty"
-        assert sequential is not None, "sequential must not be None"
+        if not model_name.strip():
+            raise ValueError("model_name must not be empty")
+        if sequential is None:
+            raise ValueError("sequential must not be None")
 
         self.model_name = model_name
         self.sequential = sequential
@@ -72,16 +74,20 @@ class DistributedGenerator:
         attention_mask: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> None:
-        assert input_ids.dim() == 2, f"Expected [batch, seq_len], got {input_ids.shape}"
-        assert hidden_states.dim() == 3, (
-            f"Expected hidden_states [batch, seq_len, hidden], got {hidden_states.shape}"
-        )
-        assert attention_mask.shape == input_ids.shape, (
-            f"Expected attention_mask {input_ids.shape}, got {attention_mask.shape}"
-        )
-        assert position_ids.shape == (1, input_ids.shape[1]), (
-            f"Expected position_ids [1, seq_len], got {position_ids.shape}"
-        )
+        if input_ids.dim() != 2:
+            raise ValueError(f"Expected [batch, seq_len], got {input_ids.shape}")
+        if hidden_states.dim() != 3:
+            raise ValueError(
+                f"Expected hidden_states [batch, seq_len, hidden], got {hidden_states.shape}"
+            )
+        if attention_mask.shape != input_ids.shape:
+            raise ValueError(
+                f"Expected attention_mask {input_ids.shape}, got {attention_mask.shape}"
+            )
+        if position_ids.shape != (1, input_ids.shape[1]):
+            raise ValueError(
+                f"Expected position_ids [1, seq_len], got {position_ids.shape}"
+            )
 
     # ------------------------------------------------------------------
     # Setup
@@ -98,7 +104,8 @@ class DistributedGenerator:
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, **token_kwargs)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        assert self.tokenizer.eos_token_id is not None, "Tokenizer has no EOS token"
+        if self.tokenizer.eos_token_id is None:
+            raise RuntimeError("Tokenizer has no EOS token")
 
         model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
@@ -174,8 +181,10 @@ class DistributedGenerator:
         temperature:    Optional[float] = None,
         top_p:          Optional[float] = None,
     ) -> AsyncGenerator[dict, None]:
-        assert self._loaded,          "Generator not loaded — call load() first"
-        assert prompt.strip(),        "prompt must not be empty"
+        if not self._loaded:
+            raise RuntimeError("Generator not loaded; call load() first")
+        if not prompt.strip():
+            raise ValueError("prompt must not be empty")
 
         cfg = self._get_gen_config()
         logger.info(
@@ -255,9 +264,10 @@ class DistributedGenerator:
                     logits        = self.lm_head(hidden_states)
 
                 next_token_logits = logits[:, -1, :]
-                assert next_token_logits.dim() == 2, (
-                    f"Expected [batch, vocab], got {next_token_logits.shape}"
-                )
+                if next_token_logits.dim() != 2:
+                    raise RuntimeError(
+                        f"Expected [batch, vocab], got {next_token_logits.shape}"
+                    )
                 logger.debug(
                     "[gen] step=%s logits_shape=%s",
                     step,
@@ -272,13 +282,8 @@ class DistributedGenerator:
                     generated_ids=generated_ids,
                 )
 
-                assert next_token_id.shape == (1, 1), (
-                    f"Expected shape (1,1), got {next_token_id.shape}"
-                )
-
-                assert next_token_id.dim() == 2 and next_token_id.shape[1] == 1, (
-                    f"Expected sampled token shape [1,1], got {next_token_id.shape}"
-                )
+                if next_token_id.shape != (1, 1):
+                    raise RuntimeError(f"Expected shape (1,1), got {next_token_id.shape}")
                 token_text = self.tokenizer.decode(
                     next_token_id[0],
                     skip_special_tokens=True,
@@ -312,7 +317,8 @@ class DistributedGenerator:
                 position_ids=position_ids,
             )
 
-        assert self.embed_tokens is not None, "embed_tokens is not loaded"
+        if self.embed_tokens is None:
+            raise RuntimeError("embed_tokens is not loaded")
         hidden_states = self.embed_tokens(input_ids)
 
         if self.position_embeddings is not None:
@@ -334,7 +340,8 @@ class DistributedGenerator:
         repetition_penalty: float = 1.1,
         generated_ids:      Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert logits.dim() == 2, f"Expected [1, vocab], got {logits.shape}"
+        if logits.dim() != 2:
+            raise ValueError(f"Expected [1, vocab], got {logits.shape}")
 
         # 1. Repetition penalty — penalise tokens already in the sequence
         if repetition_penalty != 1.0 and generated_ids is not None:
@@ -361,7 +368,8 @@ class DistributedGenerator:
             cumulative = torch.cumsum(sorted_probs, dim=-1)
             sorted_probs[(cumulative - sorted_probs) > top_p] = 0.0
             total = sorted_probs.sum(dim=-1, keepdim=True)
-            assert total > 0, "All probabilities zeroed out in top-p filtering"
+            if torch.any(total <= 0):
+                raise RuntimeError("All probabilities zeroed out in top-p filtering")
             sorted_probs = sorted_probs / total
             sampled      = torch.multinomial(sorted_probs, num_samples=1)
             next_token   = sorted_indices.gather(-1, sampled)

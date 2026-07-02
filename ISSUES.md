@@ -120,6 +120,8 @@ The audit confirmed request validation works in normal Python mode, but many pro
 
 **Verification evidence:** source audit during the backend flow unit-test pass; this also overlaps with existing issue 2.
 
+**Resolution 2026-07-03:** Sprint 03 implemented tested hardening for findings 11 through 16. `RemoteSequential` now accepts the generator model name, validates discovered DHT node metadata before route planning, rejects wrong-model nodes, ignores malformed/negative layer coverage, and raises explicit runtime errors instead of critical `assert` checks in the touched routing path. `RPCServer` now builds unique Hivemind-compatible UIDs from the DHT prefix and served layer slice. `/nodes` now uses the active node or generator DHT prefix. Backend regression coverage was expanded to 20 tests and passes with `uv run pytest`.
+
 ## 1. Remote route can apply layers more than once
 
 **Location:** `backend/client/sequential.py`

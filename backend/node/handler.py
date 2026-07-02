@@ -26,9 +26,14 @@ class InferenceHandler:
         dtype:       torch.dtype = torch.float16,
         hf_token:    Optional[str] = None,
     ):
-        assert model_name.strip(),       "model_name must not be empty"
-        assert layer_end > layer_start,  f"layer_end ({layer_end}) must be > layer_start ({layer_start})"
-        assert device in ("cuda", "cpu"), f"device must be 'cuda' or 'cpu'"
+        if not model_name.strip():
+            raise ValueError("model_name must not be empty")
+        if layer_end <= layer_start:
+            raise ValueError(
+                f"layer_end ({layer_end}) must be > layer_start ({layer_start})"
+            )
+        if device not in ("cuda", "cpu"):
+            raise ValueError("device must be 'cuda' or 'cpu'")
 
         self.model_name  = model_name
         self.layer_start = layer_start
@@ -59,11 +64,15 @@ class InferenceHandler:
             dtype=self.dtype,
             hf_token=self.hf_token,
         )
-        assert self.layers is not None,         "load_layers returned None"
-        assert len(self.layers) > 0,            "load_layers returned empty ModuleList"
-        assert len(self.layers) == self.layer_end - self.layer_start, (
-            f"Expected {self.layer_end - self.layer_start} layers, got {len(self.layers)}"
-        )
+        if self.layers is None:
+            raise RuntimeError("load_layers returned None")
+        if len(self.layers) == 0:
+            raise RuntimeError("load_layers returned empty ModuleList")
+        expected_layers = self.layer_end - self.layer_start
+        if len(self.layers) != expected_layers:
+            raise RuntimeError(
+                f"Expected {expected_layers} layers, got {len(self.layers)}"
+            )
         self._loaded = True
         logger.info(f"Loaded {len(self.layers)} layers on {self.device}")
 
@@ -89,9 +98,10 @@ class InferenceHandler:
         if not self._loaded or self.layers is None:
             raise RuntimeError("Layers not loaded. Call load() first.")
 
-        assert hidden_states.dim() == 3, (
-            f"hidden_states must be [batch, seq_len, hidden_size], got {hidden_states.shape}"
-        )
+        if hidden_states.dim() != 3:
+            raise ValueError(
+                f"hidden_states must be [batch, seq_len, hidden_size], got {hidden_states.shape}"
+            )
 
         hidden_states = hidden_states.to(self.device, dtype=self.dtype)
         position_ids = self._prepare_position_ids(position_ids, hidden_states)
@@ -199,7 +209,8 @@ class InferenceHandler:
             return None
 
         if self._rotary_embedding is None:
-            assert self.layers is not None and len(self.layers) > 0
+            if self.layers is None or len(self.layers) == 0:
+                raise RuntimeError("Cannot prepare rotary embeddings without loaded layers")
             first_layer = self.layers[0]
             config = getattr(getattr(first_layer, "self_attn", None), "config", None)
             if config is None:
