@@ -11,8 +11,8 @@
 
 ## Active Sprint
 
-**Sprint:** Sprint 03 - Routing and DHT Hardening  
-**Goal:** Make distributed inference reject unsafe DHT/RPC state before generation, including wrong-model nodes, malformed layer metadata, RPC UID collisions, custom prefix drift, and assert-based runtime validation.
+**Sprint:** None  
+**Goal:** Awaiting next sprint definition.
 
 ## Tech Stack
 
@@ -33,6 +33,6 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 
 **Latest Sprint 3 Update**
 
-- Created the sprint plan from the backend flow audit findings.
-- Implementation has not started yet.
-- Next step: add regression tests for routing and DHT hardening issues.
+- Sprint 03 routing and DHT hardening implementation is complete and archived.
+- Backend regression tests, optimized Python tests, and compile checks passed.
+- Next step: define the next sprint or run live multi-node P2P system validation.

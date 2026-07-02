@@ -5,7 +5,7 @@
 
 | Sprint | File | Goal |
 | --- | --- | --- |
-| Sprint 03 | `tasks/sprints/sprint-03-routing-and-dht-hardening.md` | Make distributed inference reject unsafe DHT/RPC state before generation. |
+| _None_ | _None_ | Awaiting next sprint definition. |
 
 ## Completed Sprints
 
@@ -15,6 +15,7 @@ Completed sprint documents are listed in `tasks/sprints/` for the main sprint se
 | --- | --- | --- |
 | Sprint 01 | `tasks/sprints/sprint-01-stabilize-prototype.md` | Completed. |
 | Sprint 02 | `tasks/sprints/sprint-02-architecture-adapter-and-parity.md` | Completed. |
+| Sprint 03 | `tasks/archive/sprint-03-routing-and-dht-hardening.md` | Completed and archived. |
 
 ---
 

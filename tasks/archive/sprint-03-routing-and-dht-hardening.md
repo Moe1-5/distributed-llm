@@ -2,7 +2,7 @@
 
 **Goal:** Make distributed inference reject unsafe DHT/RPC state before generation, so each request uses the right model, a valid contiguous route, and unique reachable RPC targets.
 **Start:** 2026-07-02  
-**End:** TBD
+**End:** 2026-07-03
 
 ---
 
@@ -79,3 +79,9 @@ The sprint should turn those findings into tested implementation work without ch
 - What changed: added routing/DHT regression tests, model-aware DHT metadata validation, validated-route coverage, unique RPC UID generation per layer slice, active-prefix discovery for `/nodes`, and explicit runtime exceptions in the touched backend paths.
 - Why: Sprint 03 audit findings showed the distributed boundary could trust wrong-model nodes, malformed layer ranges, duplicate RPC UIDs, stale prefixes, and assert-based checks.
 - Status: backend regression suite passes with 20 tests; full live multi-node P2P behavior still needs a manual/system run before closing the sprint.
+
+### 2026-07-03 - Close Sprint 03
+
+- What changed: closed Sprint 03 after implementation and verification, with the sprint branch pushed to GitHub.
+- Why: the user explicitly requested closing Sprint 03 after the routing and DHT hardening branch was completed.
+- Status: Sprint 03 acceptance criteria are complete; live multi-node P2P validation remains a future system-test activity, not an active Sprint 03 blocker.
