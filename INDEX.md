@@ -57,10 +57,10 @@
 
 | File                                                         | What's inside                                                                        |
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `tasks/active.md`                                            | Active sprint routing table; currently no active sprint is defined.                  |
+| `tasks/active.md`                                            | Active sprint routing table.                                                         |
 | `tasks/lessons.md`                                           | Assistant lessons: active and internalized.                                          |
-| `tasks/sprints/sprint-01-stabilize-prototype.md`             | Completed sprint for stabilizing distributed inference.                              |
-| `tasks/sprints/sprint-02-architecture-adapter-and-parity.md`  | Completed sprint for architecture-aware distributed inference and parity validation. |
+| `tasks/sprints/sprint-04-local-system-validation.md`          | Active sprint for local end-to-end distributed inference validation.                 |
+| `tasks/archive/sprint-01-stabilize-prototype.md`              | Completed sprint for stabilizing distributed inference.                              |
 | `tasks/archive/sprint-02-architecture-adapter-and-parity.md` | Completed sprint for architecture-aware distributed inference and parity validation. |
 | `tasks/archive/sprint-03-routing-and-dht-hardening.md`       | Completed sprint for DHT metadata validation, model-aware routing, and RPC UID safety. |
 | `tasks/archive/`                                             | Closed sprint audit trail.                                                           |

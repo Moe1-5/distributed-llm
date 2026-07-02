@@ -5,16 +5,16 @@
 
 | Sprint | File | Goal |
 | --- | --- | --- |
-| _None_ | _None_ | Awaiting next sprint definition. |
+| Sprint 04 | `tasks/sprints/sprint-04-local-system-validation.md` | Prove the local end-to-end distributed inference flow before advanced features. |
 
 ## Completed Sprints
 
-Completed sprint documents are listed in `tasks/sprints/` for the main sprint sequence. Archived copies may also exist in `tasks/archive/`.
+Completed sprint documents live in `tasks/archive/`.
 
 | Sprint | File | Status |
 | --- | --- | --- |
-| Sprint 01 | `tasks/sprints/sprint-01-stabilize-prototype.md` | Completed. |
-| Sprint 02 | `tasks/sprints/sprint-02-architecture-adapter-and-parity.md` | Completed. |
+| Sprint 01 | `tasks/archive/sprint-01-stabilize-prototype.md` | Completed and archived. |
+| Sprint 02 | `tasks/archive/sprint-02-architecture-adapter-and-parity.md` | Completed and archived. |
 | Sprint 03 | `tasks/archive/sprint-03-routing-and-dht-hardening.md` | Completed and archived. |
 
 ---

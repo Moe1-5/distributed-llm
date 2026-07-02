@@ -11,8 +11,8 @@
 
 ## Active Sprint
 
-**Sprint:** None  
-**Goal:** Awaiting next sprint definition.
+**Sprint:** Sprint 04 - Local System Validation  
+**Goal:** Prove the local end-to-end distributed inference flow before adding real public bootstrap nodes, fault tolerance, monitoring, API keys, incentives, or distributed training/resource features.
 
 ## Tech Stack
 
@@ -31,8 +31,8 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - [ ] Database migrations tracked
 - [x] Documentation map created
 
-**Latest Sprint 3 Update**
+**Latest Sprint 4 Update**
 
-- Sprint 03 routing and DHT hardening implementation is complete and archived.
-- Backend regression tests, optimized Python tests, and compile checks passed.
-- Next step: define the next sprint or run live multi-node P2P system validation.
+- Sprint 04 plan is created.
+- Sprint 01 and Sprint 02 are closed through their archive copies.
+- Next step: run the local one-machine system smoke test and record pass/fail results in the validation plan.
