@@ -153,8 +153,9 @@ class GeneratorStartRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message:        str
-    max_new_tokens: int   = 200
-    temperature:    float = 0.7
+    max_new_tokens: Optional[int]   = None
+    temperature:    Optional[float] = None
+    top_p:          Optional[float] = None
 
     @field_validator("message")
     @classmethod
@@ -165,14 +166,22 @@ class ChatRequest(BaseModel):
 
     @field_validator("max_new_tokens")
     @classmethod
-    def max_tokens_valid(cls, v: int) -> int:
-        assert 1 <= v <= 2048
+    def max_tokens_valid(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None:
+            assert 1 <= v <= 2048
         return v
 
     @field_validator("temperature")
     @classmethod
-    def temperature_valid(cls, v: float) -> float:
-        assert 0.0 < v <= 2.0
+    def temperature_valid(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None:
+            assert 0.0 < v <= 2.0
+        return v
+    @field_validator("top_p")
+    @classmethod
+    def top_p_valid(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None:
+            assert 0.0 < v <= 1.0, "top_p must be between 0 and 1" 
         return v
 
 
@@ -319,7 +328,7 @@ async def start_node(req: NodeStartRequest) -> dict:
             device=req.device,
             hf_token=hf_token,
         )
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, node.start)
         assert node.is_running(), "node.start() completed but is_running() is False"
         return {"status": "started", "info": node.get_info()}
@@ -388,9 +397,11 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
             model_name=req.model_name,
             sequential=sequential,
             hf_token=hf_token,
+            device="cuda"if torch.cuda.is_available() else "cpu",
+            dtype= torch.float16 if torch.cuda.is_available() else torch.float32,
         )
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, generator.load)
         assert generator.is_loaded()
 
@@ -421,6 +432,7 @@ async def chat(req: ChatRequest) -> dict:
         prompt=req.message,
         max_new_tokens=req.max_new_tokens,
         temperature=req.temperature,
+        top_p=req.top_p
     ):
         if "token"  in chunk: full_response += chunk["token"]
         elif "done" in chunk: node_trace = chunk.get("node_trace", [])
@@ -447,18 +459,26 @@ async def stream(websocket: WebSocket) -> None:
                 await websocket.send_json({"error": f"Invalid JSON: {e}"})
                 continue
 
-            message        = str(data.get("message",        "")).strip()
-            max_new_tokens = int(data.get("max_new_tokens", 200))
-            temperature    = float(data.get("temperature",  0.7))
+            message        = str(data.get("message",    "")).strip()
+            raw_tokens     = data.get("max_new_tokens")
+            raw_temp       = data.get("temperature" )
+            raw_top_p      = data.get("top_p")
+
+            max_new_tokens = int(raw_tokens)   if raw_tokens is not None else None
+            temperature    = float(raw_temp)   if raw_temp   is not None else None
+            top_p          = float(raw_top_p)  if raw_top_p  is not None else None
 
             if not message:
                 await websocket.send_json({"error": "message must not be empty"})
                 continue
-            if not (1 <= max_new_tokens <= 2048):
+            if max_new_tokens is not None and not (1 <= max_new_tokens <= 2048):
                 await websocket.send_json({"error": "max_new_tokens out of range"})
                 continue
-            if not (0.0 < temperature <= 2.0):
+            if temperature is not None and not (0.0 < temperature <= 2.0):
                 await websocket.send_json({"error": "temperature out of range"})
+                continue
+            if top_p is not None and not (0.0 < top_p <= 1.0):
+                await websocket.send_json({"error": "top_p out of range"})
                 continue
 
             if generator is not None and generator.is_loaded():
@@ -466,6 +486,7 @@ async def stream(websocket: WebSocket) -> None:
                     prompt=message,
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
+                    top_p=top_p,
                 ):
                     await websocket.send_json(chunk)
             else:

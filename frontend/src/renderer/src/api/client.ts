@@ -132,11 +132,12 @@ export const api = {
     post<{ status: string; error?: string; message?: string }>('/generator/start', params),
 
   // Chat
-  chat: (message: string, maxNewTokens = 200, temperature = 0.7) =>
+  chat: (message: string, maxNewTokens?: number, temperature?: number, topP?: number) =>
     post<{ response: string; node_trace: string[]; error?: string }>('/chat', {
       message,
-      max_new_tokens: maxNewTokens,
-      temperature
+      ...(maxNewTokens !== undefined && { max_new_tokens: maxNewTokens }),
+      ...(temperature !== undefined && { temperature }),
+      ...(topP !== undefined && { top_p: topP })
     }),
 
   // Settings
@@ -181,9 +182,16 @@ export function createStreamSocket(
   ws.onerror = () => onError('WebSocket connection error')
 
   return {
-    send: (message, maxNewTokens = 200, temperature = 0.7) => {
+    send: (message, maxNewTokens?: number, temperature?: number, topP?: number) => {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ message, max_new_tokens: maxNewTokens, temperature }))
+        ws.send(
+          JSON.stringify({
+            message,
+            ...(maxNewTokens !== undefined && { max_new_tokens: maxNewTokens }),
+            ...(temperature !== undefined && { temperature }),
+            ...(topP !== undefined && { top_p: topP })
+          })
+        )
       } else {
         onError('WebSocket not connected')
       }

@@ -145,6 +145,66 @@ class RemoteSequential:
         self.dht_prefix = dht_prefix
         self.num_layers = num_layers
 
+    def _plan_route(self, nodes: list[dict]) -> list[dict]:
+        """Order nodes by layer start and enforce a contiguous, non-overlapping route."""
+        ordered_nodes = sorted(
+            nodes,
+            key=lambda n: (int(n["layer_start"]), int(n["layer_end"])),
+        )
+
+        if not ordered_nodes:
+            raise ValueError("No nodes available for routing")
+
+        prev_end = 0
+        for node in ordered_nodes:
+            layer_start = int(node["layer_start"])
+            layer_end = int(node["layer_end"])
+            peer_id = str(node.get("peer_id", "unknown"))
+
+            assert layer_end > layer_start, (
+                f"Invalid layer range for peer {peer_id}: {layer_start}-{layer_end}"
+            )
+            if layer_start != prev_end:
+                raise ValueError(
+                    f"Route is not contiguous: expected next layer_start={prev_end}, "
+                    f"got {layer_start} for peer {peer_id}"
+                )
+            if layer_end > self.num_layers:
+                raise ValueError(
+                    f"Route exceeds model depth: peer {peer_id} wants layers {layer_start}-{layer_end}, "
+                    f"but model has {self.num_layers} layers"
+                )
+            prev_end = layer_end
+
+        if prev_end != self.num_layers:
+            raise ValueError(
+                f"Route ends at layer {prev_end} but expected {self.num_layers}"
+            )
+
+        return ordered_nodes
+
+    def validate_route(self, nodes: Optional[list[dict]] = None) -> list[dict]:
+        """Validate discovered nodes before a forward pass and return a safe route plan."""
+        discovered_nodes = list(nodes) if nodes is not None else self._discover_nodes()
+        if not discovered_nodes:
+            raise RuntimeError(
+                "No nodes found on the DHT. Make sure at least one node is running."
+            )
+
+        coverage = self._check_coverage(discovered_nodes)
+        if not coverage["complete"]:
+            raise RuntimeError(
+                f"Incomplete layer coverage — missing: {coverage['missing']}"
+            )
+
+        ordered_nodes = self._plan_route(discovered_nodes)
+        route_str = " -> ".join(
+            f"layers {n['layer_start']}–{n['layer_end']} @ {_peer_short(n['peer_id'])}"
+            for n in ordered_nodes
+        )
+        logger.info("[route] validated route: %s", route_str)
+        return ordered_nodes
+
     # ------------------------------------------------------------------
     # Forward pass
     # ------------------------------------------------------------------
@@ -193,31 +253,17 @@ class RemoteSequential:
  
         logger.info(f"[forward] Step 1/3 ✓ — {len(nodes)} node(s) discovered")
  
-        # ── Step 2: coverage check ────────────────────────────────────────────
+        # ── Step 2: route validation ────────────────────────────────────────
         logger.debug(
-            f"[forward] Step 2/3 — checking coverage "
+            f"[forward] Step 2/3 — validating route "
             f"(need layers 0…{self.num_layers - 1}) …"
         )
-        coverage = self._check_coverage(nodes)
- 
-        if not coverage["complete"]:
-            logger.error(
-                f"[forward] ✗ Incomplete layer coverage.\n"
-                f"  covered : {coverage['covered']}\n"
-                f"  missing : {coverage['missing']}\n"
-                f"  Either a node is down or its layer range was mis-configured."
-            )
-            raise RuntimeError(
-                f"Incomplete layer coverage — missing: {coverage['missing']}"
-            )
- 
+        ordered_nodes = self.validate_route(nodes)
         logger.info(
-            f"[forward] Step 2/3 ✓ — all {self.num_layers} layer(s) covered "
-            f"by {len(nodes)} node(s)"
+            f"[forward] Step 2/3 ✓ — route validated for {len(ordered_nodes)} node(s)"
         )
  
         # ── Step 3: sequential RPC calls ─────────────────────────────────────
-        ordered_nodes = sorted(nodes, key=lambda n: n["layer_start"])
         node_trace    = []
  
         route_str = " → ".join(
@@ -249,6 +295,8 @@ class RemoteSequential:
                 rpc_uid=rpc_uid,
                 peer_id=peer_id,
                 hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids
             )
             hop_ms = (time.perf_counter() - t_hop) * 1000
  
@@ -279,11 +327,17 @@ class RemoteSequential:
         rpc_uid:       str,
         peer_id:       str,
         hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids:   Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         last_error = None
         for attempt in range(MAX_RETRIES + 1):
             try:
-                return self._rpc_forward(rpc_uid, peer_id, hidden_states)
+                return self._rpc_forward(
+                    rpc_uid, peer_id, hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids
+                    )
             except Exception as e:
                 last_error = e
                 if attempt < MAX_RETRIES:
@@ -301,6 +355,8 @@ class RemoteSequential:
         rpc_uid:       str,
         peer_id:       str,
         hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Call remote node using its rpc_uid stored in DHT metadata."""
         experts = get_experts(self.dht, [rpc_uid])
@@ -316,7 +372,11 @@ class RemoteSequential:
         # batch, seq_len, hidden = hidden_states.shape
         # flat = hidden_states.reshape(batch * seq_len, hidden)
 
-        output = expert.forward(hidden_states)
+        output = expert.forward(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids
+            )
         if isinstance(output, tuple):
             output = output[0]
 

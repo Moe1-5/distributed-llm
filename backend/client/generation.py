@@ -19,8 +19,9 @@ import torch
 import torch.nn as nn
 from hivemind.utils.logging import get_logger
 from transformers import AutoTokenizer, AutoModelForCausalLM
-
+from constants import SUPPORTED_MODELS, DEFAULT_GEN_CONFIG
 from client.sequential import RemoteSequential
+from models.architecture_adapter import get_architecture_adapter
 
 logger = get_logger(__name__)
 
@@ -45,9 +46,42 @@ class DistributedGenerator:
 
         self.tokenizer:    Optional[object]        = None
         self.embed_tokens: Optional[nn.Embedding]  = None
+        self.position_embeddings: Optional[nn.Embedding] = None
         self.norm:         Optional[nn.Module]     = None
         self.lm_head:      Optional[nn.Linear]     = None
+        self.architecture_adapter = None
+        self._loaded_model: Optional[nn.Module] = None
         self._loaded = False
+
+
+    def _get_gen_config(self) -> dict:
+        """Pull gen config from SUPPORTED_MODELS, fall back to default."""
+        model_entry = SUPPORTED_MODELS.get(self.model_name, {})
+        cfg = model_entry.get("gen", DEFAULT_GEN_CONFIG)
+        logger.info(
+            f"[gen-config] {self.model_name}: "
+            f"temp={cfg['temperature']} top_p={cfg['top_p']} "
+            f"top_k={cfg['top_k']} rep_penalty={cfg['repetition_penalty']}"
+        )
+        return cfg
+
+    def _validate_generation_inputs(
+        self,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> None:
+        assert input_ids.dim() == 2, f"Expected [batch, seq_len], got {input_ids.shape}"
+        assert hidden_states.dim() == 3, (
+            f"Expected hidden_states [batch, seq_len, hidden], got {hidden_states.shape}"
+        )
+        assert attention_mask.shape == input_ids.shape, (
+            f"Expected attention_mask {input_ids.shape}, got {attention_mask.shape}"
+        )
+        assert position_ids.shape == (1, input_ids.shape[1]), (
+            f"Expected position_ids [1, seq_len], got {position_ids.shape}"
+        )
 
     # ------------------------------------------------------------------
     # Setup
@@ -64,6 +98,7 @@ class DistributedGenerator:
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, **token_kwargs)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        assert self.tokenizer.eos_token_id is not None, "Tokenizer has no EOS token"
 
         model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
@@ -74,19 +109,59 @@ class DistributedGenerator:
         )
 
         self.embed_tokens = self._extract_embed_tokens(model)
+        self.position_embeddings = self._extract_position_embeddings(model)
         self.norm         = self._extract_norm(model)
         self.lm_head      = self._extract_lm_head(model)
+        self.architecture_adapter = get_architecture_adapter(self.model_name)
+        logger.info(
+            "[adapter] selected %s for %s",
+            type(self.architecture_adapter).__name__,
+            self.model_name,
+        )
+        self._loaded_model = model
 
-        for component in (self.embed_tokens, self.norm, self.lm_head):
+        components = [self.embed_tokens, self.norm, self.lm_head]
+        if self.position_embeddings is not None:
+            components.append(self.position_embeddings)
+        for component in components:
             component.to(self.device)
             component.eval()
             component.requires_grad_(False)
+
+        self._validate_loaded_components()
 
         del model
         torch.cuda.empty_cache()
 
         self._loaded = True
         logger.info("Local components loaded.")
+
+    def _validate_loaded_components(self) -> None:
+        missing = []
+        for name in (
+            "tokenizer",
+            "embed_tokens",
+            "norm",
+            "lm_head",
+            "architecture_adapter",
+            "_loaded_model",
+        ):
+            if getattr(self, name) is None:
+                missing.append(name)
+        if missing:
+            raise RuntimeError(
+                "Generator is not ready; missing local component(s): "
+                + ", ".join(missing)
+            )
+
+        expected_hidden_size = SUPPORTED_MODELS.get(self.model_name, {}).get("hidden_size")
+        actual_hidden_size = getattr(self.embed_tokens, "embedding_dim", None)
+        if expected_hidden_size is not None and actual_hidden_size is not None:
+            if int(actual_hidden_size) != int(expected_hidden_size):
+                raise RuntimeError(
+                    f"Generator hidden size mismatch for {self.model_name}: "
+                    f"registry={expected_hidden_size}, embeddings={actual_hidden_size}"
+                )
 
     # ------------------------------------------------------------------
     # Generation
@@ -95,36 +170,81 @@ class DistributedGenerator:
     async def generate_stream(
         self,
         prompt:         str,
-        max_new_tokens: int   = 200,
-        temperature:    float = 0.7,
-        top_p:          float = 0.9,
+        max_new_tokens: Optional[int]   = None,
+        temperature:    Optional[float] = None,
+        top_p:          Optional[float] = None,
     ) -> AsyncGenerator[dict, None]:
         assert self._loaded,          "Generator not loaded — call load() first"
         assert prompt.strip(),        "prompt must not be empty"
-        assert 1 <= max_new_tokens <= 2048
-        assert 0.0 < temperature <= 2.0
-        assert 0.0 < top_p <= 1.0
+
+        cfg = self._get_gen_config()
+        logger.info(
+            "[gen] starting generation prompt=%r max_new_tokens=%s temperature=%s top_p=%s",
+            prompt,
+            max_new_tokens if max_new_tokens is not None else cfg["max_new_tokens"],
+            temperature if temperature is not None else cfg["temperature"],
+            top_p if top_p is not None else cfg["top_p"],
+        )
+
+        # caller overrides win; otherwise fall back to per-model defaults
+        max_new_tokens = max_new_tokens if max_new_tokens is not None else cfg["max_new_tokens"]
+        temperature    = temperature    if temperature    is not None else cfg["temperature"]
+        top_p          = top_p          if top_p          is not None else cfg["top_p"]
+        top_k          = cfg["top_k"]
+        rep_penalty    = cfg["repetition_penalty"]
+
 
         try:
             input_ids     = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
             generated_ids = input_ids.clone()
             node_trace:   list[str] = []
+            logger.debug(
+                "[gen] prompt tokenized to ids shape=%s eos_token_id=%s",
+                tuple(input_ids.shape),
+                self.tokenizer.eos_token_id,
+            )
 
             for step in range(max_new_tokens):
-                with torch.no_grad():
-                    hidden_states = self.embed_tokens(generated_ids)
-
                 position_ids = torch.arange(
-                    generated_ids.shape[1], device=self.device
+                    generated_ids.shape[1],
+                    device=self.device,
+                    dtype=torch.long,
                 ).unsqueeze(0)
 
-                hidden_states, trace = self.sequential.forward(
+                attention_mask = torch.ones(
+                    generated_ids.shape,
+                    device=self.device,
+                    dtype=torch.bool,
+                )
+
+                with torch.no_grad():
+                    hidden_states = self._prepare_hidden_states(
+                        generated_ids,
+                        attention_mask,
+                        position_ids,
+                    )
+
+                logger.debug(
+                    "[gen] step=%s input_shape=%s attention_shape=%s position_shape=%s",
+                    step,
+                    tuple(generated_ids.shape),
+                    tuple(attention_mask.shape),
+                    tuple(position_ids.shape),
+                )
+                self._validate_generation_inputs(
+                    input_ids=generated_ids,
                     hidden_states=hidden_states,
+                    attention_mask=attention_mask,
                     position_ids=position_ids,
                 )
 
-                if step == 0:
-                    node_trace = trace
+                hidden_states, trace = self.sequential.forward(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                )
+
+                node_trace = trace
 
                 hidden_states = hidden_states.to(self.device)
 
@@ -135,16 +255,30 @@ class DistributedGenerator:
                     logits        = self.lm_head(hidden_states)
 
                 next_token_logits = logits[:, -1, :]
+                assert next_token_logits.dim() == 2, (
+                    f"Expected [batch, vocab], got {next_token_logits.shape}"
+                )
+                logger.debug(
+                    "[gen] step=%s logits_shape=%s",
+                    step,
+                    tuple(next_token_logits.shape),
+                )
                 next_token_id     = self._sample(
                     next_token_logits,
                     temperature=temperature,
                     top_p=top_p,
+                    top_k=top_k,
+                    repetition_penalty=rep_penalty,
+                    generated_ids=generated_ids,
                 )
 
                 assert next_token_id.shape == (1, 1), (
                     f"Expected shape (1,1), got {next_token_id.shape}"
                 )
 
+                assert next_token_id.dim() == 2 and next_token_id.shape[1] == 1, (
+                    f"Expected sampled token shape [1,1], got {next_token_id.shape}"
+                )
                 token_text = self.tokenizer.decode(
                     next_token_id[0],
                     skip_special_tokens=True,
@@ -164,21 +298,62 @@ class DistributedGenerator:
             logger.error(f"Generation error: {e}", exc_info=True)
             yield {"error": str(e)}
 
+    def _prepare_hidden_states(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.architecture_adapter is not None and self._loaded_model is not None:
+            return self.architecture_adapter.prepare_inputs(
+                model=self._loaded_model,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
+
+        assert self.embed_tokens is not None, "embed_tokens is not loaded"
+        hidden_states = self.embed_tokens(input_ids)
+
+        if self.position_embeddings is not None:
+            position_embeddings = self.position_embeddings(position_ids)
+            hidden_states = hidden_states + position_embeddings
+
+        return hidden_states
+
     # ------------------------------------------------------------------
     # Sampling
     # ------------------------------------------------------------------
 
     def _sample(
         self,
-        logits:      torch.Tensor,
-        temperature: float = 0.7,
-        top_p:       float = 0.9,
+        logits:             torch.Tensor,
+        temperature:        float = 0.8,
+        top_p:              float = 0.92,
+        top_k:              int   = 50,
+        repetition_penalty: float = 1.1,
+        generated_ids:      Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert logits.dim() == 2, f"Expected [1, vocab], got {logits.shape}"
 
+        # 1. Repetition penalty — penalise tokens already in the sequence
+        if repetition_penalty != 1.0 and generated_ids is not None:
+            for token_id in set(generated_ids[0].tolist()):
+                if logits[0, token_id] < 0:
+                    logits[0, token_id] *= repetition_penalty
+                else:
+                    logits[0, token_id] /= repetition_penalty
+
+        # 2. Temperature
         if temperature > 0:
             logits = logits / temperature
 
+        # 3. Top-k — zero out everything outside top k logits
+        if top_k > 0:
+            top_k_values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < top_k_values[:, -1].unsqueeze(-1)] = float('-inf')
+
+        # 4. Top-p (nucleus sampling)
         probs = torch.softmax(logits, dim=-1)
 
         if top_p < 1.0:
@@ -186,10 +361,10 @@ class DistributedGenerator:
             cumulative = torch.cumsum(sorted_probs, dim=-1)
             sorted_probs[(cumulative - sorted_probs) > top_p] = 0.0
             total = sorted_probs.sum(dim=-1, keepdim=True)
-            assert total > 0, "All probabilities zeroed in top-p sampling"
-            sorted_probs  = sorted_probs / total
-            sampled       = torch.multinomial(sorted_probs, num_samples=1)
-            next_token    = sorted_indices.gather(-1, sampled)
+            assert total > 0, "All probabilities zeroed out in top-p filtering"
+            sorted_probs = sorted_probs / total
+            sampled      = torch.multinomial(sorted_probs, num_samples=1)
+            next_token   = sorted_indices.gather(-1, sampled)
         else:
             next_token = torch.argmax(probs, dim=-1, keepdim=True)
 
@@ -207,6 +382,15 @@ class DistributedGenerator:
         if hasattr(model, "model") and hasattr(model.model, "decoder"):
             return model.model.decoder.embed_tokens
         raise ValueError(f"Cannot find embed_tokens in {type(model).__name__}")
+
+    def _extract_position_embeddings(self, model: nn.Module) -> Optional[nn.Embedding]:
+        if hasattr(model, "model") and hasattr(model.model, "decoder"):
+            decoder = model.model.decoder
+            if hasattr(decoder, "embed_positions"):
+                return decoder.embed_positions
+        if hasattr(model, "transformer") and hasattr(model.transformer, "position_embeddings"):
+            return model.transformer.position_embeddings
+        return None
 
     def _extract_norm(self, model: nn.Module) -> nn.Module:
         if hasattr(model, "model") and hasattr(model.model, "norm"):

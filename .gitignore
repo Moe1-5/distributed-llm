@@ -29,6 +29,10 @@ Thumbs.db
 *.env
 .env
 .env.*
+!.env.example
+
+# Assistant/session state
+.claude/sprint-sessions/
 
 # Hivemind / model cache
 *.bin

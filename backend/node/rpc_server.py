@@ -40,8 +40,14 @@ class _HandlerModule(nn.Module):
         assert handler.is_loaded(), "Handler must be loaded before wrapping"
         self._handler = handler
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self._handler.forward(hidden_states=hidden_states)
+    def forward(
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.Tensor] = None,
+            ) -> torch.Tensor:
+        
+        return self._handler.forward(hidden_states=hidden_states, attention_mask=attention_mask, position_ids=position_ids)
 
 
 class RPCServer:
@@ -88,17 +94,46 @@ class RPCServer:
             logger.info(f"Starting RPC | uid={self._uid} | hidden_size={hidden_size}")
 
             module = _HandlerModule(self.handler)
+            # ── Tensor schemas ────────────────────────────────────────────────
+            # args_schema   → positional args to forward() after self
+            # kwargs_schema → keyword args; hivemind stores the keys as
+            #                 keyword_names and validates them on every call.
+            #
+            # args_schema:   (hidden_states,)
+            # kwargs_schema: {attention_mask: descriptor, position_ids: descriptor}
+            #
+            # Both masks use the same shape as hidden_states. BatchTensorDescriptor
+            # takes (seq_len, hidden_size) as the per-sample shape; hivemind adds
+            # the batch dim automatically.
+            #
+            # Note: attention_mask is typically [batch, seq_len] (2D), not 3D.
+            # If your handler reshapes it internally, you can use a 1D descriptor
+            # here — hivemind only uses this for serialization sizing, not strict
+            # shape enforcement.
+            
+            hidden_descriptor = BatchTensorDescriptor(2048, hidden_size)
 
-            # BatchTensorDescriptor tells hivemind the per-sample tensor shape.
-            # We pass (hidden_size,) — hivemind handles batching internally.
-            descriptor = BatchTensorDescriptor(2048, hidden_size)
+            # attention_mask is [batch, seq_len] → per-sample shape is (seq_len,)
+            # We use (2048,) to match the max sequence length.
+            mask_descriptor   = BatchTensorDescriptor(2048)
 
             backend = ModuleBackend(
                 name=self._uid,
                 module=module,
-                args_schema=(descriptor,),
-                outputs_schema=(descriptor,),
+                args_schema=(hidden_descriptor,),
+                kwargs_schema={
+                    "attention_mask": mask_descriptor,
+                    "position_ids"  : mask_descriptor,
+                },
+                outputs_schema=(hidden_descriptor,),
                 max_batch_size=4096,
+            )
+
+            logger.info(
+                f"[RPCServer] ModuleBackend registered | uid={self._uid}\n"
+                f"  args_schema    : hidden_states {hidden_descriptor}\n"
+                f"  kwargs_schema  : attention_mask, position_ids\n"
+                # f"  keyword_names  : {backend.get_info('keyword_names', '(not yet set)')}"
             )
 
             self._server = hivemind.moe.Server(

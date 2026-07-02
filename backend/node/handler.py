@@ -38,6 +38,7 @@ class InferenceHandler:
         self.hf_token    = hf_token
 
         self.layers: Optional[nn.ModuleList] = None
+        self._rotary_embedding: Optional[nn.Module] = None
         self._lock   = threading.Lock()
         self._loaded = False
 
@@ -93,29 +94,130 @@ class InferenceHandler:
         )
 
         hidden_states = hidden_states.to(self.device, dtype=self.dtype)
+        position_ids = self._prepare_position_ids(position_ids, hidden_states)
+        attention_mask = self._prepare_decoder_attention_mask(
+            attention_mask,
+            hidden_states,
+        )
+        position_embeddings = self._prepare_position_embeddings(
+            hidden_states,
+            position_ids,
+        )
 
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(self.device)
-
-        if position_ids is not None:
-            position_ids = position_ids.to(self.device)
-        else:
-            seq_len      = hidden_states.shape[1]
-            position_ids = torch.arange(seq_len, device=self.device).unsqueeze(0)
-
-# THIS WAS CHANGED TOO -- FROM INFERENCE_MODE TO NO_GRAD 
-        
         with self._lock:
             with torch.no_grad():
                 for layer in self.layers:
-                    out           = layer(
+                    layer_kwargs = {
+                        "attention_mask": attention_mask,
+                        "position_ids": position_ids,
+                    }
+                    if position_embeddings is not None:
+                        layer_kwargs["position_embeddings"] = position_embeddings
+
+                    out = layer(
                         hidden_states,
-                        attention_mask=attention_mask,
-                        position_ids=position_ids,
+                        **layer_kwargs,
                     )
                     hidden_states = out[0] if isinstance(out, tuple) else out
 
         return hidden_states.cpu()
+
+    def _prepare_position_ids(
+        self,
+        position_ids: Optional[torch.Tensor],
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, seq_len, _ = hidden_states.shape
+        if position_ids is None:
+            return torch.arange(
+                seq_len,
+                device=hidden_states.device,
+                dtype=torch.long,
+            ).unsqueeze(0).expand(batch_size, -1)
+
+        position_ids = position_ids.to(hidden_states.device, dtype=torch.long)
+        if position_ids.shape != (batch_size, seq_len):
+            raise ValueError(
+                f"position_ids must be [batch, seq_len] = {(batch_size, seq_len)}, "
+                f"got {tuple(position_ids.shape)}"
+            )
+        return position_ids
+
+    def _prepare_decoder_attention_mask(
+        self,
+        attention_mask: Optional[torch.Tensor],
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, seq_len, _ = hidden_states.shape
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+
+        if attention_mask is None:
+            token_mask = torch.ones(
+                (batch_size, seq_len),
+                device=device,
+                dtype=torch.bool,
+            )
+        else:
+            attention_mask = attention_mask.to(device)
+            if attention_mask.dim() == 4:
+                return attention_mask.to(dtype=dtype)
+            if attention_mask.dim() != 2:
+                raise ValueError(
+                    "attention_mask must be [batch, seq_len] or "
+                    f"[batch, 1, tgt_len, src_len], got {tuple(attention_mask.shape)}"
+                )
+            if attention_mask.shape != (batch_size, seq_len):
+                raise ValueError(
+                    f"attention_mask must be [batch, seq_len] = {(batch_size, seq_len)}, "
+                    f"got {tuple(attention_mask.shape)}"
+                )
+            token_mask = attention_mask.to(dtype=torch.bool)
+
+        causal_mask = torch.ones(
+            (seq_len, seq_len),
+            device=device,
+            dtype=torch.bool,
+        ).tril()
+        allowed = causal_mask.unsqueeze(0).unsqueeze(0)
+        allowed = allowed & token_mask[:, None, None, :]
+
+        decoder_mask = torch.zeros(
+            (batch_size, 1, seq_len, seq_len),
+            device=device,
+            dtype=dtype,
+        )
+        return decoder_mask.masked_fill(~allowed, torch.finfo(dtype).min)
+
+    def _prepare_position_embeddings(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        model_name = self.model_name.lower()
+        if "llama" not in model_name and "mistral" not in model_name:
+            return None
+
+        if self._rotary_embedding is None:
+            assert self.layers is not None and len(self.layers) > 0
+            first_layer = self.layers[0]
+            config = getattr(getattr(first_layer, "self_attn", None), "config", None)
+            if config is None:
+                raise ValueError(
+                    f"{self.model_name} layers require rotary embeddings but no layer config was found"
+                )
+            if "mistral" in model_name:
+                from transformers.models.mistral.modeling_mistral import MistralRotaryEmbedding
+
+                self._rotary_embedding = MistralRotaryEmbedding(config=config)
+            else:
+                from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+
+                self._rotary_embedding = LlamaRotaryEmbedding(config=config)
+            self._rotary_embedding.to(self.device)
+            self._rotary_embedding.eval()
+
+        return self._rotary_embedding(hidden_states, position_ids)
 
     # ------------------------------------------------------------------
     # Status

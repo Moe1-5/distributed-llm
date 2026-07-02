@@ -40,6 +40,15 @@ SUPPORTED_MODELS: dict[str, dict] = {
         "gated":       False,
         "description": "125M params — open model, no token needed, good for testing",
         "vram_gb":     1.0,
+        "gen": {
+            # Small base model — collapses into loops very easily.
+            # High rep penalty and tight top_k are essential.
+            "temperature":        0.7,
+            "top_p":              0.95,
+            "top_k":              50,
+            "repetition_penalty": 1.3,
+            "max_new_tokens":     200,
+        },
     },
     "facebook/opt-1.3b": {
         "num_layers":  24,
@@ -47,6 +56,14 @@ SUPPORTED_MODELS: dict[str, dict] = {
         "gated":       False,
         "description": "1.3B params — open model, decent quality",
         "vram_gb":     3.0,
+        "gen": {
+            # More stable than 125m but still a base model.
+            "temperature":        0.8,
+            "top_p":              0.92,
+            "top_k":              50,
+            "repetition_penalty": 1.15,
+            "max_new_tokens":     512,
+        },
     },
     "meta-llama/Llama-3.2-1B": {
         "num_layers":  16,
@@ -54,6 +71,14 @@ SUPPORTED_MODELS: dict[str, dict] = {
         "gated":       True,
         "description": "1B params — requires HuggingFace token and license approval",
         "vram_gb":     2.5,
+        "gen": {
+            # Llama 3.2 is instruction-aware even at 1B — less prone to loops.
+            "temperature":        0.8,
+            "top_p":              0.9,
+            "top_k":              40,
+            "repetition_penalty": 1.1,
+            "max_new_tokens":     512,
+        },
     },
     "meta-llama/Llama-3.2-3B": {
         "num_layers":  28,
@@ -61,6 +86,13 @@ SUPPORTED_MODELS: dict[str, dict] = {
         "gated":       True,
         "description": "3B params — requires HuggingFace token and license approval",
         "vram_gb":     6.0,
+        "gen": {
+            "temperature":        0.8,
+            "top_p":              0.9,
+            "top_k":              40,
+            "repetition_penalty": 1.08,
+            "max_new_tokens":     768,
+        },
     },
     "mistralai/Mistral-7B-v0.1": {
         "num_layers":  32,
@@ -68,18 +100,26 @@ SUPPORTED_MODELS: dict[str, dict] = {
         "gated":       True,
         "description": "7B params — requires HuggingFace token",
         "vram_gb":     14.0,
+        "gen": {
+            # Mistral is a strong base model — stable with mild settings.
+            "temperature":        0.85,
+            "top_p":              0.9,
+            "top_k":              50,
+            "repetition_penalty": 1.1,
+            "max_new_tokens":     1024,
+        },
     },
 }
 
-# ---------------------------------------------------------------------------
-# DHT configuration
-# ---------------------------------------------------------------------------
+# Fallback used when a model isn't in SUPPORTED_MODELS
+DEFAULT_GEN_CONFIG: dict = {
+    "temperature":        0.8,
+    "top_p":              0.92,
+    "top_k":              50,
+    "repetition_penalty": 1.1,
+    "max_new_tokens":     512,
+}
 
-# Prefix used for all DHT keys in our swarm.
-# Must be unique — prevents collisions with other hivemind networks.
-DHT_PREFIX = "distribllm"
-
-# How long a node's DHT entry lives before it expires (seconds).
-# Nodes re-announce every ANNOUNCE_INTERVAL to keep entries alive.
+DHT_PREFIX        = "distribllm"
 DHT_EXPIRY_TIME   = 60
 ANNOUNCE_INTERVAL = 30
