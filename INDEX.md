@@ -79,7 +79,7 @@
 | `docs/IMPLEMENTATION.md`           | Practical implementation roadmap and long-term phases.    |
 | `docs/PETALS_COMPARISON.md`        | Comparison with Petals and project-owned public swarm direction. |
 | `docs/ERRORS_AND_DEBUGGING.md`     | Known errors, symptoms, and debugging guidance.           |
-| `docs/VALIDATION_AND_TEST_PLAN.md` | Validation strategy before trusting inference.            |
+| `docs/VALIDATION_AND_TEST_PLAN.md` | Validation phase gates before trusting inference or adding advanced features. |
 | `docs/architecture.md`             | Starter-system architecture summary adapted to this repo. |
 | `docs/decisions.md`                | Append-only ADR log.                                      |
 

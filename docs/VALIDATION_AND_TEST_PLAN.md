@@ -2,6 +2,130 @@
 
 This project needs tests at several levels because distributed inference can fail in many ways that look like "bad text output."
 
+## Purpose of This Document
+
+This document is the source of truth for what has to be proven before the project moves from prototype work into broader public-swarm features such as real bootstrap nodes, fault tolerance, API keys, incentives, and distributed training resources.
+
+Future agents should update this document after each meaningful validation pass so the project history shows which functionality has actually been tested, which tests failed, and which assumptions are still unproven. Do not mark a phase complete just because unit tests pass; distributed inference needs staged system validation.
+
+## Current Testing Phase Gate
+
+The current project priority is to prove the core distributed LLM inference path before adding advanced features.
+
+Recommended order:
+
+```text
+1. Backend regression tests
+2. Local one-machine system smoke test
+3. Local bootstrap + local serving node + local generator test
+4. Local single-node full-layer inference test
+5. Local multi-node layer-split inference test
+6. Real multi-machine distributed network test
+7. Stable real bootstrap node deployment
+8. Only then: fault tolerance, monitor, API keys, incentives, and training resources
+```
+
+### Phase A: Backend Regression Tests
+
+- [x] Run backend regression tests with `uv run pytest`.
+- [x] Run optimized Python validation with `uv run python -O -m pytest tests/test_generation_readiness.py`.
+- [x] Run backend compile check with `uv run python -m compileall api client node models -q`.
+
+Last known status: passed during Sprint 03 closure.
+
+### Phase B: Local One-Machine Smoke Test
+
+- [ ] Start a local bootstrap node.
+- [ ] Start the backend API.
+- [ ] Start the frontend or call backend endpoints directly.
+- [ ] Confirm `/status` responds.
+- [ ] Confirm `/models` returns supported models.
+- [ ] Confirm the frontend/backend URL is correct for the local machine.
+
+Suggested first model: `facebook/opt-125m`.
+
+### Phase C: Local Single-Node Full-Layer Inference Test
+
+Start one local serving node for all layers of the smallest model.
+
+Example:
+
+```text
+model: facebook/opt-125m
+layer_start: 0
+layer_end: 12
+dht_prefix: distribllm
+device: cpu
+```
+
+Checklist:
+
+- [ ] Bootstrap starts and prints reachable multiaddresses.
+- [ ] Serving node starts and loads all requested layers.
+- [ ] Serving node announces metadata to the DHT.
+- [ ] `/nodes` shows the serving node.
+- [ ] Generator starts with the same model and DHT prefix.
+- [ ] Generator validates/discovers a full route.
+- [ ] A short prompt returns without crashing.
+- [ ] Output is at least structurally coherent enough to prove the path is executing.
+- [ ] Any failure is recorded in `ISSUES.md` with logs and reproduction steps.
+
+### Phase D: Local Multi-Node Layer-Split Inference Test
+
+Run multiple local serving nodes, each with a contiguous layer slice.
+
+Example:
+
+```text
+node A: layers 0-4
+node B: layers 4-8
+node C: layers 8-12
+```
+
+Checklist:
+
+- [ ] Each node has a unique RPC UID.
+- [ ] DHT discovery sees all serving nodes.
+- [ ] Route planning selects the exact route `0-4 -> 4-8 -> 8-12`.
+- [ ] No layer is skipped.
+- [ ] No layer is executed twice.
+- [ ] A short prompt returns without crashing.
+- [ ] Output behavior is compared with the single-node full-layer test.
+
+### Phase E: Real Multi-Machine Distributed Network Test
+
+Run the system across real devices.
+
+Suggested layout:
+
+```text
+machine/server 1: bootstrap node
+machine 2: serving node for first layer slice
+machine 3: serving node for second layer slice
+machine 4 or one of the above: generator + frontend
+```
+
+Checklist:
+
+- [ ] Real bootstrap node is reachable from other machines.
+- [ ] Serving nodes join using the configured bootstrap address.
+- [ ] DHT metadata appears under the expected project prefix.
+- [ ] Generator discovers only compatible model nodes.
+- [ ] Route validation passes.
+- [ ] Inference returns through the distributed route.
+- [ ] Failures caused by firewall, NAT, stale peer IDs, or unreachable ports are documented.
+
+### Phase F: Public-Swarm Readiness Gate
+
+Do not start token incentives, API-key product flows, or distributed training features until these are true:
+
+- [ ] Local single-node inference is proven.
+- [ ] Local multi-node split inference is proven.
+- [ ] Real multi-machine inference is proven.
+- [ ] Route readiness is exposed before inference starts.
+- [ ] Basic cancellation or recovery exists for stuck inference.
+- [ ] Bootstrap deployment and replacement process is documented.
+
 ## 1. Static Validation
 
 ### Backend
@@ -188,4 +312,3 @@ A model should be marked "supported" only when:
 - multi-node route parity passes
 - readiness checks catch missing/wrong routes
 - frontend can start, stream, cancel, and recover from errors
-
