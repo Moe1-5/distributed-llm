@@ -6,7 +6,7 @@
 ## Project
 
 **Name:** DistribLLM  
-**Description:** Electron + FastAPI prototype for private peer-to-peer distributed LLM inference over Hivemind DHT/RPC.  
+**Description:** Electron + FastAPI prototype for project-owned public/discoverable peer-to-peer distributed LLM inference over Hivemind DHT/RPC.  
 **Stage:** [ ] Scaffolding [x] MVP prototype [ ] Feature-complete [ ] Production
 
 ## Active Sprint

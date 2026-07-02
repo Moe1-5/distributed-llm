@@ -1,6 +1,6 @@
 # Implementation Plan
 
-This plan turns the current prototype into a more reliable Petals-inspired distributed inference system.
+This plan turns the current prototype into a reliable Petals-inspired distributed inference system for this project's own public/discoverable swarm. The network should be open enough for external devices to join and contribute resources, but isolated from public Petals/IPFS infrastructure by project-owned bootstrap nodes, DHT namespaces, metadata contracts, model registry, and routing rules.
 
 ## Phase 0: Stabilize the Current Prototype
 
@@ -205,6 +205,75 @@ Goal: make the UI reflect actual distributed readiness.
 - model compatibility warnings
 - backend URL configuration instead of hardcoded IP
 
+## Phase 8: Fault Tolerance and Public Swarm Operations
+
+Goal: make the network resilient enough for public participation.
+
+### Add
+
+- route failover when a selected node disappears
+- retry with alternate providers for the same layer span
+- node health scores based on latency, failures, and last successful probe
+- stale member cleanup or expiry-aware discovery
+- route caching with invalidation when health changes
+- bootstrap-node deployment and rotation plan
+- protocol/version fields in DHT metadata so incompatible nodes can be rejected
+
+## Phase 9: Network Monitor Experience
+
+Goal: help users understand the distributed network visually.
+
+### Add
+
+- animated graph of connected peers
+- layer-range labels per node
+- route animation during inference
+- node health, latency, and contribution status
+- model/prefix filters
+- clear distinction between bootstrap nodes, serving nodes, and generator clients
+
+## Phase 10: Incentives and Contributor Accounting
+
+Goal: create a path toward token-based incentives for devices that serve useful compute.
+
+### Add
+
+- contribution accounting for served layer requests
+- signed node identity and request receipts
+- proof-of-work or proof-of-service design for completed inference hops
+- anti-spam and anti-fake-work rules
+- token/reward ledger design
+- payout rules based on reliability, latency, served model, and resource cost
+
+This phase should wait until core inference, health checks, and route correctness are reliable. Incentives before correctness would reward untrusted or useless work.
+
+## Phase 11: API Access for Served Models
+
+Goal: let users request API keys for models inferenced by the distributed network.
+
+### Add
+
+- API key issuance and revocation
+- per-key usage limits and accounting
+- model access policy
+- request authentication
+- backend endpoints for non-UI inference clients
+- billing or credit integration if incentives are enabled
+
+## Phase 12: Distributed Training and Fine-Tuning Resources
+
+Goal: optionally expand beyond inference into distributed training/fine-tuning resource requests.
+
+This is intentionally last because training is harder than inference. It requires stronger scheduling, data privacy rules, gradient/optimizer handling, checkpointing, fault tolerance, and incentive design.
+
+### Possible Direction
+
+- users submit training/fine-tuning jobs
+- available devices advertise compute, memory, and availability
+- scheduler assigns work across resources
+- network tracks completed work and failures
+- model checkpoints are stored and resumed safely
+
 ## Priority Order
 
 1. Route validation and model filtering.
@@ -214,6 +283,11 @@ Goal: make the UI reflect actual distributed readiness.
 5. Local parity tests.
 6. Health probes.
 7. Session/KV cache.
+8. Public swarm operations and fault tolerance.
+9. Network monitor visualization.
+10. API-key access for inferenced models.
+11. Incentives and contributor accounting.
+12. Distributed training/fine-tuning resource requests.
 
 ## Definition of Done for Correct Inference
 
@@ -226,4 +300,3 @@ Before a model is considered supported:
 - overlapping-node route is rejected or resolved correctly
 - WebSocket streaming can be cancelled
 - frontend shows readiness before send
-

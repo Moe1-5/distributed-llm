@@ -36,9 +36,18 @@ In this project:
 
 Petals has a more advanced routing layer that tracks peer availability and selects usable spans rather than blindly calling every discovered peer.
 
-### Private Swarm Option
+### Project-Owned Public Swarm
 
-Petals can run over a swarm of peers. This project intentionally uses `use_ipfs=False` and a private bootstrap node so it does not accidentally join public Petals/IPFS infrastructure.
+Petals can run over a swarm of peers. This project should also support broad peer participation, but for this system's own network rather than the public Petals/IPFS infrastructure.
+
+The target is not "local-only private networking." The target is a project-owned public/discoverable swarm:
+
+- outside devices can join and serve resources
+- nodes use this project's bootstrap nodes and DHT prefixes
+- metadata and model compatibility rules are controlled by this project
+- future protocol changes can add project-specific routing, incentives, accounting, and access control
+
+Today the code uses `use_ipfs=False` to avoid accidentally joining unrelated public infrastructure. Longer term, the network can still be public in reachability while remaining isolated to this system.
 
 ## What Petals Has That This Project Does Not Yet Have
 
@@ -125,6 +134,30 @@ Needed direction:
 - decide whether one backend is one local participant, or whether it can manage multiple nodes/generators
 - if multiple, replace globals with registries keyed by model, prefix, node id, or session id
 
+### 7. Fault Tolerance and Incentives
+
+Petals-style public participation requires strong fault tolerance because peers can appear, disappear, slow down, or serve bad data.
+
+Needed direction:
+
+- health scoring and alternate routes
+- request receipts or contribution records
+- proof-of-service/proof-of-work design for served layer calls
+- token-based rewards for useful resources
+- anti-abuse checks before incentives are enabled
+
+### 8. Distributed Training as a Later Expansion
+
+Petals includes collaborative fine-tuning ideas. This project may eventually let users request distributed resources to train or fine-tune LLMs.
+
+Needed direction:
+
+- job scheduling
+- checkpointing and recovery
+- privacy and data-handling rules
+- stronger proof/accounting than inference
+- resource marketplace design
+
 ## Design Lesson From Petals
 
 The biggest lesson is that distributed LLM inference is not just "send tensors through remote layers." The hard parts are:
@@ -134,6 +167,7 @@ The biggest lesson is that distributed LLM inference is not just "send tensors t
 - managing session state
 - handling peers that appear, disappear, or slow down
 - validating readiness before user-facing inference starts
+- designing incentives only after useful work can be measured reliably
 
 This project has a good prototype skeleton. The next step is to make correctness explicit before expanding model support.
 
@@ -144,4 +178,3 @@ This project has a good prototype skeleton. The next step is to make correctness
 - Source tree: https://github.com/bigscience-workshop/petals/tree/main/src/petals
 - Client routing area: https://github.com/bigscience-workshop/petals/tree/main/src/petals/client
 - Server area: https://github.com/bigscience-workshop/petals/tree/main/src/petals/server
-

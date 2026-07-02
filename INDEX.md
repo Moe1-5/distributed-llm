@@ -72,12 +72,12 @@
 | File                               | What's inside                                             |
 | ---------------------------------- | --------------------------------------------------------- |
 | `docs/INDEX.md`                    | Docs-only routing index.                                  |
-| `docs/README.md`                   | Documentation landing page and project goal.              |
+| `docs/README.md`                   | Documentation landing page, project goal, and end vision. |
 | `docs/REPO_MAP.md`                 | Source-file responsibilities.                             |
-| `docs/CURRENT_ARCHITECTURE.md`     | Current architecture and limitations.                     |
+| `docs/CURRENT_ARCHITECTURE.md`     | Current architecture, network goal, and limitations.      |
 | `docs/FLOWS.md`                    | Runtime flows.                                            |
-| `docs/IMPLEMENTATION.md`           | Practical implementation roadmap.                         |
-| `docs/PETALS_COMPARISON.md`        | Comparison with Petals.                                   |
+| `docs/IMPLEMENTATION.md`           | Practical implementation roadmap and long-term phases.    |
+| `docs/PETALS_COMPARISON.md`        | Comparison with Petals and project-owned public swarm direction. |
 | `docs/ERRORS_AND_DEBUGGING.md`     | Known errors, symptoms, and debugging guidance.           |
 | `docs/VALIDATION_AND_TEST_PLAN.md` | Validation strategy before trusting inference.            |
 | `docs/architecture.md`             | Starter-system architecture summary adapted to this repo. |

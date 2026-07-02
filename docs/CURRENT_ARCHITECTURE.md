@@ -12,6 +12,12 @@ The backend can act as:
 
 Those roles are all hosted inside one FastAPI process today. This makes local testing simple, but it also creates global state limitations.
 
+## Network Goal
+
+The target network is a project-owned public/discoverable swarm, not a local-only private network and not the public Petals/IPFS network. Devices should eventually be able to join from outside and contribute inference resources, but they should join this project's bootstrap nodes, DHT prefixes, metadata contracts, model registry, and routing rules.
+
+The current `use_ipfs=False` setting prevents accidental connection to unrelated public infrastructure. It does not mean the long-term network must stay local-only.
+
 ## Main Components
 
 ### Electron Frontend
@@ -154,4 +160,3 @@ The code currently trusts:
 - calling raw layer modules reproduces the original model forward path
 
 Those assumptions are the main source of current bugs.
-

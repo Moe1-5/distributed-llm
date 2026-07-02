@@ -5,12 +5,12 @@
 
 | Topic | File | What's inside |
 |-------|------|---------------|
-| Documentation landing page | `README.md` | Start-here guide and current project goal |
+| Documentation landing page | `README.md` | Start-here guide, current project goal, and end vision |
 | Source file map | `REPO_MAP.md` | Responsibilities for backend, frontend, and generated artifacts |
 | Current architecture | `CURRENT_ARCHITECTURE.md` | Backend, frontend, DHT, node, RPC, generation, and limitations |
 | Runtime flows | `FLOWS.md` | Bootstrap, serving, generator, streaming, dashboard, settings, and failure flows |
-| Implementation roadmap | `IMPLEMENTATION.md` | Phased plan for Petals-inspired correctness and reliability |
-| Petals comparison | `PETALS_COMPARISON.md` | Similarities, differences, and what to borrow from Petals |
+| Implementation roadmap | `IMPLEMENTATION.md` | Phased plan for core correctness, reliability, public-swarm operations, incentives, API access, and later training resources |
+| Petals comparison | `PETALS_COMPARISON.md` | Similarities, differences, public-swarm positioning, and what to borrow from Petals |
 | Errors and debugging | `ERRORS_AND_DEBUGGING.md` | Known errors, likely causes, and inspection points |
 | Validation and testing | `VALIDATION_AND_TEST_PLAN.md` | Checks needed before trusting distributed inference |
 | Starter-system architecture summary | `architecture.md` | Stack, folder ownership, key patterns, and external services |
