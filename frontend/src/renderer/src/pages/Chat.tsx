@@ -3,16 +3,13 @@
  * Real-time token streaming chat interface.
  *
  * WebSocket lifecycle:
- *   - Does NOT connect on mount — connects lazily on first message send
+ *   - Does NOT send while connecting — user opens the stream before prompting
  *   - Reconnects automatically if connection drops between messages
  *   - Cleans up on unmount
- *
- * This avoids the race condition where the WS connects before the backend
- * has finished initialising its /stream handler.
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react'
-import { api, createStreamSocket } from '../api/client'
+import { api, createStreamSocket, type GeneratorStatus } from '../api/client'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,7 +25,8 @@ interface Message {
   error?: boolean
 }
 
-type ConnectionState = 'idle' | 'connecting' | 'connected' | 'error'
+type ConnectionState = 'closed' | 'connecting' | 'open' | 'error'
+type BackendState = 'checking' | 'online' | 'offline'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,18 +50,19 @@ function makeMessage(
 
 export default function Chat(): React.JSX.Element {
   const [messages, setMessages] = useState<Message[]>([
-    makeMessage(
-      'assistant',
-      'Connected to backend. Start a node on the Network page to begin distributed inference.'
-    )
+    makeMessage('assistant', 'Waiting for generator route.')
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const [connState, setConnState] = useState<ConnectionState>('idle')
+  const [connState, setConnState] = useState<ConnectionState>('closed')
+  const [backendState, setBackendState] = useState<BackendState>('checking')
+  const [generatorStatus, setGeneratorStatus] = useState<GeneratorStatus | null>(null)
+  const [readinessError, setReadinessError] = useState<string | null>(null)
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const socketRef = useRef<ReturnType<typeof createStreamSocket> | null>(null)
   const mountedRef = useRef(true)
+  const readinessIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // ---------------------------------------------------------------------------
   // Cleanup on unmount
@@ -75,8 +74,33 @@ export default function Chat(): React.JSX.Element {
       mountedRef.current = false
       socketRef.current?.close()
       socketRef.current = null
+      if (readinessIntervalRef.current) clearInterval(readinessIntervalRef.current)
     }
   }, [])
+
+  const refreshReadiness = useCallback(async () => {
+    try {
+      const [, generator] = await Promise.all([api.getStatus(), api.getGeneratorStatus()])
+      if (!mountedRef.current) return
+      setGeneratorStatus(generator)
+      setBackendState('online')
+      setReadinessError(null)
+    } catch (err) {
+      if (!mountedRef.current) return
+      setBackendState('offline')
+      setGeneratorStatus(null)
+      setReadinessError(err instanceof Error ? err.message : 'Backend readiness check failed')
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshReadiness()
+    readinessIntervalRef.current = setInterval(refreshReadiness, 5_000)
+
+    return () => {
+      if (readinessIntervalRef.current) clearInterval(readinessIntervalRef.current)
+    }
+  }, [refreshReadiness])
 
   // ---------------------------------------------------------------------------
   // Auto-scroll to bottom when messages update
@@ -115,8 +139,9 @@ export default function Chat(): React.JSX.Element {
       return prev
     })
     setLoading(false)
-    setConnState('connected')
-  }, [])
+    setConnState('open')
+    void refreshReadiness()
+  }, [refreshReadiness])
 
   // ---------------------------------------------------------------------------
   // Handle WS error
@@ -137,31 +162,29 @@ export default function Chat(): React.JSX.Element {
     })
     setLoading(false)
     setConnState('error')
+    socketRef.current?.close()
     socketRef.current = null
   }, [])
 
   const handleSocketOpen = useCallback(() => {
     if (!mountedRef.current) return
-    setConnState('connected')
+    setConnState('open')
   }, [])
 
   const handleSocketClose = useCallback(() => {
     if (!mountedRef.current) return
     socketRef.current = null
-    setConnState((prev) => (prev === 'error' ? prev : 'idle'))
+    setConnState((prev) => (prev === 'error' ? prev : 'closed'))
     setLoading(false)
   }, [])
 
   // ---------------------------------------------------------------------------
-  // Connect (or reconnect) WebSocket
-  // Returns true if connection was established successfully
+  // Connect (or reconnect) WebSocket.
   // ---------------------------------------------------------------------------
 
-  const ensureConnected = useCallback((): boolean => {
-    // Reuse existing socket if still open
-    if (socketRef.current !== null) {
-      return true
-    }
+  const connectStream = useCallback(() => {
+    if (socketRef.current !== null || connState === 'connecting') return
+    if (!generatorStatus?.ready || !generatorStatus.route_ready) return
 
     setConnState('connecting')
 
@@ -173,7 +196,6 @@ export default function Chat(): React.JSX.Element {
         handleSocketOpen,
         handleSocketClose
       )
-      return true
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
       setConnState('error')
@@ -181,9 +203,17 @@ export default function Chat(): React.JSX.Element {
         ...prev,
         makeMessage('assistant', `Failed to connect to backend: ${msg}`, { error: true })
       ])
-      return false
     }
-  }, [appendToken, finaliseMessage, handleError, handleSocketOpen, handleSocketClose])
+  }, [
+    appendToken,
+    connState,
+    finaliseMessage,
+    generatorStatus?.ready,
+    generatorStatus?.route_ready,
+    handleError,
+    handleSocketClose,
+    handleSocketOpen
+  ])
 
   // ---------------------------------------------------------------------------
   // Send message
@@ -191,10 +221,7 @@ export default function Chat(): React.JSX.Element {
 
   const handleSend = useCallback(() => {
     const text = input.trim()
-    if (!text || loading) return
-
-    // Connect lazily — first message triggers WS connection
-    if (!ensureConnected()) return
+    if (!text || loading || connState !== 'open' || !generatorStatus?.ready || !generatorStatus.route_ready) return
     if (socketRef.current === null) return
 
     // Add user message
@@ -206,7 +233,7 @@ export default function Chat(): React.JSX.Element {
     setInput('')
     setLoading(true)
     socketRef.current.send(text)
-  }, [input, loading, ensureConnected])
+  }, [connState, generatorStatus?.ready, generatorStatus?.route_ready, input, loading])
 
   const handleStop = useCallback(() => {
     if (!loading) return
@@ -229,8 +256,9 @@ export default function Chat(): React.JSX.Element {
       return prev
     })
     setLoading(false)
-    setConnState('idle')
-  }, [loading])
+    setConnState('closed')
+    void refreshReadiness()
+  }, [loading, refreshReadiness])
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>): void {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -244,22 +272,57 @@ export default function Chat(): React.JSX.Element {
   // ---------------------------------------------------------------------------
 
   const statusLabel = {
-    idle: 'READY',
+    closed: 'CLOSED',
     connecting: 'CONNECTING',
-    connected: 'CONNECTED',
+    open: 'OPEN',
     error: 'ERROR'
   }[connState]
 
-  const statusColor =
-    connState === 'error'
-      ? { badge: 'border-red/20 bg-red/5', dot: 'bg-red', text: 'text-red' }
-      : connState === 'connecting'
-        ? { badge: 'border-cyan/20 bg-cyan-dim', dot: 'bg-cyan animate-pulse', text: 'text-cyan' }
-        : {
-            badge: 'border-cyan/20 bg-cyan-dim',
-            dot: 'bg-cyan shadow-[0_0_6px_#00d4ff]',
-            text: 'text-cyan'
-          }
+  const generatorReady = Boolean(generatorStatus?.ready)
+  const routeReady = Boolean(generatorStatus?.route_ready)
+  const canConnect =
+    backendState === 'online' &&
+    generatorReady &&
+    routeReady &&
+    (connState === 'closed' || connState === 'error')
+  const canSend =
+    Boolean(input.trim()) &&
+    !loading &&
+    backendState === 'online' &&
+    connState === 'open' &&
+    generatorReady &&
+    routeReady
+  const inputPlaceholder = loading
+    ? 'Generating...'
+    : !generatorReady || !routeReady
+      ? 'Generator route not ready'
+      : connState !== 'open'
+        ? 'Stream closed'
+        : 'Send a message...'
+
+  const readinessItems = [
+    {
+      label: 'Backend',
+      value:
+        backendState === 'checking' ? 'CHECKING' : backendState === 'online' ? 'ONLINE' : 'OFFLINE',
+      ok: backendState === 'online'
+    },
+    {
+      label: 'WebSocket',
+      value: statusLabel,
+      ok: connState === 'open'
+    },
+    {
+      label: 'Generator',
+      value: generatorReady ? 'READY' : 'WAITING',
+      ok: generatorReady
+    },
+    {
+      label: 'Route',
+      value: routeReady ? 'READY' : 'WAITING',
+      ok: routeReady
+    }
+  ]
 
   // ---------------------------------------------------------------------------
   // Render
@@ -275,17 +338,54 @@ export default function Chat(): React.JSX.Element {
             Distributed P2P token generation
           </p>
         </div>
-        <div
-          className={`flex items-center gap-2 rounded-full border px-3 py-1.5 ${statusColor.badge}`}
-        >
-          <span className={`inline-block h-1.5 w-1.5 rounded-full ${statusColor.dot}`} />
-          <span
-            className={`font-mono text-[10px] font-semibold tracking-wider ${statusColor.text}`}
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          {readinessItems.map((item) => (
+            <span
+              key={item.label}
+              className={`
+                flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[9px] font-semibold
+                ${
+                  item.ok
+                    ? 'border-green/20 bg-green/5 text-green'
+                    : 'border-border bg-bg-surface text-text-dim'
+                }
+              `}
+            >
+              <span
+                className={`inline-block h-1.5 w-1.5 rounded-full ${
+                  item.ok ? 'bg-green shadow-[0_0_6px_#00ff88]' : 'bg-text-dim'
+                }`}
+              />
+              {item.label}: {item.value}
+            </span>
+          ))}
+          <button
+            onClick={connectStream}
+            disabled={!canConnect}
+            className={`
+              h-8 rounded-lg border px-3 font-mono text-[10px] font-semibold transition-all
+              ${
+                canConnect
+                  ? 'border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
+                  : 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-60'
+              }
+            `}
           >
-            {statusLabel}
-          </span>
+            {connState === 'open' ? 'STREAM OPEN' : 'CONNECT STREAM'}
+          </button>
         </div>
       </div>
+
+      {(readinessError || (generatorStatus?.reasons.length ?? 0) > 0) && (
+        <div className="flex-shrink-0 border-b border-red/20 bg-red/5 px-7 py-3">
+          {readinessError && <p className="font-mono text-[11px] text-red">{readinessError}</p>}
+          {generatorStatus?.reasons.map((reason) => (
+            <p key={reason} className="font-mono text-[11px] text-red">
+              {reason}
+            </p>
+          ))}
+        </div>
+      )}
 
       {/* Messages */}
       <div className="flex flex-1 flex-col gap-5 overflow-y-auto px-7 py-6">
@@ -354,7 +454,7 @@ export default function Chat(): React.JSX.Element {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={loading}
-          placeholder={loading ? 'Generating...' : 'Send a message… (Enter to send)'}
+          placeholder={inputPlaceholder}
           rows={1}
           className="
             flex-1 resize-none rounded-xl border border-border-bright bg-bg-elevated
@@ -365,7 +465,7 @@ export default function Chat(): React.JSX.Element {
         />
         <button
           onClick={loading ? handleStop : handleSend}
-          disabled={!loading && !input.trim()}
+          disabled={!loading && !canSend}
           className={`
             flex h-[46px] w-[46px] flex-shrink-0 items-center justify-center
             rounded-xl border border-cyan/30 bg-cyan-dim text-xl text-cyan
@@ -373,9 +473,11 @@ export default function Chat(): React.JSX.Element {
             ${
               !loading && !input.trim()
                 ? 'cursor-not-allowed opacity-40'
-                : loading
-                  ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
-                  : 'cursor-pointer hover:bg-cyan/20'
+                : !loading && !canSend
+                  ? 'cursor-not-allowed opacity-40'
+                  : loading
+                    ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
+                    : 'cursor-pointer hover:bg-cyan/20'
             }
           `}
         >
