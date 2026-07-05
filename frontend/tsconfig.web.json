@@ -7,13 +7,11 @@
     "src/preload/*.d.ts"
   ],
   "compilerOptions": {
-    "ignoreDeprecations": "5.0",
     "composite": true,
     "jsx": "react-jsx",
-    "baseUrl": ".",
     "paths": {
       "@renderer/*": [
-        "src/renderer/src/*"
+        "./src/renderer/src/*"
       ]
     }
   }

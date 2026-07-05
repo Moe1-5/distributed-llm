@@ -72,3 +72,9 @@ Sprint 05 starts only after Sprint 04 gives enough confidence about backend read
 - What changed: updated the Inference page to poll backend and generator readiness, show backend/WebSocket/generator/route states separately, require an open stream before sending, keep active stop/cancel behavior, and fixed the frontend TypeScript deprecation setting so typecheck runs with the installed compiler.
 - Why: Sprint 05 requires users to distinguish connection state from generator and route readiness, and the UI should not enqueue a first prompt while the WebSocket is still connecting.
 - Status: `npm run typecheck` passes. Sprint 05 acceptance criteria are now satisfied pending user review.
+
+### 2026-07-06 - Remove deprecated frontend baseUrl config
+
+- What changed: removed the deprecated `baseUrl` compiler option from the frontend web TypeScript config and made the renderer path alias explicitly relative.
+- Why: the IDE reported that `baseUrl` is deprecated for TypeScript 7.0, while using the TypeScript 6-only deprecation silencer would break the repo's installed TypeScript 5.9 compiler.
+- Status: `npm run typecheck` passes.
