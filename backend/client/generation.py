@@ -54,6 +54,7 @@ class DistributedGenerator:
         self.architecture_adapter = None
         self._loaded_model: Optional[nn.Module] = None
         self._loaded = False
+        self._stop_requested = False
 
 
     def _get_gen_config(self) -> dict:
@@ -186,6 +187,7 @@ class DistributedGenerator:
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
 
+        self.clear_stop()
         cfg = self._get_gen_config()
         logger.info(
             "[gen] starting generation prompt=%r max_new_tokens=%s temperature=%s top_p=%s",
@@ -214,6 +216,10 @@ class DistributedGenerator:
             )
 
             for step in range(max_new_tokens):
+                if self._stop_requested:
+                    logger.info("[gen] stop requested before step=%s", step)
+                    break
+
                 position_ids = torch.arange(
                     generated_ids.shape[1],
                     device=self.device,
@@ -254,6 +260,9 @@ class DistributedGenerator:
                 )
 
                 node_trace = trace
+                if self._stop_requested:
+                    logger.info("[gen] stop requested after route step=%s", step)
+                    break
 
                 hidden_states = hidden_states.to(self.device)
 
@@ -422,3 +431,9 @@ class DistributedGenerator:
 
     def is_loaded(self) -> bool:
         return self._loaded
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def clear_stop(self) -> None:
+        self._stop_requested = False

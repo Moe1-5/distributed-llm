@@ -31,18 +31,20 @@ Recommended order:
 - [x] Run optimized Python validation with `uv run python -O -m pytest tests/test_generation_readiness.py`.
 - [x] Run backend compile check with `uv run python -m compileall api client node models -q`.
 
-Last known status: passed during Sprint 03 closure.
+Last known status: passed on 2026-07-06 during Sprint 04 startup validation. `uv run pytest` passed with 24 tests, optimized Python pytest passed with 24 tests, and backend compileall passed. Frontend `npm run typecheck` also passed.
 
 ### Phase B: Local One-Machine Smoke Test
 
-- [ ] Start a local bootstrap node.
-- [ ] Start the backend API.
-- [ ] Start the frontend or call backend endpoints directly.
-- [ ] Confirm `/status` responds.
-- [ ] Confirm `/models` returns supported models.
-- [ ] Confirm the frontend/backend URL is correct for the local machine.
+- [x] Start a local bootstrap node.
+- [x] Start the backend API.
+- [x] Start the frontend or call backend endpoints directly.
+- [x] Confirm `/status` responds.
+- [x] Confirm `/models` returns supported models.
+- [x] Confirm the frontend/backend URL is correct for the local machine.
 
 Suggested first model: `facebook/opt-125m`.
+
+2026-07-06 result: passed using backend endpoints directly. The backend was reachable on `http://127.0.0.1:8000`, matching the frontend's localhost default. The local bootstrap address was `/ip4/127.0.0.1/tcp/7001/p2p/QmY54qgx7Si9KCWXFVdrn4J7kGPfdJUoNHNeTy1JqnDnX7`. The first sandboxed API run was not reachable from separate localhost probes, so the live smoke test ran the API outside the sandbox.
 
 ### Phase C: Local Single-Node Full-Layer Inference Test
 
@@ -60,15 +62,21 @@ device: cpu
 
 Checklist:
 
-- [ ] Bootstrap starts and prints reachable multiaddresses.
-- [ ] Serving node starts and loads all requested layers.
-- [ ] Serving node announces metadata to the DHT.
-- [ ] `/nodes` shows the serving node.
-- [ ] Generator starts with the same model and DHT prefix.
-- [ ] Generator validates/discovers a full route.
-- [ ] A short prompt returns without crashing.
-- [ ] Output is at least structurally coherent enough to prove the path is executing.
-- [ ] Any failure is recorded in `ISSUES.md` with logs and reproduction steps.
+- [x] Bootstrap starts and prints reachable multiaddresses.
+- [x] Serving node starts and loads all requested layers.
+- [x] Serving node announces metadata to the DHT.
+- [x] `/nodes` shows the serving node.
+- [x] Generator starts with the same model and DHT prefix.
+- [x] Generator validates/discovers a full route.
+- [x] A short prompt returns without crashing.
+- [x] Output is at least structurally coherent enough to prove the path is executing.
+- [x] Any failure is recorded in `ISSUES.md` with logs and reproduction steps.
+
+2026-07-06 result: passed for single-node full-layer local inference. `/chat` returned `Michael. I��m a writer` for prompt `Hello, my name is`, through route `12D3KooW… (layers 0→12)`. The path executed without crashing. Replacement characters in the response and output quality remain later validation concerns.
+
+2026-07-06 output sanity addendum: completion-style prompts showed that the distributed path executes but answer quality is not dependable. `Hello, my name is` produced a plausible continuation, and `Once upon a time` produced a story-like continuation. However, `The capital of France is` produced unrelated factual continuations, and `2 + 2 =` produced algebraic nonsense. Treat this as transport/execution success only until local HuggingFace-vs-distributed parity is checked.
+
+2026-07-06 shutdown addendum: `/node/stop` originally hung after a serving node started. Bounded RPC/DHT shutdown now lets `/node/stop` return `{"status":"stopped"}` in about five seconds. Remaining risk: backend/Hivemind worker processes can still remain after shutdown and need explicit cleanup before repeated UI start/stop cycles are trusted.
 
 ### Phase D: Local Multi-Node Layer-Split Inference Test
 
@@ -84,13 +92,15 @@ node C: layers 8-12
 
 Checklist:
 
-- [ ] Each node has a unique RPC UID.
+- [x] Each node has a unique RPC UID.
 - [ ] DHT discovery sees all serving nodes.
 - [ ] Route planning selects the exact route `0-4 -> 4-8 -> 8-12`.
 - [ ] No layer is skipped.
 - [ ] No layer is executed twice.
 - [ ] A short prompt returns without crashing.
 - [ ] Output behavior is compared with the single-node full-layer test.
+
+2026-07-06 result: blocked in the current one-backend process flow. RPC UID uniqueness is covered by unit tests, but a second `/node/start` call returned `already_running` with the existing full-layer node. See `ISSUES.md` findings 24 and 25.
 
 ### Phase E: Real Multi-Machine Distributed Network Test
 
@@ -125,6 +135,36 @@ Do not start token incentives, API-key product flows, or distributed training fe
 - [ ] Route readiness is exposed before inference starts.
 - [ ] Basic cancellation or recovery exists for stuck inference.
 - [ ] Bootstrap deployment and replacement process is documented.
+
+### Phase G: Product Workflow Validation
+
+These checks come from the 2026-07-05 Electron screen review and should be verified before the UI is considered usable:
+
+- [ ] Inference page does not allow sending when generator readiness or route coverage is false.
+- [ ] WebSocket status is driven by real `onopen`, `onclose`, and `onerror` events, not optimistic state.
+- [ ] First message either waits for WebSocket open or clearly blocks until connected.
+- [ ] Active inference can be stopped/cancelled from the Inference page.
+- [ ] Locally served nodes can be stopped from the primary node management surface.
+- [ ] Bootstrap setup is not shown as a normal client workflow tab.
+- [ ] A Monitoring page exists for network graph/status, layer coverage, route health, latency, and model/prefix filters.
+- [ ] Model selection explains that inference requires complete compatible served coverage, not only a registry entry.
+- [ ] Incentive/accounting design is model-aware and contribution-aware before token UI is added.
+
+2026-07-06 Sprint 04 disposition: product workflow validation should not block the local smoke-test result, but each finding now has an owner before advanced features continue.
+
+| Finding | Current status | Owner |
+| --- | --- | --- |
+| Unrelated prompt output | Transport works; quality is not trusted until direct HuggingFace parity is checked. | Sprint 07 |
+| WebSocket connected/send mismatch | First-send lifecycle fixed; broader state display still needs UI cleanup. | Sprint 04 / Sprint 05 |
+| One backend can serve only one layer slice | Current limitation documented; local split route blocked in one process. | Sprint 06 |
+| Stop local node control placement | Backend stop returns, but UI placement is still deferred. | Sprint 05 |
+| Bootstrap exposed as client workflow | Deferred; bootstrap should move out of normal client navigation. | Sprint 05 |
+| Active inference cancellation | Fixed with generator stop handling and an Inference page stop button. | Sprint 04 |
+| Monitoring navigation page | Deferred to client workflow cleanup. | Sprint 05 |
+| Runnable model semantics | Deferred; runnable should mean registry support plus complete compatible coverage. | Sprint 06 |
+| Incentive accounting semantics | Deferred; accounting should be model-aware and contribution-aware. | Sprint 06 |
+
+Advanced features remain deferred until the follow-on phase gates are satisfied: output parity in Sprint 07, client workflow clarity in Sprint 05, and multi-node/runnable-model semantics in Sprint 06.
 
 ## 1. Static Validation
 
@@ -203,6 +243,8 @@ Expected:
 - greedy next token should match
 
 This proves model-specific adapter correctness.
+
+2026-07-06 priority note: output sanity checks make this parity test the next correctness gate. The local distributed route runs, but generated text quality is not enough to prove the split path matches HuggingFace behavior.
 
 ## 5. Single-Node Distributed Parity Test
 
@@ -288,6 +330,18 @@ Cases:
 - stream completes and sets `done`
 - stream can be cancelled
 - WebSocket reconnect works after close
+- UI does not show connected while send still reports `WebSocket not connected`
+
+## 8.1 UI Workflow Tests
+
+Cases:
+
+- Bootstrap setup is documented as infrastructure, not exposed as a client tab.
+- Nodes page shows locally served nodes and stop controls.
+- Network page can start serving and generator workflows without implying bootstrap ownership.
+- Inference page shows generator readiness, active route trace, and a cancel control.
+- Monitoring page shows network-level status rather than duplicating setup controls.
+- Model dropdown distinguishes supported models from currently runnable models with complete route coverage.
 
 ## 9. Performance Tests
 

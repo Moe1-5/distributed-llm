@@ -1,5 +1,173 @@
 # Code Issues
 
+## 2026-07-06 Sprint 04 local smoke test findings
+
+**Scope tested:** local bootstrap node, backend API, `/status`, `/models`, one CPU serving node for `facebook/opt-125m` layers `0-12`, `/nodes`, generator startup, `/generator/status`, `/chat`, and a local multi-node split attempt.
+
+**Passing checks:**
+
+- Local bootstrap started on `127.0.0.1:7001` with peer ID `QmY54qgx7Si9KCWXFVdrn4J7kGPfdJUoNHNeTy1JqnDnX7`.
+- Backend API started on `127.0.0.1:8000`.
+- `/status` returned online with `node_running=false` and `generator_ready=false` before startup.
+- `/models` returned the supported model registry and local default bootstrap peers.
+- `/node/start` loaded `facebook/opt-125m` layers `0-12` on CPU.
+- `/nodes` discovered the serving node with `rpc_uid` `distribllm.0.12`.
+- `/generator/start` returned `{"status":"ready"}`.
+- `/generator/status` returned `ready=true`, `route_ready=true`, and route trace `12D3KooW… (layers 0→12)`.
+- `/chat` with prompt `Hello, my name is` and `max_new_tokens=8` returned without crashing through the local route.
+
+**Observed generated response:**
+
+```json
+{"response":" Michael. I��m a writer","node_trace":["12D3KooW… (layers 0→12)"],"tokens_generated":4}
+```
+
+This proves the local single-node distributed path executes, but the replacement characters in `I��m` should be watched in later output-quality work.
+
+### 24. Local multi-node split cannot be tested from one backend process
+
+**Observed behavior:** after the full-layer node was running, a second `/node/start` request for layers `4-8` returned:
+
+```json
+{"status":"already_running", "info": {"layer_start": 0, "layer_end": 12, "...": "..."}}
+```
+
+**Why this matters:** Sprint 04 asks for a local split route such as `0-4`, `4-8`, `8-12` after single-node inference works. The current backend has one global `node`, so one backend process cannot host multiple local layer slices.
+
+**Plan:** resolve in Sprint 06 by choosing either a backend node registry or one backend process per serving participant. Until then, local multi-node split testing requires multiple backend processes or a dedicated test harness.
+
+**Owner:** Sprint 06.
+
+### 25. Node stop/API shutdown can hang after local serving node starts
+
+**Observed behavior:** after the smoke test, `/node/stop` did not return promptly. The API logs showed Hivemind shutdown starting, but the HTTP cleanup call hung. The backend process also did not exit after normal interrupts and had to be force-killed by exact PID.
+
+**Why this matters:** users need reliable stop controls, and Sprint 05 depends on backend stop operations that do not leave the app stuck.
+
+**Plan:** add bounded shutdown behavior for node/RPC/DHT cleanup, move blocking shutdown out of the event loop if needed, and add tests around stop behavior. This should be fixed before exposing primary node stop controls in Sprint 05.
+
+**Partial resolution 2026-07-06:** `RPCServer.stop()` and `Node.stop()` now use bounded shutdown wrappers around Hivemind RPC and DHT shutdown. Focused tests cover stuck RPC and DHT shutdown. A live `/node/stop` check returned `{"status":"stopped"}` in about five seconds instead of hanging.
+
+**Remaining risk:** the live check still left the API parent and Hivemind worker child processes alive after the app reported shutdown complete. They were terminated by exact PID after verification. See finding 27.
+
+### 27. Hivemind worker processes can remain after bounded node shutdown
+
+**Observed behavior:** after the bounded shutdown fix, `/node/stop` returned successfully, but process inspection still showed the backend parent and Hivemind worker children from the verification run until they were terminated.
+
+**Why this matters:** bounded shutdown makes the API usable again, but leftover worker processes can keep resources, ports, or model state alive after a node is supposed to stop.
+
+**Plan:** add explicit worker/process cleanup if Hivemind exposes process handles, or isolate serving nodes in a lifecycle-managed subprocess that can be terminated as a unit. This should be addressed before relying on repeated start/stop cycles in the Electron UI.
+
+**Owner:** Sprint 06 for serving lifecycle strategy, with Sprint 05 blocked from relying on repeated UI start/stop cycles until cleanup is trustworthy.
+
+### 26. OPT-125M local distributed output fails factual/arithmetic sanity checks
+
+**Observed behavior:** local single-node distributed inference executes without crashing, but short sanity prompts are often irrelevant or wrong:
+
+| Prompt | Response |
+| --- | --- |
+| `Hello, my name is` | `Zoraida. I live in the southern hemisphere and have` |
+| `The capital of France is` | `to host the annual G7 summit in early July.` |
+| `Once upon a time` | `, I was the youngest to go on this trip and it has been so fun` |
+| `The capital of France is` with lower temperature | `the most populous city in Europe.` |
+| `2 + 2 =` with lower temperature | `-3*m. Suppose m*` |
+
+**Why this matters:** Sprint 04 has proven the route executes, but users should not trust answer quality yet. The unrelated responses in the Electron screenshots are reproducible as an output-quality problem, especially for factual prompts.
+
+**Likely causes to separate next:**
+
+- `facebook/opt-125m` is a very small base completion model, not an instruction/chat model.
+- Sampling settings may still be too loose for sanity checks.
+- Prompt formatting is raw completion text, not chat/instruction formatting.
+- The distributed split path still needs parity comparison against normal HuggingFace logits for the same model and prompt.
+
+**Plan:** add a local HuggingFace-vs-distributed parity check for OPT-125M logits or greedy next-token outputs before using generated text quality as proof. Until parity passes, treat successful `/chat` as a transport/execution success only.
+
+**Owner:** Sprint 07.
+
+## 2026-07-05 User review findings from Electron screenshots
+
+**Scope reviewed:** Electron Inference, Network, Nodes, and Bootstrap screens during local prototype usage.
+
+### 17. Inference responses are readable but unrelated to the user prompt
+
+**Observed behavior:** prompts such as `test` and `what's your name ?` produced coherent-looking but unrelated completions about driving, family, Canada, and firefighting.
+
+**Likely causes to distinguish during validation:**
+
+- the split inference path still does not match the HuggingFace model forward path
+- the selected model is a base completion model rather than an instruction/chat model
+- the generator may be using stale state or a fallback/mock response path
+- prompt formatting is too raw for the selected model
+- the frontend may be mixing connection state and generator readiness
+
+**Plan:** add a readiness/parity gate before trusting generated text. Compare normal local HuggingFace logits against the split path, and make the UI show whether the generator is connected to a complete compatible route.
+
+**Update 2026-07-06:** Sprint 04 output sanity checks reproduced this concern. Local single-node distributed inference returns without crashing, but factual/arithmetic prompts are not reliable. See finding 26.
+
+**Owner:** Sprint 07 for output parity, Sprint 06 for complete-compatible-route semantics, and Sprint 05 for UI readiness display.
+
+### 18. WebSocket UI can show connected while send reports not connected
+
+**Observed behavior:** the Inference screen showed `CONNECTED`, but a model message reported `Error: WebSocket not connected`.
+
+**Likely cause:** the frontend connection state is set optimistically before the WebSocket `onopen` event, or a send is attempted while the socket is still connecting.
+
+**Plan:** make WebSocket state event-driven, queue or block the first send until `onopen`, and keep backend reachability, WebSocket connection, generator readiness, and active streaming as separate UI states.
+
+**Resolution 2026-07-06:** frontend WebSocket creation now waits for `onopen` before marking the socket connected, queues payloads while the socket is connecting, and uses local configurable API/WebSocket base URLs instead of the hardcoded LAN address.
+
+**Owner:** Sprint 04 resolved the first-send lifecycle bug. Sprint 05 owns the broader visible state model.
+
+### 19. Local backend can serve only one node/layer slice
+
+**Observed behavior:** the UI/backend workflow behaves as if only one local serving node can run at a time, preventing local multi-node split testing from one backend process.
+
+**Why this matters:** Sprint 04 needs to prove both single-node full-layer inference and a split route such as `0-4`, `4-8`, `8-12`. The project must either support multiple local node instances in one backend process or document that each local slice requires a separate backend process.
+
+**Plan:** decide between a node registry inside one backend process or a one-process-per-participant testing model. If using a registry, `/status`, `/nodes`, `/node/start`, and `/node/stop` need per-node semantics.
+
+**Owner:** Sprint 06.
+
+### 20. Bootstrap tab is exposed as client workflow
+
+**Observed behavior:** the Network page includes a Bootstrap tab with command-line setup instructions and hardcoding guidance.
+
+**Why this matters:** bootstrap nodes are discovery infrastructure, not model-serving nodes and not a client task. Showing this as a normal product tab confuses the serving/inference workflow.
+
+**Plan:** move bootstrap setup to docs/internal operations. The app should expose serving, inference setup, node visibility, settings, and monitoring. Bootstrap peers can remain advanced/default configuration, but not a primary client tab.
+
+**Owner:** Sprint 05.
+
+### 21. Stop controls are missing or misplaced
+
+**Observed behavior:** stop node is only visible in the Network serving tab, and active inference has no visible stop/cancel control.
+
+**Plan:** expose stop controls where the user is looking: stop local served nodes from the Nodes/main page and cancel active generation from the Inference page.
+
+**Partial resolution 2026-07-06:** active inference cancellation is implemented through a generator stop request and Inference page stop button. Moving local node stop controls to the primary Nodes page remains planned in Sprint 05.
+
+**Owner:** Sprint 04 resolved active inference cancellation. Sprint 05 owns primary node stop placement.
+
+### 22. Monitoring screen is missing from main navigation
+
+**Observed behavior:** there are Nodes, Network, Inference, and Settings views, but no dedicated monitoring screen for the network visualization/status view described in the product direction.
+
+**Plan:** add a fourth main workflow tab/page for monitoring. It should show peer graph/status, layer coverage, model filters, route health, latency, and a clear distinction between bootstrap nodes, serving nodes, and generator clients.
+
+**Owner:** Sprint 05.
+
+### 23. Model access and incentive semantics are not yet explicit
+
+**Open questions:**
+
+- Can a user inference any listed model, or only models with complete compatible served coverage in the current network?
+- Are token incentives global across all models, or model-specific/contribution-specific?
+
+**Planned decisions:** inference should be gated by supported model registry plus complete compatible route coverage. Incentives should be model-aware and contribution-aware because hardware cost, layer count, model size, reliability, latency, and successful completed work differ across served models.
+
+**Owner:** Sprint 06.
+
 ## 2026-07-02 Backend flow unit-test audit
 
 **Scope tested:** bootstrap argument/DHT setup, backend entrypoint argument parsing, generator streaming loop, route validation, DHT discovery/status handling, RPC server UID construction, and `/nodes` discovery endpoint wiring.

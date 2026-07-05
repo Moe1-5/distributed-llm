@@ -19,6 +19,16 @@
 
 > Lessons that still need active enforcement.
 
+### [2026-07-06] Split oversized sprint scopes before coding
+**Problem:** User-review findings were documented inside Sprint 04 even though several items are product workflow, monitoring, and incentive-design work beyond local validation.
+**Rule:** Keep the current sprint focused on its acceptance criteria; when new work would overload it, create later sprint plans before implementation and continue from the lowest active sprint.
+**Why:** DistribLLM needs validation, UI workflow, monitoring, and incentive design to move in order instead of becoming one untestable sprint.
+
+### [2026-07-05] Keep bootstrap infrastructure out of client workflows
+**Problem:** Bootstrap setup was shown as a client-facing Network tab even though users need serving, inference control, and monitoring instead.
+**Rule:** Treat bootstrap nodes as internal discovery infrastructure; client UI should expose model serving, inference control, network visibility, and monitoring without making users manage bootstrap commands directly.
+**Why:** DistribLLM is meant to feel like a usable P2P inference system, not a developer-only control panel, and bootstrap confusion hides the actual serving and inference workflow.
+
 ### [2026-07-03] System-owned public swarm, not private-only network
 **Problem:** I described the network goal as private, which made it sound local or closed-only rather than Petals-like public participation for this project.
 **Rule:** Describe the target network as a system-owned public/discoverable Hivemind-style swarm: public enough for external devices to join and serve resources, but isolated from public Petals/IPFS infrastructure by this project's bootstrap, protocol, metadata, model registry, and rules.

@@ -205,6 +205,28 @@ Goal: make the UI reflect actual distributed readiness.
 - model compatibility warnings
 - backend URL configuration instead of hardcoded IP
 
+### 2026-07-05 Product Flow Corrections
+
+User review of the Electron screens identified these workflow changes:
+
+- Bootstrap setup should move out of client navigation. Bootstrap nodes are internal discovery infrastructure; users should not see command-line bootstrap setup as a normal product tab.
+- Node stopping should be available from the primary node management surface, including the main Nodes page for locally served nodes.
+- Inference should have a visible stop/cancel control while generation is active.
+- A dedicated Monitoring page should be added to main navigation for the network graph/status view.
+- The UI should distinguish backend reachability, WebSocket connection, generator readiness, active inference, and route completeness.
+- The app should not imply that a user can inference any model in the registry. A model is runnable only when the network has complete compatible layer coverage for that model.
+- Incentive UI and accounting should be model-aware and contribution-aware, not a single undifferentiated token pool.
+
+Suggested main navigation after this correction:
+
+1. Nodes: local hardware stats, discovered serving nodes, local node stop controls.
+2. Network: serve layer slices and connect a generator/client to the swarm.
+3. Inference: prompt streaming, route trace, and active generation cancel.
+4. Monitoring: graph/status view for peer health, layer coverage, route state, and latency.
+5. Settings: tokens and local configuration.
+
+Implementation should follow validation: first prove the backend can report trustworthy route/readiness state, then bind the UI controls to that state.
+
 ## Phase 8: Fault Tolerance and Public Swarm Operations
 
 Goal: make the network resilient enough for public participation.
@@ -280,14 +302,18 @@ This is intentionally last because training is harder than inference. It require
 2. OPT architecture adapter or temporarily disable OPT inference until adapter exists.
 3. Readiness endpoint and UI gating.
 4. Cancellation.
-5. Local parity tests.
-6. Health probes.
-7. Session/KV cache.
-8. Public swarm operations and fault tolerance.
-9. Network monitor visualization.
-10. API-key access for inferenced models.
-11. Incentives and contributor accounting.
-12. Distributed training/fine-tuning resource requests.
+5. WebSocket state correctness.
+6. Local parity tests.
+7. Decide local multi-node serving model: backend node registry or one process per node.
+8. Move bootstrap setup out of client navigation.
+9. Add node stop placement on the main node surface.
+10. Add monitoring page shell backed by real route/readiness data.
+11. Health probes.
+12. Session/KV cache.
+13. Public swarm operations and fault tolerance.
+14. API-key access for inferenced models.
+15. Incentives and contributor accounting.
+16. Distributed training/fine-tuning resource requests.
 
 ## Definition of Done for Correct Inference
 

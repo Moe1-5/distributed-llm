@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from client.generation import DistributedGenerator
 from client.sequential import RemoteSequential
 from models.architecture_adapter import get_architecture_adapter
 from node.handler import InferenceHandler
+from node.node import Node
 from node.rpc_server import RPCServer
 
 
@@ -148,6 +150,77 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertNotEqual(uid_a, uid_b)
         self.assertEqual(uid_a, "test-prefix.0.4")
         self.assertEqual(uid_b, "test-prefix.4.8")
+
+    def test_rpc_stop_is_bounded_when_hivemind_shutdown_hangs(self) -> None:
+        class BlockingServer:
+            def shutdown(self) -> None:
+                time.sleep(1.0)
+
+        rpc = RPCServer.__new__(RPCServer)
+        rpc._server = BlockingServer()
+        rpc._running = True
+        rpc._lock = __import__("threading").Lock()
+
+        started = time.perf_counter()
+        rpc.stop(timeout=0.01)
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.5)
+        self.assertFalse(rpc.is_running())
+        self.assertIsNone(rpc._server)
+
+    def test_node_stop_is_bounded_when_dht_shutdown_hangs(self) -> None:
+        class FakeRPC:
+            def __init__(self) -> None:
+                self.timeout = None
+
+            def stop(self, timeout: float = 5.0) -> None:
+                self.timeout = timeout
+
+            def is_running(self) -> bool:
+                return False
+
+        class FakeHandler:
+            def __init__(self) -> None:
+                self.unloaded = False
+
+            def unload(self) -> None:
+                self.unloaded = True
+
+            def is_loaded(self) -> bool:
+                return False
+
+        class BlockingDHT:
+            peer_id = "peer"
+
+            def shutdown(self) -> None:
+                time.sleep(1.0)
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        fake_rpc = FakeRPC()
+        fake_handler = FakeHandler()
+        node.rpc = fake_rpc
+        node.handler = fake_handler
+        node.dht = BlockingDHT()
+        node._running = True
+
+        started = time.perf_counter()
+        node.stop(timeout=0.01)
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(fake_rpc.timeout, 0.01)
+        self.assertTrue(fake_handler.unloaded)
+        self.assertIsNone(node.rpc)
+        self.assertIsNone(node.handler)
+        self.assertIsNone(node.dht)
+        self.assertFalse(node.is_running())
 
     def test_nodes_endpoint_uses_active_node_prefix(self) -> None:
         from api import server as api_server
@@ -346,6 +419,109 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(len(sequential.received_position_ids), 2)
         self.assertEqual(tuple(sequential.received_position_ids[0].shape), (1, 2))
         self.assertEqual(tuple(sequential.received_position_ids[1].shape), (1, 3))
+
+    def test_generate_stream_honors_stop_request_after_route_step(self) -> None:
+        class DummyTokenizer:
+            eos_token_id = 0
+
+            def encode(self, prompt: str, return_tensors: str = "pt") -> torch.Tensor:
+                return torch.tensor([[1, 2]])
+
+            def decode(self, token_ids: torch.Tensor, skip_special_tokens: bool = True) -> str:
+                return "x"
+
+        class StopSequential:
+            def __init__(self) -> None:
+                self.generator: DistributedGenerator | None = None
+
+            def forward(
+                self,
+                hidden_states: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+                position_ids: torch.Tensor | None = None,
+            ) -> tuple[torch.Tensor, list[str]]:
+                assert self.generator is not None
+                self.generator.request_stop()
+                return hidden_states, ["peer… (layers 0→1)"]
+
+        sequential = StopSequential()
+        generator = DistributedGenerator("facebook/opt-125m", sequential=sequential, device="cpu")
+        sequential.generator = generator
+        generator._loaded = True
+        generator.tokenizer = DummyTokenizer()
+        generator.embed_tokens = nn.Embedding(10, 4)
+        generator.position_embeddings = nn.Embedding(8, 4)
+        generator.norm = nn.Identity()
+        generator.lm_head = nn.Linear(4, 10)
+
+        async def run_generation() -> list[dict]:
+            return [item async for item in generator.generate_stream("hello", max_new_tokens=4)]
+
+        result = asyncio.run(run_generation())
+
+        self.assertEqual(result, [{"done": True, "node_trace": ["peer… (layers 0→1)"]}])
+
+    def test_generator_status_reports_not_loaded(self) -> None:
+        from api import server as api_server
+
+        original_generator = api_server.generator
+        api_server.generator = None
+        try:
+            result = asyncio.run(api_server.get_generator_status())
+        finally:
+            api_server.generator = original_generator
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["reasons"], ["Generator not loaded."])
+
+    def test_generator_status_reports_route_validation_error(self) -> None:
+        from api import server as api_server
+
+        class DummySequential:
+            def validate_route(self) -> list[dict]:
+                raise RuntimeError("missing layers")
+
+        class DummyGenerator:
+            model_name = "facebook/opt-125m"
+            sequential = DummySequential()
+
+            def is_loaded(self) -> bool:
+                return True
+
+        original_generator = api_server.generator
+        api_server.generator = DummyGenerator()
+        try:
+            result = asyncio.run(api_server.get_generator_status())
+        finally:
+            api_server.generator = original_generator
+
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["route_ready"])
+        self.assertEqual(result["reasons"], ["missing layers"])
+
+    def test_stop_generator_requests_cancellation(self) -> None:
+        from api import server as api_server
+
+        class DummyGenerator:
+            def __init__(self) -> None:
+                self.stop_requested = False
+
+            def is_loaded(self) -> bool:
+                return True
+
+            def request_stop(self) -> None:
+                self.stop_requested = True
+
+        dummy = DummyGenerator()
+        original_generator = api_server.generator
+        api_server.generator = dummy
+        try:
+            result = asyncio.run(api_server.stop_generator())
+        finally:
+            api_server.generator = original_generator
+
+        self.assertEqual(result["status"], "stop_requested")
+        self.assertTrue(dummy.stop_requested)
 
     def test_handler_expands_token_mask_to_causal_decoder_mask(self) -> None:
         handler = InferenceHandler(

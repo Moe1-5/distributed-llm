@@ -20,7 +20,7 @@ import torch
 from hivemind.utils.logging import get_logger
 
 from node.handler import InferenceHandler
-from node.rpc_server import RPCServer
+from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, RPCServer, _run_with_timeout
 from constants import ANNOUNCE_INTERVAL, DHT_EXPIRY_TIME
 
 logger = get_logger(__name__)
@@ -131,12 +131,22 @@ class Node:
 
         logger.info(f"Node fully started. Addresses: {self.get_visible_maddrs()}")
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS) -> None:
         logger.info("Node stopping...")
         self._running = False
-        if self.rpc     is not None: self.rpc.stop();       self.rpc     = None
-        if self.handler is not None: self.handler.unload(); self.handler = None
-        if self.dht     is not None: self.dht.shutdown();   self.dht     = None
+        if self._announce_thread is not None:
+            self._announce_thread.join(timeout=0.2)
+            self._announce_thread = None
+        if self.rpc is not None:
+            self.rpc.stop(timeout=timeout)
+            self.rpc = None
+        if self.handler is not None:
+            self.handler.unload()
+            self.handler = None
+        if self.dht is not None:
+            dht = self.dht
+            _run_with_timeout("node-dht-shutdown", dht.shutdown, timeout)
+            self.dht = None
         logger.info("Node stopped.")
 
     # ------------------------------------------------------------------

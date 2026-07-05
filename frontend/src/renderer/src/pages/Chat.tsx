@@ -12,7 +12,7 @@
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react'
-import { createStreamSocket } from '../api/client'
+import { api, createStreamSocket } from '../api/client'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -137,6 +137,19 @@ export default function Chat(): React.JSX.Element {
     })
     setLoading(false)
     setConnState('error')
+    socketRef.current = null
+  }, [])
+
+  const handleSocketOpen = useCallback(() => {
+    if (!mountedRef.current) return
+    setConnState('connected')
+  }, [])
+
+  const handleSocketClose = useCallback(() => {
+    if (!mountedRef.current) return
+    socketRef.current = null
+    setConnState((prev) => (prev === 'error' ? prev : 'idle'))
+    setLoading(false)
   }, [])
 
   // ---------------------------------------------------------------------------
@@ -153,8 +166,13 @@ export default function Chat(): React.JSX.Element {
     setConnState('connecting')
 
     try {
-      socketRef.current = createStreamSocket(appendToken, finaliseMessage, handleError)
-      setConnState('connected')
+      socketRef.current = createStreamSocket(
+        appendToken,
+        finaliseMessage,
+        handleError,
+        handleSocketOpen,
+        handleSocketClose
+      )
       return true
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -165,7 +183,7 @@ export default function Chat(): React.JSX.Element {
       ])
       return false
     }
-  }, [appendToken, finaliseMessage, handleError])
+  }, [appendToken, finaliseMessage, handleError, handleSocketOpen, handleSocketClose])
 
   // ---------------------------------------------------------------------------
   // Send message
@@ -189,6 +207,30 @@ export default function Chat(): React.JSX.Element {
     setLoading(true)
     socketRef.current.send(text)
   }, [input, loading, ensureConnected])
+
+  const handleStop = useCallback(() => {
+    if (!loading) return
+
+    void api.stopGenerator().catch(() => undefined)
+    socketRef.current?.close()
+    socketRef.current = null
+    setMessages((prev) => {
+      const last = prev[prev.length - 1]
+      if (last?.role === 'assistant' && last.streaming) {
+        return [
+          ...prev.slice(0, -1),
+          {
+            ...last,
+            content: last.content ? `${last.content}\n\nStopped.` : 'Stopped.',
+            streaming: false
+          }
+        ]
+      }
+      return prev
+    })
+    setLoading(false)
+    setConnState('idle')
+  }, [loading])
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>): void {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -322,20 +364,22 @@ export default function Chat(): React.JSX.Element {
           "
         />
         <button
-          onClick={handleSend}
-          disabled={!input.trim() || loading}
+          onClick={loading ? handleStop : handleSend}
+          disabled={!loading && !input.trim()}
           className={`
             flex h-[46px] w-[46px] flex-shrink-0 items-center justify-center
             rounded-xl border border-cyan/30 bg-cyan-dim text-xl text-cyan
             transition-all duration-150
             ${
-              !input.trim() || loading
+              !loading && !input.trim()
                 ? 'cursor-not-allowed opacity-40'
-                : 'cursor-pointer hover:bg-cyan/20'
+                : loading
+                  ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
+                  : 'cursor-pointer hover:bg-cyan/20'
             }
           `}
         >
-          ↑
+          {loading ? '■' : '↑'}
         </button>
       </div>
     </div>

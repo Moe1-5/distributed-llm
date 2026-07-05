@@ -27,6 +27,27 @@ from node.handler import InferenceHandler
 
 logger = get_logger(__name__)
 
+DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def _run_with_timeout(name: str, target, timeout: float) -> bool:
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            target()
+        except Exception as exc:
+            logger.warning("%s raised during shutdown: %s", name, exc, exc_info=True)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_run, daemon=True, name=name)
+    thread.start()
+    finished = done.wait(timeout)
+    if not finished:
+        logger.warning("%s did not finish within %.1fs; continuing shutdown", name, timeout)
+    return finished
+
 
 class _HandlerModule(nn.Module):
     """
@@ -167,10 +188,11 @@ class RPCServer:
             self._running = True
             logger.info(f"RPC server running | uid={self._uid}")
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS) -> None:
         with self._lock:
-            if self._server is not None:
-                self._server.shutdown()
+            server = self._server
+            if server is not None:
+                _run_with_timeout("rpc-server-shutdown", server.shutdown, timeout)
                 self._server = None
             self._running = False
             logger.info("RPC server stopped.")

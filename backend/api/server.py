@@ -448,6 +448,48 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         return {"status": "error", "error": str(e)}
 
 
+@app.get("/generator/status")
+async def get_generator_status() -> dict:
+    if generator is None or not generator.is_loaded():
+        return {
+            "ready": False,
+            "model_name": None,
+            "route_ready": False,
+            "reasons": ["Generator not loaded."],
+            "node_trace": [],
+        }
+
+    reasons: list[str] = []
+    node_trace: list[str] = []
+    route_ready = False
+
+    try:
+        route = generator.sequential.validate_route()
+        route_ready = True
+        node_trace = [
+            f"{item['peer_id'][:8]}… (layers {item['layer_start']}→{item['layer_end']})"
+            for item in route
+        ]
+    except Exception as e:
+        reasons.append(str(e))
+
+    return {
+        "ready": generator.is_loaded() and route_ready,
+        "model_name": generator.model_name,
+        "route_ready": route_ready,
+        "reasons": reasons,
+        "node_trace": node_trace,
+    }
+
+
+@app.post("/generator/stop")
+async def stop_generator() -> dict:
+    if generator is None or not generator.is_loaded():
+        return {"status": "not_running"}
+    generator.request_stop()
+    return {"status": "stop_requested"}
+
+
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------

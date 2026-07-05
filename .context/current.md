@@ -11,8 +11,8 @@
 
 ## Active Sprint
 
-**Sprint:** Sprint 04 - Local System Validation  
-**Goal:** Prove the local end-to-end distributed inference flow before adding real public bootstrap nodes, fault tolerance, monitoring, API keys, incentives, or distributed training/resource features.
+**Sprint:** Sprint 04 - Local System Validation remains the current lowest active sprint. Sprint 05 through Sprint 07 are planned follow-on splits.
+**Goal:** Prove local end-to-end distributed inference first, then clean up client workflow controls, routing/model-access/incentives, and output parity.
 
 ## Tech Stack
 
@@ -31,8 +31,10 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - [ ] Database migrations tracked
 - [x] Documentation map created
 
-**Latest Sprint 4 Update**
+**Latest Sprint Update**
 
-- Sprint 04 plan is created.
-- Sprint 01 and Sprint 02 are closed through their archive copies.
-- Next step: run the local one-machine system smoke test and record pass/fail results in the validation plan.
+- Sprint 04 local smoke test passed for bootstrap, API, single OPT-125M serving node, generator readiness, and short `/chat` inference.
+- Sprint 04 found two blockers: one backend process cannot host multiple local layer slices, and node shutdown needed bounded cleanup. `/node/stop` now returns, but Hivemind worker cleanup remains open.
+- Sprint 05 now holds client workflow controls: hidden bootstrap, stop controls, cancellation, and monitoring.
+- Sprint 06 now holds multi-node serving strategy, runnable-model semantics, and model-aware incentive accounting.
+- Sprint 07 now holds HuggingFace-direct versus distributed output parity and quality checks.

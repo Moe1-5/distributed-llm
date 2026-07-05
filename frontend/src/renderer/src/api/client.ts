@@ -3,8 +3,8 @@
  * Central API client for all backend communication.
  */
 
-const BASE_URL = 'http://172.27.32.227:8000'
-const WS_URL = 'ws://172.27.32.227:8000'
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
+const WS_URL = import.meta.env.VITE_WS_BASE_URL ?? BASE_URL.replace(/^http/, 'ws')
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,6 +53,14 @@ export interface NetworkStatus {
   gpu_available: boolean
   generator_ready: boolean
   token_set: boolean
+}
+
+export interface GeneratorStatus {
+  ready: boolean
+  model_name: string | null
+  route_ready: boolean
+  reasons: string[]
+  node_trace: string[]
 }
 
 export interface AppSettings {
@@ -130,6 +138,8 @@ export const api = {
   // Generator
   startGenerator: (params: GeneratorStartParams) =>
     post<{ status: string; error?: string; message?: string }>('/generator/start', params),
+  stopGenerator: () => post<{ status: string }>('/generator/stop'),
+  getGeneratorStatus: () => get<GeneratorStatus>('/generator/status'),
 
   // Chat
   chat: (message: string, maxNewTokens?: number, temperature?: number, topP?: number) =>
@@ -161,12 +171,28 @@ export interface StreamChunk {
 export function createStreamSocket(
   onToken: (token: string) => void,
   onDone: (trace: string[]) => void,
-  onError: (error: string) => void
+  onError: (error: string) => void,
+  onOpen?: () => void,
+  onClose?: () => void
 ): {
-  send: (message: string, maxNewTokens?: number, temperature?: number) => void
+  send: (message: string, maxNewTokens?: number, temperature?: number, topP?: number) => void
   close: () => void
 } {
   const ws = new WebSocket(`${WS_URL}/stream`)
+  const pendingPayloads: string[] = []
+  let manuallyClosed = false
+
+  function flushPending(): void {
+    while (pendingPayloads.length > 0 && ws.readyState === WebSocket.OPEN) {
+      const payload = pendingPayloads.shift()
+      if (payload !== undefined) ws.send(payload)
+    }
+  }
+
+  ws.onopen = () => {
+    onOpen?.()
+    flushPending()
+  }
 
   ws.onmessage = (event: MessageEvent) => {
     try {
@@ -180,22 +206,30 @@ export function createStreamSocket(
   }
 
   ws.onerror = () => onError('WebSocket connection error')
+  ws.onclose = () => {
+    if (!manuallyClosed) onClose?.()
+  }
 
   return {
     send: (message, maxNewTokens?: number, temperature?: number, topP?: number) => {
+      const payload = JSON.stringify({
+        message,
+        ...(maxNewTokens !== undefined && { max_new_tokens: maxNewTokens }),
+        ...(temperature !== undefined && { temperature }),
+        ...(topP !== undefined && { top_p: topP })
+      })
+
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({
-            message,
-            ...(maxNewTokens !== undefined && { max_new_tokens: maxNewTokens }),
-            ...(temperature !== undefined && { temperature }),
-            ...(topP !== undefined && { top_p: topP })
-          })
-        )
+        ws.send(payload)
+      } else if (ws.readyState === WebSocket.CONNECTING) {
+        pendingPayloads.push(payload)
       } else {
         onError('WebSocket not connected')
       }
     },
-    close: () => ws.close()
+    close: () => {
+      manuallyClosed = true
+      ws.close()
+    }
   }
 }

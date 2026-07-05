@@ -6,6 +6,9 @@
 | Sprint | File | Goal |
 | --- | --- | --- |
 | Sprint 04 | `tasks/sprints/sprint-04-local-system-validation.md` | Prove the local end-to-end distributed inference flow before advanced features. |
+| Sprint 05 | `tasks/sprints/sprint-05-client-workflow-controls.md` | Clean up client workflow controls after local validation: hidden bootstrap, stop controls, cancellation, and monitoring. |
+| Sprint 06 | `tasks/sprints/sprint-06-routing-model-access-and-incentives.md` | Define multi-node serving, runnable-model semantics, and model-aware incentive accounting. |
+| Sprint 07 | `tasks/sprints/sprint-07-output-parity-and-quality.md` | Compare HuggingFace-direct and distributed outputs before trusting generated text quality. |
 
 ## Completed Sprints
 
