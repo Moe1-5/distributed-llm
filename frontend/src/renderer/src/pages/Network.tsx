@@ -1,6 +1,6 @@
 /**
  * Network.tsx
- * Node management and DHT configuration.
+ * Node and generator setup.
  *
  * Changes from previous version:
  *   - Model is now a dropdown from /models endpoint — no free text
@@ -18,7 +18,7 @@ import type { ModelInfo } from '../api/client'
 // Types
 // ---------------------------------------------------------------------------
 
-type Tab = 'serve' | 'inference' | 'bootstrap'
+type Tab = 'serve' | 'inference'
 
 interface ActivityEntry {
   id: string
@@ -279,7 +279,7 @@ export default function Network(): React.JSX.Element {
           <div>
             <h1 className="text-xl font-semibold tracking-tight text-text-primary">Network</h1>
             <p className="mt-0.5 font-mono text-[11px] text-text-secondary">
-              Node management & DHT configuration
+              Serve local layers or prepare an inference client
             </p>
           </div>
           {/* Status badges */}
@@ -309,8 +309,7 @@ export default function Network(): React.JSX.Element {
           {(
             [
               ['serve', 'Serve Layers'],
-              ['inference', 'Run Inference'],
-              ['bootstrap', 'Bootstrap']
+              ['inference', 'Run Inference']
             ] as const
           ).map(([id, label]) => (
             <button
@@ -561,63 +560,6 @@ export default function Network(): React.JSX.Element {
             </>
           )}
 
-          {/* ── BOOTSTRAP ── */}
-          {tab === 'bootstrap' && (
-            <div className="flex flex-col gap-4">
-              <p className="text-[12px] leading-relaxed text-text-secondary">
-                A bootstrap node is a stable, always-on entry point. Run it once with{' '}
-                <span className="font-mono text-cyan">--identity_path</span> to get a permanent
-                address, then add it to <span className="font-mono text-cyan">constants.py</span>.
-              </p>
-
-              <div className="rounded-xl border border-border bg-bg-elevated p-4">
-                <p className="mb-2 font-mono text-[10px] tracking-widest text-text-dim uppercase">
-                  First run (generates stable identity)
-                </p>
-                <pre className="font-mono text-[11px] text-cyan leading-relaxed">
-                  {`cd backend
-python3 bootstrap.py \\
-  --port 7001 \\
-  --identity_path bootstrap.id`}
-                </pre>
-              </div>
-
-              <div className="rounded-xl border border-border bg-bg-elevated p-4">
-                <p className="mb-2 font-mono text-[10px] tracking-widest text-text-dim uppercase">
-                  Subsequent runs (same address every time)
-                </p>
-                <pre className="font-mono text-[11px] text-cyan leading-relaxed">
-                  {`python3 bootstrap.py \\
-  --port 7001 \\
-  --identity_path bootstrap.id`}
-                </pre>
-              </div>
-
-              <div className="rounded-xl border border-border bg-bg-elevated p-4">
-                <p className="mb-2 font-mono text-[10px] tracking-widest text-text-dim uppercase">
-                  Then hardcode the address in backend/constants.py
-                </p>
-                <pre className="font-mono text-[11px] text-text-secondary leading-relaxed">
-                  {`DISTRIBLLM_INITIAL_PEERS = [
-    "/ip4/<YOUR_VPS_IP>/tcp/7001/p2p/<PEER_ID>"
-]`}
-                </pre>
-              </div>
-
-              {defaultPeers.length > 0 && (
-                <div className="rounded-xl border border-green/20 bg-green/5 p-4">
-                  <p className="mb-2 font-mono text-[10px] tracking-widest text-green uppercase">
-                    Current bootstrap peers
-                  </p>
-                  {defaultPeers.map((p, i) => (
-                    <p key={i} className="font-mono text-[10px] text-text-secondary break-all">
-                      {p}
-                    </p>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
 

@@ -71,9 +71,12 @@ function StatTile({
 
 interface NodeCardProps {
   node: NodeInfo
+  isLocal: boolean
+  stopping: boolean
+  onStop: () => void
 }
 
-function NodeCard({ node }: NodeCardProps): React.JSX.Element {
+function NodeCard({ node, isLocal, stopping, onStop }: NodeCardProps): React.JSX.Element {
   const isOnline = node.running && node.rpc_running
 
   return (
@@ -118,6 +121,11 @@ function NodeCard({ node }: NodeCardProps): React.JSX.Element {
         <span className="rounded border border-border px-1.5 py-0.5 font-mono text-[9px] text-text-dim uppercase">
           {node.device}
         </span>
+        {isLocal && (
+          <span className="rounded border border-amber/30 bg-amber/10 px-1.5 py-0.5 font-mono text-[9px] text-amber">
+            LOCAL
+          </span>
+        )}
         {node.layers_loaded && (
           <span className="rounded border border-green/20 bg-green/5 px-1.5 py-0.5 font-mono text-[9px] text-green">
             LAYERS LOADED
@@ -129,6 +137,23 @@ function NodeCard({ node }: NodeCardProps): React.JSX.Element {
           </span>
         )}
       </div>
+
+      {isLocal && (
+        <button
+          onClick={onStop}
+          disabled={stopping}
+          className={`
+            mt-1 h-9 rounded-lg border font-mono text-[10px] font-semibold transition-all
+            ${
+              stopping
+                ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim'
+                : 'border-red/30 bg-red/10 text-red hover:bg-red/20'
+            }
+          `}
+        >
+          {stopping ? 'STOPPING...' : 'STOP LOCAL NODE'}
+        </button>
+      )}
     </div>
   )
 }
@@ -145,6 +170,7 @@ export default function Dashboard(): React.JSX.Element {
     nodes: [],
     lastError: null
   })
+  const [stoppingNode, setStoppingNode] = useState(false)
 
   // Use refs for interval IDs so cleanup is always correct
   const statsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -191,6 +217,29 @@ export default function Dashboard(): React.JSX.Element {
     }
   }, [])
 
+  const stopLocalNode = useCallback(async () => {
+    if (stoppingNode) return
+
+    setStoppingNode(true)
+    try {
+      await api.stopNode()
+      const [statusRes, nodesRes] = await Promise.all([api.getStatus(), api.getNodes()])
+      setState((prev) => ({
+        ...prev,
+        status: statusRes,
+        nodes: nodesRes.nodes ?? [],
+        lastError: null
+      }))
+    } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        lastError: err instanceof Error ? err.message : 'Failed to stop local node'
+      }))
+    } finally {
+      setStoppingNode(false)
+    }
+  }, [stoppingNode])
+
   // ---------------------------------------------------------------------------
   // Mount — kick off initial fetches then set up polling
   // ---------------------------------------------------------------------------
@@ -221,6 +270,7 @@ export default function Dashboard(): React.JSX.Element {
   const isLoading = backend === 'connecting'
   const onlineCount = nodes.filter((n) => n.running && n.rpc_running).length
   const offlineCount = nodes.length - onlineCount
+  const localPeerId = status?.node_info?.peer_id
 
   // ---------------------------------------------------------------------------
   // Render
@@ -332,7 +382,13 @@ export default function Dashboard(): React.JSX.Element {
           {nodes.length > 0 && (
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
               {nodes.map((node) => (
-                <NodeCard key={node.peer_id} node={node} />
+                <NodeCard
+                  key={`${node.peer_id}-${node.layer_start}-${node.layer_end}`}
+                  node={node}
+                  isLocal={Boolean(localPeerId && node.peer_id === localPeerId)}
+                  stopping={stoppingNode}
+                  onStop={() => void stopLocalNode()}
+                />
               ))}
             </div>
           )}

@@ -113,7 +113,7 @@
 | `frontend/src/preload/`                 | Electron preload bridge.                      |
 | `frontend/src/renderer/`                | React renderer application.                   |
 | `frontend/src/renderer/src/api/`        | HTTP and WebSocket API client.                |
-| `frontend/src/renderer/src/pages/`      | Dashboard, Network, Chat, and Settings pages. |
+| `frontend/src/renderer/src/pages/`      | Dashboard, Network, Chat, Monitoring, and Settings pages. |
 | `frontend/src/renderer/src/components/` | Shared renderer components.                   |
 | `frontend/src/renderer/src/assets/`     | CSS and static renderer assets.               |
 
