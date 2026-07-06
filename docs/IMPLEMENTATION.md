@@ -191,6 +191,10 @@ Options:
 
 The current frontend and backend are closer to option 1.
 
+### 2026-07-06 Sprint 06 Decision
+
+Keep one backend process equal to one serving participant for the current prototype. Local split-route testing should use multiple backend processes with different ports and layer ranges until a node registry is designed. The app should still expose model runnable state from DHT coverage so users can distinguish a supported registry model from a currently runnable model.
+
 ## Phase 7: Frontend Product Flow
 
 Goal: make the UI reflect actual distributed readiness.

@@ -1,7 +1,7 @@
 # Sprint 06 - Routing, Model Access, and Incentives
 
 **Goal:** Define and implement the next backend/product layer after local validation and client workflow cleanup: multi-node serving strategy, runnable-model semantics, and model-aware contribution accounting.
-**Start:** TBD
+**Start:** 2026-07-06
 **End:** TBD
 
 ---
@@ -20,30 +20,33 @@ Sprint 06 should not begin until Sprint 04 validates the local inference path an
 
 ## In Progress
 
-- [ ] Not started.
+- [x] Define and expose runnable-model semantics.
 
 ## Todo
 
-- [ ] Decide backend serving model: node registry in one process or one process per participant.
+- [x] Decide backend serving model: node registry in one process or one process per participant.
 - [ ] If using a registry, design `/node/start`, `/node/stop`, `/status`, and `/nodes` around multiple local nodes.
-- [ ] If using one process per participant, document local multi-node testing commands and UI limitations.
-- [ ] Add runnable-model status: supported by registry plus complete compatible route coverage.
-- [ ] Expose missing layer ranges and wrong-model route reasons before inference starts.
+- [x] If using one process per participant, document local multi-node testing commands and UI limitations.
+- [x] Add runnable-model status: supported by registry plus complete compatible route coverage.
+- [x] Expose missing layer ranges and wrong-model route reasons before inference starts.
 - [ ] Define model-aware incentive accounting fields: model, layer range, tokens/requests served, latency, success/failure, hardware class, and identity.
 - [ ] Decide whether initial rewards are simulated accounting only before real token integration.
 - [ ] Add tests for model-runnable state and multi-node route readiness.
 
 ## Done
 
-- [ ] None yet.
+- [x] Current serving strategy is one backend process per serving participant; multi-node local split testing should use multiple backend processes until a node registry is designed.
+- [x] `/models` now reports model availability separately from runnable route coverage.
+- [x] The frontend model surfaces can explain runnable versus not runnable model state.
+- [x] WebSocket streaming reports generator readiness errors instead of mock fallback responses.
 
 ---
 
 ## Acceptance Criteria
 
-- [ ] Multi-node local testing strategy is explicit and testable.
-- [ ] The app can explain why a model is or is not currently runnable.
-- [ ] Inference is gated by complete compatible route coverage, not only by model registry membership.
+- [x] Multi-node local testing strategy is explicit and testable.
+- [x] The app can explain why a model is or is not currently runnable.
+- [x] Inference is gated by complete compatible route coverage, not only by model registry membership.
 - [ ] Incentive semantics are model-aware and contribution-aware.
 - [ ] No token UI is added before route correctness and accounting fields are validated.
 - [ ] Backend tests cover the chosen model/routing semantics.
@@ -57,3 +60,9 @@ Sprint 06 should not begin until Sprint 04 validates the local inference path an
 - What changed: created Sprint 06 to hold structural routing, model access, and incentive decisions split out from Sprint 04.
 - Why: these questions affect backend contracts and reward design and should not be mixed into the local validation or UI-control sprint.
 - Status: sprint is planned but not started.
+
+### 2026-07-06 - Add runnable-model route status
+
+- What changed: chose one backend process per serving participant for the current prototype; added route-derived runnable status fields to `/models`; updated frontend model status displays; removed the WebSocket mock generation fallback; added tests for runnable and non-runnable model status.
+- Why: users should not infer that every registered model is runnable. A model is runnable only when the active network has complete compatible layer coverage for that model.
+- Status: focused backend readiness tests pass with 28 tests and frontend typecheck passes. Incentive accounting semantics remain open.

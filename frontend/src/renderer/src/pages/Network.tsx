@@ -494,7 +494,7 @@ export default function Network(): React.JSX.Element {
                   >
                     {models.map((m) => (
                       <option key={m.id} value={m.id}>
-                        {m.id} — {m.description}
+                        {m.id} — {m.runnable ? 'runnable' : 'not runnable'}
                       </option>
                     ))}
                   </select>
@@ -515,9 +515,23 @@ export default function Network(): React.JSX.Element {
                 )}
 
                 {selectedInferModel && (
-                  <p className="font-mono text-[10px] text-text-dim">
-                    Routes through {selectedInferModel.num_layers} layers across the network
-                  </p>
+                  <div className="rounded-lg border border-border bg-bg-surface px-3 py-2.5">
+                    <p
+                      className={`font-mono text-[10px] ${
+                        selectedInferModel.runnable ? 'text-green' : 'text-amber'
+                      }`}
+                    >
+                      {selectedInferModel.runnable
+                        ? `Runnable route across ${selectedInferModel.compatible_nodes} node(s)`
+                        : `Not runnable: ${
+                            selectedInferModel.route_reasons[0] ?? 'missing compatible coverage'
+                          }`}
+                    </p>
+                    <p className="mt-1 font-mono text-[10px] text-text-dim">
+                      {selectedInferModel.covered_layers} / {selectedInferModel.total_layers}{' '}
+                      layers covered
+                    </p>
+                  </div>
                 )}
               </div>
 

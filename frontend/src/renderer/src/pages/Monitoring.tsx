@@ -204,7 +204,9 @@ export default function Monitoring(): React.JSX.Element {
                   Layer Coverage
                 </h2>
                 <p className="mt-1 text-sm text-text-secondary">
-                  Complete compatible coverage is required before a model is runnable.
+                  {selectedModel?.runnable
+                    ? `Runnable with ${selectedModel.compatible_nodes} compatible node(s).`
+                    : (selectedModel?.route_reasons[0] ?? 'Complete compatible coverage is required.')}
                 </p>
               </div>
               <select
@@ -235,13 +237,21 @@ export default function Monitoring(): React.JSX.Element {
               />
             </div>
 
-            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div className="rounded-lg border border-border bg-bg-surface p-4">
+                <p className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
+                  Backend Route
+                </p>
+                <p className="mt-2 font-mono text-[12px] text-text-secondary">
+                  {selectedModel?.route_ready ? 'Ready' : 'Not runnable'}
+                </p>
+              </div>
               <div className="rounded-lg border border-border bg-bg-surface p-4">
                 <p className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
                   Missing Ranges
                 </p>
                 <p className="mt-2 font-mono text-[12px] text-text-secondary">
-                  {rangesFromMissing(coverage.missing)}
+                  {rangesFromMissing(selectedModel?.missing_layers ?? coverage.missing)}
                 </p>
               </div>
               <div className="rounded-lg border border-border bg-bg-surface p-4">

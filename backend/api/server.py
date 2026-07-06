@@ -55,6 +55,13 @@ def _validate_environment() -> None:
     )
 
 
+def _format_route_trace(route: list[dict]) -> list[str]:
+    return [
+        f"{item['peer_id'][:8]}… (layers {item['layer_start']}→{item['layer_end']})"
+        for item in route
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
@@ -268,8 +275,20 @@ async def get_models() -> dict:
     frontend can show the HuggingFace redirect prompt.
     """
     token_available = token_is_set()
+    dht = (node.dht if node is not None else None) or client_dht
+    active_prefix = (
+        getattr(node, "dht_prefix", None)
+        if node is not None
+        else client_dht_prefix
+    ) or DHT_PREFIX
     models = []
     for model_id, info in SUPPORTED_MODELS.items():
+        route_status = _get_model_route_status(
+            model_id=model_id,
+            model_info=info,
+            dht=dht,
+            dht_prefix=active_prefix,
+        )
         models.append({
             "id":           model_id,
             "num_layers":   info["num_layers"],
@@ -279,12 +298,82 @@ async def get_models() -> dict:
             "vram_gb":      info["vram_gb"],
             # Can this model be used right now?
             "available":    not info["gated"] or token_available,
+            "runnable":     route_status["runnable"],
+            "route_ready":  route_status["route_ready"],
+            "route_reasons": route_status["reasons"],
+            "covered_layers": route_status["covered_layers"],
+            "missing_layers": route_status["missing_layers"],
+            "total_layers": route_status["total_layers"],
+            "compatible_nodes": route_status["compatible_nodes"],
+            "route_trace": route_status["route_trace"],
         })
     return {
         "models":          models,
         "token_available": token_available,
         "default_peers":   DISTRIBLLM_INITIAL_PEERS,
     }
+
+
+def _get_model_route_status(
+    model_id: str,
+    model_info: dict,
+    dht: Optional[hivemind.DHT],
+    dht_prefix: str,
+) -> dict:
+    total_layers = int(model_info["num_layers"])
+    empty_status = {
+        "runnable": False,
+        "route_ready": False,
+        "reasons": [],
+        "covered_layers": 0,
+        "missing_layers": list(range(total_layers)),
+        "total_layers": total_layers,
+        "compatible_nodes": 0,
+        "route_trace": [],
+    }
+
+    if dht is None:
+        return {
+            **empty_status,
+            "reasons": ["No DHT connection yet."],
+        }
+
+    seq = RemoteSequential(
+        dht=dht,
+        dht_prefix=dht_prefix,
+        num_layers=total_layers,
+        model_name=model_id,
+    )
+    try:
+        network_status = seq.get_network_status()
+        nodes = network_status["nodes"]
+        route = seq.validate_route(nodes)
+        return {
+            "runnable": True,
+            "route_ready": True,
+            "reasons": [],
+            "covered_layers": network_status["covered_layers"],
+            "missing_layers": network_status["missing_layers"],
+            "total_layers": total_layers,
+            "compatible_nodes": len(nodes),
+            "route_trace": _format_route_trace(route),
+        }
+    except Exception as e:
+        try:
+            network_status = seq.get_network_status()
+            nodes = network_status["nodes"]
+            return {
+                **empty_status,
+                "reasons": [str(e)],
+                "covered_layers": network_status["covered_layers"],
+                "missing_layers": network_status["missing_layers"],
+                "compatible_nodes": len(nodes),
+            }
+        except Exception as status_error:
+            return {
+                **empty_status,
+                "reasons": [str(status_error)],
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -466,10 +555,7 @@ async def get_generator_status() -> dict:
     try:
         route = generator.sequential.validate_route()
         route_ready = True
-        node_trace = [
-            f"{item['peer_id'][:8]}… (layers {item['layer_start']}→{item['layer_end']})"
-            for item in route
-        ]
+        node_trace = _format_route_trace(route)
     except Exception as e:
         reasons.append(str(e))
 
@@ -564,7 +650,7 @@ async def stream(websocket: WebSocket) -> None:
                 ):
                     await websocket.send_json(chunk)
             else:
-                await _mock_stream(websocket, message)
+                await websocket.send_json({"error": "Generator not ready."})
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected: {websocket.client}")
@@ -574,15 +660,3 @@ async def stream(websocket: WebSocket) -> None:
             await websocket.send_json({"error": str(e)})
         except Exception:
             pass
-
-
-async def _mock_stream(websocket: WebSocket, message: str) -> None:
-    response = (
-        "Generator not connected yet. "
-        "Go to the Network page, start a node, then start the generator. "
-        f"Your message was: '{message}'"
-    )
-    for word in response.split():
-        await websocket.send_json({"token": word + " "})
-        await asyncio.sleep(0.04)
-    await websocket.send_json({"done": True, "node_trace": []})

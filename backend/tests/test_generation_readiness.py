@@ -499,6 +499,92 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertFalse(result["route_ready"])
         self.assertEqual(result["reasons"], ["missing layers"])
 
+    def test_models_report_not_runnable_without_dht_connection(self) -> None:
+        from api import server as api_server
+
+        original_node = api_server.node
+        original_client_dht = api_server.client_dht
+        api_server.node = None
+        api_server.client_dht = None
+        try:
+            result = asyncio.run(api_server.get_models())
+        finally:
+            api_server.node = original_node
+            api_server.client_dht = original_client_dht
+
+        opt = next(model for model in result["models"] if model["id"] == "facebook/opt-125m")
+        self.assertFalse(opt["runnable"])
+        self.assertFalse(opt["route_ready"])
+        self.assertEqual(opt["covered_layers"], 0)
+        self.assertEqual(opt["missing_layers"], list(range(12)))
+        self.assertEqual(opt["route_reasons"], ["No DHT connection yet."])
+
+    def test_models_report_runnable_for_complete_compatible_route(self) -> None:
+        from api import server as api_server
+
+        class DummyNode:
+            dht = object()
+            dht_prefix = "custom-prefix"
+
+        class CaptureSequential:
+            def __init__(
+                self,
+                dht,
+                dht_prefix: str,
+                num_layers: int,
+                model_name: str | None = None,
+            ) -> None:
+                self.num_layers = num_layers
+                self.model_name = model_name
+
+            def get_network_status(self) -> dict:
+                if self.model_name == "facebook/opt-125m":
+                    return {
+                        "nodes": [
+                            {
+                                "peer_id": "peer-123456",
+                                "layer_start": 0,
+                                "layer_end": 12,
+                                "model_name": "facebook/opt-125m",
+                                "rpc_uid": "uid",
+                            }
+                        ],
+                        "covered_layers": 12,
+                        "missing_layers": [],
+                    }
+                return {
+                    "nodes": [],
+                    "covered_layers": 0,
+                    "missing_layers": list(range(self.num_layers)),
+                }
+
+            def validate_route(self, nodes: list[dict] | None = None) -> list[dict]:
+                if self.model_name != "facebook/opt-125m":
+                    raise RuntimeError("No compatible route")
+                assert nodes is not None
+                return nodes
+
+        original_node = api_server.node
+        original_client_dht = api_server.client_dht
+        original_sequential = api_server.RemoteSequential
+        api_server.node = DummyNode()
+        api_server.client_dht = None
+        api_server.RemoteSequential = CaptureSequential
+        try:
+            result = asyncio.run(api_server.get_models())
+        finally:
+            api_server.node = original_node
+            api_server.client_dht = original_client_dht
+            api_server.RemoteSequential = original_sequential
+
+        opt = next(model for model in result["models"] if model["id"] == "facebook/opt-125m")
+        self.assertTrue(opt["runnable"])
+        self.assertTrue(opt["route_ready"])
+        self.assertEqual(opt["covered_layers"], 12)
+        self.assertEqual(opt["missing_layers"], [])
+        self.assertEqual(opt["compatible_nodes"], 1)
+        self.assertEqual(opt["route_trace"], ["peer-123… (layers 0→12)"])
+
     def test_stop_generator_requests_cancellation(self) -> None:
         from api import server as api_server
 

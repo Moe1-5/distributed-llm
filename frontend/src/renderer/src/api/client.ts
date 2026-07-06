@@ -30,6 +30,14 @@ export interface ModelInfo {
   description: string
   vram_gb: number
   available: boolean
+  runnable: boolean
+  route_ready: boolean
+  route_reasons: string[]
+  covered_layers: number
+  missing_layers: number[]
+  total_layers: number
+  compatible_nodes: number
+  route_trace: string[]
 }
 
 export interface Stats {
