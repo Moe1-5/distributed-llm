@@ -158,18 +158,15 @@ Dashboard says backend not reachable, or all API calls fail.
 
 ### Likely Cause
 
-The frontend API client hardcodes:
+The renderer is using a backend URL that does not match the running FastAPI server, or the Electron content security policy blocks the configured URL.
 
-```ts
-const BASE_URL = "http://172.27.32.227:8000";
-const WS_URL = "ws://172.27.32.227:8000";
-```
+The current defaults are `http://127.0.0.1:8000` and `ws://127.0.0.1:8000`. Vite env overrides must use `VITE_API_BASE_URL` and `VITE_WS_BASE_URL`.
 
-If the backend is running elsewhere, requests fail.
+If the backend is running on another host or port, requests fail.
 
 ### Fix Direction
 
-Make backend URL configurable through environment variables or settings.
+Set the frontend Vite env values to the running backend and restart the Electron/Vite dev server so the env is reloaded.
 
 ## Error: DHT bootstrap peers cannot be reached
 
@@ -200,6 +197,23 @@ Daemon failed to start: ... failed to connect to bootstrap peers
 - The configured bootstrap address does not match the actual bootstrap node.
 - The host/port or network path is blocked.
 - The identity or peer metadata is stale or mismatched.
+
+## Generation Trace Files
+
+### Use Case
+
+When generated text looks broken, repetitive, or contains replacement characters, call `/generator/trace` instead of relying only on `/chat` or the frontend stream. The endpoint records prompt token IDs, selected generated token IDs, decoded token text, decoded output so far, top candidates, tensor shapes, route trace, and replacement-character flags.
+
+### Output Location
+
+Trace calls write JSON files to `backend/traces/` by default. Override the directory with `DISTRIBLLM_TRACE_DIR` when you want trace artifacts elsewhere. The directory is gitignored because traces are runtime debugging output.
+
+### How to Interpret
+
+- If the selected `token_id` is already odd but the decoded `token_text` is faithful, inspect sampling controls and top candidates.
+- If `token_text_contains_replacement_char` or `decoded_output_contains_replacement_char` becomes true, inspect tokenizer decoding and token boundary handling.
+- If `/generator/trace` looks clean but the frontend stream looks corrupted, inspect WebSocket chunk rendering and frontend concatenation.
+- If `/generator/parity/next-token` matches direct HuggingFace but `/chat` gives poor sampled text, treat the issue as sampling or base-model behavior until a broader parity failure is found.
 
 ## Debugging Checklist
 

@@ -2,7 +2,7 @@
 
 **Goal:** Turn the Electron app into a clear client workflow after local inference validation is understood: no bootstrap-as-product tab, clear node controls, inference cancellation, and a monitoring page shell backed by real status.
 **Start:** 2026-07-06
-**End:** TBD
+**End:** 2026-07-06
 
 ---
 
@@ -78,3 +78,15 @@ Sprint 05 starts only after Sprint 04 gives enough confidence about backend read
 - What changed: removed the deprecated `baseUrl` compiler option from the frontend web TypeScript config and made the renderer path alias explicitly relative.
 - Why: the IDE reported that `baseUrl` is deprecated for TypeScript 7.0, while using the TypeScript 6-only deprecation silencer would break the repo's installed TypeScript 5.9 compiler.
 - Status: `npm run typecheck` passes.
+
+### 2026-07-06 - Fix frontend backend URL configuration
+
+- What changed: corrected the local frontend WebSocket env key to `VITE_WS_BASE_URL`; updated Electron content security policy entries to allow localhost backend HTTP and WebSocket URLs; updated architecture/debug docs that still described the old hardcoded WSL backend IP.
+- Why: the backend was running on `127.0.0.1:8000`, but the Electron renderer could still fail fetches because the dev env/CSP path was stale or blocked.
+- Status: backend `/status` responds on `127.0.0.1:8000` and frontend `npm run typecheck` passes. Restart the Electron/Vite dev server after env changes so Vite reloads the values.
+
+### 2026-07-06 - Close Sprint 05
+
+- What changed: archived Sprint 05 after confirming its checklist and acceptance criteria were complete.
+- Why: the user explicitly asked to close Sprint 05 if finished.
+- Status: Sprint 05 is closed and archived.

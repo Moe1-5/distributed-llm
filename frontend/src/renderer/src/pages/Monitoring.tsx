@@ -1,11 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, type GeneratorStatus, type ModelInfo, type NetworkStatus, type NodeInfo } from '../api/client'
-
-type BackendState = 'connecting' | 'online' | 'unreachable'
+import { api, type GeneratorStatus, type ModelInfo, type NodeInfo } from '../api/client'
 
 interface MonitoringState {
-  backend: BackendState
-  status: NetworkStatus | null
   generator: GeneratorStatus | null
   models: ModelInfo[]
   nodes: NodeInfo[]
@@ -14,27 +10,14 @@ interface MonitoringState {
   lastError: string | null
 }
 
-interface StatusPillProps {
+interface MapNode {
+  id: string
   label: string
-  ok: boolean
-  detail?: string
-}
-
-function StatusPill({ label, ok, detail }: StatusPillProps): React.JSX.Element {
-  return (
-    <div
-      className={`
-        flex min-h-20 flex-col justify-between rounded-xl border p-4
-        ${ok ? 'border-green/20 bg-green/5' : 'border-border bg-bg-elevated'}
-      `}
-    >
-      <span className="font-mono text-[10px] tracking-widest text-text-dim uppercase">{label}</span>
-      <span className={`mt-2 text-lg font-semibold ${ok ? 'text-green' : 'text-text-secondary'}`}>
-        {ok ? 'Ready' : 'Not ready'}
-      </span>
-      {detail && <span className="mt-1 font-mono text-[10px] text-text-dim">{detail}</span>}
-    </div>
-  )
+  detail: string
+  x: number
+  y: number
+  kind: 'client' | 'model' | 'provider'
+  online: boolean
 }
 
 function rangesFromMissing(missing: number[]): string {
@@ -58,10 +41,12 @@ function rangesFromMissing(missing: number[]): string {
   return ranges.join(', ')
 }
 
+function shortPeer(peerId: string): string {
+  return peerId.length <= 10 ? peerId : `${peerId.slice(0, 8)}...`
+}
+
 export default function Monitoring(): React.JSX.Element {
   const [state, setState] = useState<MonitoringState>({
-    backend: 'connecting',
-    status: null,
     generator: null,
     models: [],
     nodes: [],
@@ -74,8 +59,7 @@ export default function Monitoring(): React.JSX.Element {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, generator, modelsRes, nodesRes] = await Promise.all([
-        api.getStatus(),
+      const [generator, modelsRes, nodesRes] = await Promise.all([
         api.getGeneratorStatus(),
         api.getModels(),
         api.getNodes()
@@ -86,8 +70,6 @@ export default function Monitoring(): React.JSX.Element {
           prev.selectedModel || generator.model_name || modelsRes.models[0]?.id || ''
 
         return {
-          backend: 'online',
-          status,
           generator,
           models: modelsRes.models,
           nodes: nodesRes.nodes ?? [],
@@ -99,8 +81,7 @@ export default function Monitoring(): React.JSX.Element {
     } catch (err) {
       setState((prev) => ({
         ...prev,
-        backend: 'unreachable',
-        lastError: err instanceof Error ? err.message : 'Backend unreachable'
+        lastError: err instanceof Error ? err.message : 'Network monitor refresh failed'
       }))
     }
   }, [])
@@ -116,6 +97,7 @@ export default function Monitoring(): React.JSX.Element {
 
   const selectedModel = state.models.find((model) => model.id === state.selectedModel)
   const modelNodes = state.nodes.filter((node) => node.model_name === state.selectedModel)
+  const routeTrace = state.generator?.node_trace ?? []
 
   const coverage = useMemo(() => {
     if (!selectedModel) {
@@ -143,8 +125,47 @@ export default function Monitoring(): React.JSX.Element {
     }
   }, [modelNodes, selectedModel])
 
-  const routeTrace = state.generator?.node_trace ?? []
-  const generatorReasons = state.generator?.reasons ?? []
+  const mapNodes = useMemo<MapNode[]>(() => {
+    const providerCount = Math.max(modelNodes.length, 1)
+    const providers = modelNodes.map((node, index) => {
+      const angle = -Math.PI / 2 + (index / providerCount) * Math.PI * 2
+      const radiusX = 250
+      const radiusY = 125
+      return {
+        id: node.peer_id,
+        label: shortPeer(node.peer_id),
+        detail: `${node.layer_start}-${node.layer_end}`,
+        x: 420 + Math.cos(angle) * radiusX,
+        y: 190 + Math.sin(angle) * radiusY,
+        kind: 'provider' as const,
+        online: node.running && node.rpc_running
+      }
+    })
+
+    return [
+      {
+        id: 'client',
+        label: 'Client',
+        detail: state.generator?.model_name ?? 'Generator',
+        x: 92,
+        y: 190,
+        kind: 'client',
+        online: Boolean(state.generator?.ready)
+      },
+      {
+        id: 'model',
+        label: selectedModel?.id ?? 'Model',
+        detail: `${coverage.covered}/${selectedModel?.num_layers ?? 0} layers`,
+        x: 420,
+        y: 190,
+        kind: 'model',
+        online: Boolean(selectedModel?.runnable)
+      },
+      ...providers
+    ]
+  }, [coverage.covered, modelNodes, selectedModel, state.generator])
+
+  const providerNodes = mapNodes.filter((node) => node.kind === 'provider')
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">
@@ -152,61 +173,42 @@ export default function Monitoring(): React.JSX.Element {
         <div>
           <h1 className="text-xl font-semibold tracking-tight text-text-primary">Monitoring</h1>
           <p className="mt-0.5 font-mono text-[11px] text-text-secondary">
-            Network readiness, route health, and model coverage
+            P2P route map, layer coverage, and serving-node visibility
           </p>
         </div>
-        <button
-          onClick={() => void refresh()}
-          className="h-9 rounded-lg border border-cyan/30 bg-cyan-dim px-4 font-mono text-[10px] font-semibold text-cyan transition-colors hover:bg-cyan/20"
-        >
-          REFRESH
-        </button>
+        <div className="flex items-center gap-3">
+          {state.lastUpdated && (
+            <span className="font-mono text-[10px] text-text-dim">
+              {state.lastUpdated.toLocaleTimeString()}
+            </span>
+          )}
+          <button
+            onClick={() => void refresh()}
+            className="h-9 rounded-lg border border-cyan/30 bg-cyan-dim px-4 font-mono text-[10px] font-semibold text-cyan transition-colors hover:bg-cyan/20"
+          >
+            REFRESH
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-col gap-6 p-7">
-        {state.backend === 'unreachable' && (
+        {state.lastError && (
           <div className="rounded-xl border border-red/20 bg-red/5 px-5 py-4">
-            <p className="font-mono text-[12px] text-red">Backend not reachable</p>
-            {state.lastError && (
-              <p className="mt-1 font-mono text-[10px] text-red/70">{state.lastError}</p>
-            )}
+            <p className="font-mono text-[12px] text-red">{state.lastError}</p>
           </div>
         )}
-
-        <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <StatusPill
-            label="Backend"
-            ok={state.backend === 'online'}
-            detail={state.lastUpdated ? state.lastUpdated.toLocaleTimeString() : 'Waiting'}
-          />
-          <StatusPill
-            label="Local Node"
-            ok={Boolean(state.status?.node_running)}
-            detail={state.status?.node_info?.model_name ?? 'No local node'}
-          />
-          <StatusPill
-            label="Generator"
-            ok={Boolean(state.status?.generator_ready)}
-            detail={state.generator?.model_name ?? 'Not loaded'}
-          />
-          <StatusPill
-            label="Route"
-            ok={Boolean(state.generator?.route_ready)}
-            detail={routeTrace.length > 0 ? `${routeTrace.length} hop route` : 'No route'}
-          />
-        </section>
 
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
           <div className="rounded-xl border border-border bg-bg-elevated p-5">
             <div className="mb-5 flex items-start justify-between gap-4">
               <div>
                 <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
-                  Layer Coverage
+                  Network Map
                 </h2>
                 <p className="mt-1 text-sm text-text-secondary">
                   {selectedModel?.runnable
-                    ? `Runnable with ${selectedModel.compatible_nodes} compatible node(s).`
-                    : (selectedModel?.route_reasons[0] ?? 'Complete compatible coverage is required.')}
+                    ? 'Complete compatible coverage is available.'
+                    : (selectedModel?.route_reasons[0] ?? 'Waiting for compatible providers.')}
                 </p>
               </div>
               <select
@@ -224,92 +226,136 @@ export default function Monitoring(): React.JSX.Element {
               </select>
             </div>
 
-            <div className="mb-3 flex items-center justify-between font-mono text-[10px] text-text-dim">
-              <span>
-                {coverage.covered} / {selectedModel?.num_layers ?? 0} layers
-              </span>
-              <span>{coverage.percent}% covered</span>
-            </div>
-            <div className="h-3 overflow-hidden rounded-full border border-border bg-bg-surface">
-              <div
-                className="h-full bg-cyan transition-all duration-300"
-                style={{ width: `${coverage.percent}%` }}
-              />
-            </div>
+            <div className="relative h-[380px] overflow-hidden rounded-lg border border-border bg-bg-base">
+              <svg viewBox="0 0 760 380" className="h-full w-full">
+                <defs>
+                  <filter id="soft-glow">
+                    <feGaussianBlur stdDeviation="3" result="blur" />
+                    <feMerge>
+                      <feMergeNode in="blur" />
+                      <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                  </filter>
+                </defs>
 
-            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
-              <div className="rounded-lg border border-border bg-bg-surface p-4">
-                <p className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
-                  Backend Route
-                </p>
-                <p className="mt-2 font-mono text-[12px] text-text-secondary">
-                  {selectedModel?.route_ready ? 'Ready' : 'Not runnable'}
-                </p>
-              </div>
-              <div className="rounded-lg border border-border bg-bg-surface p-4">
-                <p className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
-                  Missing Ranges
-                </p>
-                <p className="mt-2 font-mono text-[12px] text-text-secondary">
-                  {rangesFromMissing(selectedModel?.missing_layers ?? coverage.missing)}
-                </p>
-              </div>
-              <div className="rounded-lg border border-border bg-bg-surface p-4">
-                <p className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
-                  Latency
-                </p>
-                <p className="mt-2 font-mono text-[12px] text-text-secondary">
-                  Probe metrics pending
-                </p>
-              </div>
+                <line x1="92" y1="190" x2="420" y2="190" stroke="#2a3a4d" strokeWidth="1.5" />
+                {providerNodes.map((node) => (
+                  <line
+                    key={`${node.id}-edge`}
+                    x1="420"
+                    y1="190"
+                    x2={node.x}
+                    y2={node.y}
+                    stroke={node.online ? '#00d4ff70' : '#2a3a4d'}
+                    strokeWidth="1.5"
+                  />
+                ))}
+
+                {mapNodes.map((node) => {
+                  const fill =
+                    node.kind === 'client'
+                      ? '#00d4ff'
+                      : node.kind === 'model'
+                        ? '#ffaa00'
+                        : node.online
+                          ? '#00ff88'
+                          : '#3a4a5a'
+                  const radius = node.kind === 'model' ? 24 : node.kind === 'client' ? 20 : 16
+
+                  return (
+                    <g key={node.id}>
+                      <circle
+                        cx={node.x}
+                        cy={node.y}
+                        r={radius}
+                        fill={fill}
+                        opacity={node.online ? 0.92 : 0.55}
+                        filter={node.online ? 'url(#soft-glow)' : undefined}
+                      />
+                      <text
+                        x={node.x}
+                        y={node.y + radius + 18}
+                        textAnchor="middle"
+                        fill="#e8edf2"
+                        fontSize="11"
+                        fontFamily="IBM Plex Mono, monospace"
+                      >
+                        {node.label}
+                      </text>
+                      <text
+                        x={node.x}
+                        y={node.y + radius + 34}
+                        textAnchor="middle"
+                        fill="#7a8a9a"
+                        fontSize="10"
+                        fontFamily="IBM Plex Mono, monospace"
+                      >
+                        {node.detail}
+                      </text>
+                    </g>
+                  )
+                })}
+              </svg>
             </div>
           </div>
 
-          <div className="rounded-xl border border-border bg-bg-elevated p-5">
-            <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
-              Route Trace
-            </h2>
-            <div className="mt-4 flex flex-col gap-2">
-              {routeTrace.length === 0 ? (
-                <p className="font-mono text-[11px] text-text-dim">No validated route yet.</p>
-              ) : (
-                routeTrace.map((hop, index) => (
-                  <div
-                    key={`${hop}-${index}`}
-                    className="rounded-lg border border-cyan/20 bg-cyan-dim px-3 py-2 font-mono text-[11px] text-cyan"
-                  >
-                    {hop}
-                  </div>
-                ))
-              )}
+          <div className="flex flex-col gap-4">
+            <div className="rounded-xl border border-border bg-bg-elevated p-5">
+              <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
+                Layer Coverage
+              </h2>
+              <div className="mt-4 flex items-end justify-between">
+                <span className="text-3xl font-semibold text-text-primary">{coverage.percent}%</span>
+                <span className="font-mono text-[11px] text-text-dim">
+                  {coverage.covered}/{selectedModel?.num_layers ?? 0}
+                </span>
+              </div>
+              <div className="mt-4 h-3 overflow-hidden rounded-full border border-border bg-bg-surface">
+                <div
+                  className="h-full bg-cyan transition-all duration-300"
+                  style={{ width: `${coverage.percent}%` }}
+                />
+              </div>
+              <p className="mt-4 font-mono text-[11px] text-text-secondary">
+                Missing: {rangesFromMissing(selectedModel?.missing_layers ?? coverage.missing)}
+              </p>
             </div>
 
-            {generatorReasons.length > 0 && (
-              <div className="mt-5 rounded-lg border border-red/20 bg-red/5 p-3">
-                <p className="font-mono text-[10px] tracking-widest text-red uppercase">
-                  Readiness Reasons
-                </p>
-                {generatorReasons.map((reason) => (
-                  <p key={reason} className="mt-2 font-mono text-[11px] text-red/80">
-                    {reason}
-                  </p>
-                ))}
+            <div className="rounded-xl border border-border bg-bg-elevated p-5">
+              <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
+                Route Chain
+              </h2>
+              <div className="mt-4 flex flex-col gap-2">
+                {routeTrace.length === 0 ? (
+                  <p className="font-mono text-[11px] text-text-dim">No validated route yet.</p>
+                ) : (
+                  routeTrace.map((hop, index) => (
+                    <div
+                      key={`${hop}-${index}`}
+                      className="rounded-lg border border-cyan/20 bg-cyan-dim px-3 py-2 font-mono text-[11px] text-cyan"
+                    >
+                      {index + 1}. {hop}
+                    </div>
+                  ))
+                )}
               </div>
-            )}
+            </div>
           </div>
         </section>
 
         <section>
           <h2 className="mb-3 font-mono text-[10px] tracking-widest text-text-dim uppercase">
-            Discovered Serving Nodes
+            Serving Providers
           </h2>
-          {state.nodes.length === 0 ? (
+          {modelNodes.length === 0 ? (
             <div className="rounded-xl border border-border bg-bg-elevated px-5 py-8 text-center">
-              <p className="font-mono text-[12px] text-text-secondary">No serving nodes found</p>
+              <p className="font-mono text-[12px] text-text-secondary">
+                No providers for the selected model.
+              </p>
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
-              {state.nodes.map((node) => (
+              {modelNodes.map((node) => (
                 <div
                   key={`${node.peer_id}-${node.layer_start}-${node.layer_end}`}
                   className="rounded-xl border border-border bg-bg-elevated p-4"
@@ -317,10 +363,10 @@ export default function Monitoring(): React.JSX.Element {
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <p className="truncate font-mono text-[11px] font-semibold text-text-primary">
-                        {node.model_name}
+                        {shortPeer(node.peer_id)}
                       </p>
                       <p className="mt-1 truncate font-mono text-[9px] text-text-dim">
-                        {node.peer_id}
+                        {node.model_name}
                       </p>
                     </div>
                     <span
@@ -335,9 +381,7 @@ export default function Monitoring(): React.JSX.Element {
                   </div>
                   <div className="mt-4 flex flex-wrap gap-1.5">
                     <span className="rounded border border-cyan/20 bg-cyan-dim px-2 py-0.5 font-mono text-[10px] text-cyan">
-                      {node.layer_start}
-                      {' -> '}
-                      {node.layer_end}
+                      layers {node.layer_start}-{node.layer_end}
                     </span>
                     <span className="rounded border border-border px-2 py-0.5 font-mono text-[10px] text-text-dim uppercase">
                       {node.device}

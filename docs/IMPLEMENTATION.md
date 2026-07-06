@@ -275,7 +275,7 @@ This phase should wait until core inference, health checks, and route correctnes
 
 ### 2026-07-06 Sprint 06 Decision
 
-Initial incentives are simulated accounting only. The backend records model-aware and contribution-aware serving metrics for the local node: peer identity, model, layer range, layers served, device, successful requests, failed requests, token positions served, latency totals, average latency, and last success/error timestamps. Token UI, balances, claims, and reward settlement stay disabled until route correctness, health checks, anti-abuse checks, and receipt/proof design are validated. Real incentives are deferred to Sprint 08.
+Initial incentives are simulated accounting only. The backend records model-aware and contribution-aware serving metrics for the local node: peer identity, model, layer range, layers served, device, successful requests, failed requests, token positions served, latency totals, average latency, and last success/error timestamps. Token UI, balances, claims, and reward settlement stay disabled until route correctness, health checks, anti-abuse checks, and receipt/proof design are validated. Real incentives are deferred to Sprint 10.
 
 ## Phase 11: API Access for Served Models
 

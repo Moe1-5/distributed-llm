@@ -63,7 +63,7 @@ app.whenReady().then(() => {
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'self'; connect-src 'self' http://172.27.32.227:8000 ws://172.27.32.227:8000; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'"
+          "default-src 'self'; connect-src 'self' http://127.0.0.1:8000 ws://127.0.0.1:8000 http://localhost:8000 ws://localhost:8000; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'"
         ],
         'Access-Control-Allow-Origin': ['*'],
         'Access-Control-Allow-Headers': ['*'],

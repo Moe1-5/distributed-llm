@@ -31,7 +31,7 @@ The frontend provides four pages:
 
 The frontend talks to the backend through `frontend/src/renderer/src/api/client.ts`.
 
-Important current limitation: the backend URL is hardcoded to `http://172.27.32.227:8000` and `ws://172.27.32.227:8000`.
+The backend URL defaults to `http://127.0.0.1:8000` and can be overridden with `VITE_API_BASE_URL`. The WebSocket URL defaults from the HTTP URL and can be overridden with `VITE_WS_BASE_URL`.
 
 ### FastAPI Backend
 

@@ -1,4 +1,4 @@
-# Sprint 08 - Real Incentives and Settlement
+# Sprint 10 - Real Incentives and Settlement
 
 **Goal:** Turn simulated contribution accounting into real incentive/reward behavior only after inference correctness, route health, anti-abuse checks, and proof/receipt prerequisites are ready.
 **Start:** TBD
@@ -60,6 +60,6 @@ Real incentives should wait until useful work can be measured reliably and abuse
 
 ### 2026-07-06 - Defer real incentives until prerequisites are ready
 
-- What changed: created Sprint 08 as the future home for real token incentives, rewards, receipts, anti-abuse checks, and settlement mechanics.
+- What changed: created the future home for real token incentives, rewards, receipts, anti-abuse checks, and settlement mechanics. This was later moved from Sprint 08 to Sprint 10 so Sprint 08 can handle client refinements and generation diagnostics first.
 - Why: Sprint 06 only added simulated contribution accounting; the system is not ready to issue rewards until route correctness, health checks, multi-node validation, proof/receipt design, and anti-abuse controls are done.
 - Status: sprint is planned but blocked by prerequisites.

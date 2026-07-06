@@ -34,6 +34,9 @@ Thumbs.db
 # Assistant/session state
 .claude/sprint-sessions/
 
+# Runtime generation diagnostics
+backend/traces/
+
 # Hivemind / model cache
 *.bin
 *.safetensors

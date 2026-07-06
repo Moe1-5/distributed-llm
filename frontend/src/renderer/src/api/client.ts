@@ -91,6 +91,15 @@ export interface GeneratorStartParams {
   initial_peers: string[]
 }
 
+export interface GenerationOptions {
+  maxNewTokens?: number
+  temperature?: number
+  topP?: number
+  topK?: number
+  repetitionPenalty?: number
+  doSample?: boolean
+}
+
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
@@ -150,13 +159,28 @@ export const api = {
   getGeneratorStatus: () => get<GeneratorStatus>('/generator/status'),
 
   // Chat
-  chat: (message: string, maxNewTokens?: number, temperature?: number, topP?: number) =>
-    post<{ response: string; node_trace: string[]; error?: string }>('/chat', {
+  chat: (
+    message: string,
+    maxNewTokensOrOptions?: number | GenerationOptions,
+    temperature?: number,
+    topP?: number
+  ) => {
+    const options =
+      typeof maxNewTokensOrOptions === 'object'
+        ? maxNewTokensOrOptions
+        : { maxNewTokens: maxNewTokensOrOptions, temperature, topP }
+    return post<{ response: string; node_trace: string[]; error?: string }>('/chat', {
       message,
-      ...(maxNewTokens !== undefined && { max_new_tokens: maxNewTokens }),
-      ...(temperature !== undefined && { temperature }),
-      ...(topP !== undefined && { top_p: topP })
-    }),
+      ...(options.maxNewTokens !== undefined && { max_new_tokens: options.maxNewTokens }),
+      ...(options.temperature !== undefined && { temperature: options.temperature }),
+      ...(options.topP !== undefined && { top_p: options.topP }),
+      ...(options.topK !== undefined && { top_k: options.topK }),
+      ...(options.repetitionPenalty !== undefined && {
+        repetition_penalty: options.repetitionPenalty
+      }),
+      ...(options.doSample !== undefined && { do_sample: options.doSample })
+    })
+  },
 
   // Settings
   getSettings: () => get<AppSettings>('/settings'),
@@ -183,7 +207,12 @@ export function createStreamSocket(
   onOpen?: () => void,
   onClose?: () => void
 ): {
-  send: (message: string, maxNewTokens?: number, temperature?: number, topP?: number) => void
+  send: (
+    message: string,
+    maxNewTokensOrOptions?: number | GenerationOptions,
+    temperature?: number,
+    topP?: number
+  ) => void
   close: () => void
 } {
   const ws = new WebSocket(`${WS_URL}/stream`)
@@ -219,12 +248,26 @@ export function createStreamSocket(
   }
 
   return {
-    send: (message, maxNewTokens?: number, temperature?: number, topP?: number) => {
+    send: (
+      message,
+      maxNewTokensOrOptions?: number | GenerationOptions,
+      temperature?: number,
+      topP?: number
+    ) => {
+      const options =
+        typeof maxNewTokensOrOptions === 'object'
+          ? maxNewTokensOrOptions
+          : { maxNewTokens: maxNewTokensOrOptions, temperature, topP }
       const payload = JSON.stringify({
         message,
-        ...(maxNewTokens !== undefined && { max_new_tokens: maxNewTokens }),
-        ...(temperature !== undefined && { temperature }),
-        ...(topP !== undefined && { top_p: topP })
+        ...(options.maxNewTokens !== undefined && { max_new_tokens: options.maxNewTokens }),
+        ...(options.temperature !== undefined && { temperature: options.temperature }),
+        ...(options.topP !== undefined && { top_p: options.topP }),
+        ...(options.topK !== undefined && { top_k: options.topK }),
+        ...(options.repetitionPenalty !== undefined && {
+          repetition_penalty: options.repetitionPenalty
+        }),
+        ...(options.doSample !== undefined && { do_sample: options.doSample })
       })
 
       if (ws.readyState === WebSocket.OPEN) {

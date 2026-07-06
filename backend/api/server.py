@@ -9,9 +9,13 @@ New in this version:
 
 import asyncio
 import json
+import os
 import sys
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import hivemind
 import torch
@@ -28,6 +32,8 @@ from api.settings import get_hf_token, save_hf_token, delete_hf_token, token_is_
 from constants import SUPPORTED_MODELS, DISTRIBLLM_INITIAL_PEERS, DHT_PREFIX
 
 logger = get_logger(__name__)
+DEFAULT_TRACE_DIR = Path(__file__).resolve().parents[1] / "traces"
+TRACE_DIR = Path(os.environ.get("DISTRIBLLM_TRACE_DIR", str(DEFAULT_TRACE_DIR)))
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +66,37 @@ def _format_route_trace(route: list[dict]) -> list[str]:
         f"{item['peer_id'][:8]}… (layers {item['layer_start']}→{item['layer_end']})"
         for item in route
     ]
+
+
+def _safe_filename_part(value: str) -> str:
+    safe = "".join(char if char.isalnum() else "-" for char in value.lower())
+    safe = "-".join(part for part in safe.split("-") if part)
+    return safe[:80] or "trace"
+
+
+def _write_generation_trace(trace: dict) -> dict:
+    created_at = datetime.now(timezone.utc)
+    trace_id = uuid4().hex[:12]
+    model_part = _safe_filename_part(str(trace.get("model_name", "unknown-model")))
+    timestamp_part = created_at.strftime("%Y%m%dT%H%M%SZ")
+    trace_dir = TRACE_DIR
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = trace_dir / f"{timestamp_part}-{model_part}-{trace_id}.json"
+    document = {
+        "schema_version": 1,
+        "trace_id": trace_id,
+        "created_at": created_at.isoformat(),
+        "trace": trace,
+    }
+    trace_path.write_text(
+        json.dumps(document, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return {
+        "trace_id": trace_id,
+        "trace_file": str(trace_path),
+        "trace_created_at": document["created_at"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +206,9 @@ class ChatRequest(BaseModel):
     max_new_tokens: Optional[int]   = None
     temperature:    Optional[float] = None
     top_p:          Optional[float] = None
+    top_k:          Optional[int]   = None
+    repetition_penalty: Optional[float] = None
+    do_sample:      Optional[bool]  = None
 
     @field_validator("message")
     @classmethod
@@ -200,6 +240,106 @@ class ChatRequest(BaseModel):
             if not (0.0 < v <= 1.0):
                 raise ValueError("top_p must be between 0 and 1")
         return v
+
+    @field_validator("top_k")
+    @classmethod
+    def top_k_valid(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None:
+            if not (0 <= v <= 50000):
+                raise ValueError("top_k must be between 0 and 50000")
+        return v
+
+    @field_validator("repetition_penalty")
+    @classmethod
+    def repetition_penalty_valid(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None:
+            if not (0.1 <= v <= 5.0):
+                raise ValueError("repetition_penalty must be between 0.1 and 5")
+        return v
+
+
+class NextTokenParityRequest(BaseModel):
+    prompt: str
+    atol: float = 1e-4
+    rtol: float = 1e-4
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_not_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("prompt must not be empty")
+        return v
+
+    @field_validator("atol", "rtol")
+    @classmethod
+    def tolerance_valid(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("tolerances must be non-negative")
+        return v
+
+
+class GenerationTraceRequest(BaseModel):
+    prompt: str
+    max_new_tokens: Optional[int] = 32
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    repetition_penalty: Optional[float] = None
+    do_sample: Optional[bool] = None
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_not_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("prompt must not be empty")
+        return v
+
+    @field_validator("max_new_tokens")
+    @classmethod
+    def max_tokens_valid(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None:
+            if not (1 <= v <= 256):
+                raise ValueError("max_new_tokens must be between 1 and 256")
+        return v
+
+    @field_validator("temperature")
+    @classmethod
+    def temperature_valid(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None:
+            if not (0.0 < v <= 2.0):
+                raise ValueError("temperature must be between 0 and 2")
+        return v
+
+    @field_validator("top_p")
+    @classmethod
+    def top_p_valid(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None:
+            if not (0.0 < v <= 1.0):
+                raise ValueError("top_p must be between 0 and 1")
+        return v
+
+    @field_validator("top_k")
+    @classmethod
+    def top_k_valid(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None:
+            if not (0 <= v <= 50000):
+                raise ValueError("top_k must be between 0 and 50000")
+        return v
+
+    @field_validator("repetition_penalty")
+    @classmethod
+    def repetition_penalty_valid(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None:
+            if not (0.1 <= v <= 5.0):
+                raise ValueError("repetition_penalty must be between 0.1 and 5")
+        return v
+
+
+class GeneratedParityRequest(GenerationTraceRequest):
+    max_new_tokens: Optional[int] = 16
+    do_sample: Optional[bool] = False
 
 
 class TokenRequest(BaseModel):
@@ -615,6 +755,64 @@ async def stop_generator() -> dict:
     return {"status": "stop_requested"}
 
 
+@app.post("/generator/parity/next-token")
+async def compare_generator_next_token(req: NextTokenParityRequest) -> dict:
+    if generator is None or not generator.is_loaded():
+        raise HTTPException(status_code=503, detail="Generator not ready.")
+    try:
+        return generator.compare_next_token_logits(
+            prompt=req.prompt,
+            atol=req.atol,
+            rtol=req.rtol,
+        )
+    except Exception as e:
+        logger.error(f"Next-token parity check failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generator/parity/generate")
+async def compare_generator_output(req: GeneratedParityRequest) -> dict:
+    if generator is None or not generator.is_loaded():
+        raise HTTPException(status_code=503, detail="Generator not ready.")
+    try:
+        return await generator.compare_generated_output(
+            prompt=req.prompt,
+            max_new_tokens=req.max_new_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+            top_k=req.top_k,
+            repetition_penalty=req.repetition_penalty,
+            do_sample=req.do_sample,
+        )
+    except Exception as e:
+        logger.error(f"Generated-output parity check failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generator/trace")
+async def trace_generator(req: GenerationTraceRequest) -> dict:
+    if generator is None or not generator.is_loaded():
+        raise HTTPException(status_code=503, detail="Generator not ready.")
+    try:
+        trace = generator.trace_generation(
+            prompt=req.prompt,
+            max_new_tokens=req.max_new_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+            top_k=req.top_k,
+            repetition_penalty=req.repetition_penalty,
+            do_sample=req.do_sample,
+        )
+        trace_metadata = _write_generation_trace(trace)
+        return {
+            **trace,
+            **trace_metadata,
+        }
+    except Exception as e:
+        logger.error(f"Generation trace failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
@@ -631,7 +829,10 @@ async def chat(req: ChatRequest) -> dict:
         prompt=req.message,
         max_new_tokens=req.max_new_tokens,
         temperature=req.temperature,
-        top_p=req.top_p
+        top_p=req.top_p,
+        top_k=req.top_k,
+        repetition_penalty=req.repetition_penalty,
+        do_sample=req.do_sample,
     ):
         if "token"  in chunk: full_response += chunk["token"]
         elif "done" in chunk: node_trace = chunk.get("node_trace", [])
@@ -662,10 +863,22 @@ async def stream(websocket: WebSocket) -> None:
             raw_tokens     = data.get("max_new_tokens")
             raw_temp       = data.get("temperature" )
             raw_top_p      = data.get("top_p")
+            raw_top_k      = data.get("top_k")
+            raw_rep_penalty = data.get("repetition_penalty")
+            raw_do_sample  = data.get("do_sample")
 
             max_new_tokens = int(raw_tokens)   if raw_tokens is not None else None
             temperature    = float(raw_temp)   if raw_temp   is not None else None
             top_p          = float(raw_top_p)  if raw_top_p  is not None else None
+            top_k          = int(raw_top_k)    if raw_top_k  is not None else None
+            repetition_penalty = (
+                float(raw_rep_penalty) if raw_rep_penalty is not None else None
+            )
+            do_sample = (
+                raw_do_sample
+                if isinstance(raw_do_sample, bool)
+                else None
+            )
 
             if not message:
                 await websocket.send_json({"error": "message must not be empty"})
@@ -679,6 +892,15 @@ async def stream(websocket: WebSocket) -> None:
             if top_p is not None and not (0.0 < top_p <= 1.0):
                 await websocket.send_json({"error": "top_p out of range"})
                 continue
+            if top_k is not None and not (0 <= top_k <= 50000):
+                await websocket.send_json({"error": "top_k out of range"})
+                continue
+            if repetition_penalty is not None and not (0.1 <= repetition_penalty <= 5.0):
+                await websocket.send_json({"error": "repetition_penalty out of range"})
+                continue
+            if raw_do_sample is not None and not isinstance(raw_do_sample, bool):
+                await websocket.send_json({"error": "do_sample must be a boolean"})
+                continue
 
             if generator is not None and generator.is_loaded():
                 async for chunk in generator.generate_stream(
@@ -686,6 +908,9 @@ async def stream(websocket: WebSocket) -> None:
                     max_new_tokens=max_new_tokens,
                     temperature=temperature,
                     top_p=top_p,
+                    top_k=top_k,
+                    repetition_penalty=repetition_penalty,
+                    do_sample=do_sample,
                 ):
                     await websocket.send_json(chunk)
             else:

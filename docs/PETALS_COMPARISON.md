@@ -158,6 +158,39 @@ Needed direction:
 - stronger proof/accounting than inference
 - resource marketplace design
 
+## Did Petals Tackle the Bad-Output Issue?
+
+Short answer: Petals tackled the distributed-correctness and reliability side of this issue, but not the model-quality side.
+
+Our recent bad-output investigation split the problem into three layers:
+
+1. Did the route compute the same next-token logits as local HuggingFace?
+2. Did token selection/decoding corrupt the output?
+3. Did the model simply sample a poor continuation?
+
+Petals mostly addresses the first layer by making the distributed model behave like a normal Transformers model. Its README shows `AutoDistributedModelForCausalLM.from_pretrained(...)` followed by ordinary `model.generate(...)`, so the public API is intentionally HuggingFace-like rather than a custom sampler path. Petals also supports modern large/instruction models in its public examples, which avoids confusing small-base-model limitations with distributed-routing bugs.
+
+Primary source: https://github.com/bigscience-workshop/petals
+
+Petals also directly addresses route/session reliability. The NeurIPS paper states that Petals was designed for unreliable peers and claims the same correctness guarantees as local execution; it describes fault-tolerant generation with server-side attention cache plus client-side cached activations for recovery. In code, `InferenceSession` keeps server sessions, positions, output ids, and past key values, and `_ServerInferenceSession` keeps per-server history so failed server cache can be regenerated on replacement servers.
+
+Primary sources:
+
+- https://arxiv.org/abs/2312.08361
+- https://github.com/bigscience-workshop/petals/blob/main/src/petals/client/inference_session.py
+
+Petals does not solve the third layer: if the selected model is a base model and the sampler chooses a coherent but false continuation, Petals will still produce bad prose. It avoids this in demos by using much larger and often instruction-tuned models, not by making small base models factual. This matches our OPT-1.3B smoke result: deterministic first-token parity selected `Paris`, while a sampled `/chat` call could still wander into a bad continuation.
+
+I did not find a Petals equivalent of our file-backed `/generator/trace` endpoint in the checked primary docs/code. Petals exposes hidden states/logits and has mature sessions/routing, which is more flexible than our current API, but our new JSON trace artifact is still useful for debugging this prototype because it explicitly records selected token ids, decoded text, top candidates, tensor shapes, and replacement-character flags.
+
+### Practical Takeaways for DistribLLM
+
+- Keep the direct HuggingFace versus distributed next-token parity check. Petals' design goal is local-equivalent distributed execution, so parity remains the right correctness gate.
+- Keep the file-backed trace endpoint. Petals' broader PyTorch/Transformers integration is powerful, but our prototype still benefits from an explicit artifact that separates token selection from decoding and stream rendering.
+- Add exact generation controls next: `do_sample=false`, `top_k`, and `repetition_penalty`. This closes the gap between parity checks and reproducible whole-output comparisons.
+- Treat weak sampled completions from small/base models as model behavior unless deterministic parity or trace data says otherwise.
+- Copy the Petals idea of session state and cache recovery before serious multi-node generation. Recomputing full context every token is both slower and harder to reason about under failures.
+
 ## Design Lesson From Petals
 
 The biggest lesson is that distributed LLM inference is not just "send tensors through remote layers." The hard parts are:

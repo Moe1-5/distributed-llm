@@ -359,20 +359,6 @@ export default function Chat(): React.JSX.Element {
               {item.label}: {item.value}
             </span>
           ))}
-          <button
-            onClick={connectStream}
-            disabled={!canConnect}
-            className={`
-              h-8 rounded-lg border px-3 font-mono text-[10px] font-semibold transition-all
-              ${
-                canConnect
-                  ? 'border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
-                  : 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-60'
-              }
-            `}
-          >
-            {connState === 'open' ? 'STREAM OPEN' : 'CONNECT STREAM'}
-          </button>
         </div>
       </div>
 
@@ -464,24 +450,27 @@ export default function Chat(): React.JSX.Element {
           "
         />
         <button
-          onClick={loading ? handleStop : handleSend}
-          disabled={!loading && !canSend}
+          onClick={loading ? handleStop : connState === 'open' ? handleSend : connectStream}
+          disabled={!loading && (connState === 'open' ? !canSend : !canConnect)}
           className={`
-            flex h-[46px] w-[46px] flex-shrink-0 items-center justify-center
-            rounded-xl border border-cyan/30 bg-cyan-dim text-xl text-cyan
+            flex h-[46px] flex-shrink-0 items-center justify-center
+            rounded-xl border font-mono font-semibold text-cyan
             transition-all duration-150
             ${
-              !loading && !input.trim()
-                ? 'cursor-not-allowed opacity-40'
-                : !loading && !canSend
-                  ? 'cursor-not-allowed opacity-40'
-                  : loading
-                    ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
-                    : 'cursor-pointer hover:bg-cyan/20'
+              loading
+                ? 'w-[74px] cursor-pointer border-red/30 bg-red/10 text-[11px] text-red hover:bg-red/20'
+                : connState !== 'open'
+                  ? canConnect
+                    ? 'w-[74px] cursor-pointer border-cyan/30 bg-cyan-dim text-[11px] hover:bg-cyan/20'
+                    : 'w-[74px] cursor-not-allowed border-border bg-bg-elevated text-[11px] text-text-dim opacity-50'
+                  : canSend
+                    ? 'w-[46px] cursor-pointer border-cyan/30 bg-cyan-dim text-xl hover:bg-cyan/20'
+                    : 'w-[46px] cursor-not-allowed border-border bg-bg-elevated text-xl text-text-dim opacity-50'
             }
           `}
+          title={loading ? 'Stop inference' : connState === 'open' ? 'Send message' : 'Open stream'}
         >
-          {loading ? '■' : '↑'}
+          {loading ? 'STOP' : connState === 'open' ? '↑' : 'OPEN'}
         </button>
       </div>
     </div>

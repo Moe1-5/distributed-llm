@@ -1,6 +1,8 @@
 import asyncio
+import json
 import sys
 import time
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -420,6 +422,67 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(tuple(sequential.received_position_ids[0].shape), (1, 2))
         self.assertEqual(tuple(sequential.received_position_ids[1].shape), (1, 3))
 
+    def test_generate_stream_passes_exact_generation_controls_to_sampling(self) -> None:
+        class DummyTokenizer:
+            eos_token_id = 0
+
+            def encode(self, prompt: str, return_tensors: str = "pt") -> torch.Tensor:
+                return torch.tensor([[1, 2]])
+
+            def decode(self, token_ids: torch.Tensor, skip_special_tokens: bool = True) -> str:
+                return "x"
+
+        class IdentitySequential:
+            def forward(
+                self,
+                hidden_states: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+                position_ids: torch.Tensor | None = None,
+            ) -> tuple[torch.Tensor, list[str]]:
+                return hidden_states, []
+
+        received_kwargs: dict[str, object] = {}
+        generator = DistributedGenerator(
+            "facebook/opt-125m",
+            sequential=IdentitySequential(),
+            device="cpu",
+        )
+        generator._loaded = True
+        generator.tokenizer = DummyTokenizer()
+        generator.embed_tokens = nn.Embedding(10, 4)
+        generator.position_embeddings = nn.Embedding(8, 4)
+        generator.norm = nn.Identity()
+        generator.lm_head = nn.Linear(4, 10)
+
+        def capture_sample(logits: torch.Tensor, **kwargs) -> torch.Tensor:
+            received_kwargs.update(kwargs)
+            return torch.tensor([[1]])
+
+        generator._sample = capture_sample
+
+        async def run_generation() -> list[dict]:
+            return [
+                item
+                async for item in generator.generate_stream(
+                    "hello",
+                    max_new_tokens=1,
+                    temperature=0.25,
+                    top_p=1.0,
+                    top_k=0,
+                    repetition_penalty=1.0,
+                    do_sample=False,
+                )
+            ]
+
+        result = asyncio.run(run_generation())
+
+        self.assertTrue(any(item.get("done") for item in result))
+        self.assertEqual(received_kwargs["temperature"], 0.25)
+        self.assertEqual(received_kwargs["top_p"], 1.0)
+        self.assertEqual(received_kwargs["top_k"], 0)
+        self.assertEqual(received_kwargs["repetition_penalty"], 1.0)
+        self.assertFalse(received_kwargs["do_sample"])
+
     def test_generate_stream_honors_stop_request_after_route_step(self) -> None:
         class DummyTokenizer:
             eos_token_id = 0
@@ -460,6 +523,338 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         result = asyncio.run(run_generation())
 
         self.assertEqual(result, [{"done": True, "node_trace": ["peer… (layers 0→1)"]}])
+
+    def test_sample_uses_argmax_when_do_sample_is_false(self) -> None:
+        generator = DistributedGenerator("facebook/opt-125m", sequential=object())
+
+        result = generator._sample(
+            torch.tensor([[0.1, 2.0, 1.5]]),
+            temperature=0.1,
+            top_p=0.1,
+            top_k=1,
+            repetition_penalty=1.0,
+            do_sample=False,
+        )
+
+        self.assertEqual(result.tolist(), [[1]])
+
+    def test_compare_next_token_logits_matches_direct_reference(self) -> None:
+        class DummyTokenizer:
+            def encode(self, prompt: str, return_tensors: str = "pt") -> torch.Tensor:
+                return torch.tensor([[1, 2]])
+
+            def decode(self, token_ids, skip_special_tokens: bool = True) -> str:
+                token_id = int(token_ids[0])
+                return {0: "<eos>", 1: "a", 2: "b", 3: "c"}.get(token_id, "?")
+
+        class TinyCausalLM(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embed = nn.Embedding(4, 3)
+                self.lm_head = nn.Linear(3, 4, bias=False)
+
+            def forward(
+                self,
+                input_ids: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+            ):
+                logits = self.lm_head(self.embed(input_ids))
+                return type("TinyOutput", (), {"logits": logits})
+
+        class IdentitySequential:
+            def forward(
+                self,
+                hidden_states: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+                position_ids: torch.Tensor | None = None,
+            ) -> tuple[torch.Tensor, list[str]]:
+                return hidden_states, ["peer… (layers 0→1)"]
+
+        model = TinyCausalLM()
+        generator = DistributedGenerator("facebook/opt-125m", sequential=IdentitySequential())
+        generator._loaded = True
+        generator.tokenizer = DummyTokenizer()
+        generator.embed_tokens = model.embed
+        generator.norm = nn.Identity()
+        generator.lm_head = model.lm_head
+        generator._loaded_model = model
+        generator.architecture_adapter = None
+
+        result = generator.compare_next_token_logits("hello")
+
+        self.assertTrue(result["allclose"])
+        self.assertTrue(result["argmax_match"])
+        self.assertEqual(result["max_abs_diff"], 0.0)
+        self.assertEqual(result["mean_abs_diff"], 0.0)
+        self.assertEqual(result["node_trace"], ["peer… (layers 0→1)"])
+
+    def test_compare_next_token_endpoint_uses_loaded_generator(self) -> None:
+        from api import server as api_server
+
+        class DummyGenerator:
+            def __init__(self) -> None:
+                self.received_prompt = None
+                self.received_atol = None
+                self.received_rtol = None
+
+            def is_loaded(self) -> bool:
+                return True
+
+            def compare_next_token_logits(
+                self,
+                prompt: str,
+                atol: float,
+                rtol: float,
+            ) -> dict:
+                self.received_prompt = prompt
+                self.received_atol = atol
+                self.received_rtol = rtol
+                return {
+                    "prompt": prompt,
+                    "argmax_match": True,
+                    "allclose": True,
+                }
+
+        dummy = DummyGenerator()
+        original_generator = api_server.generator
+        api_server.generator = dummy
+        try:
+            request = api_server.NextTokenParityRequest(
+                prompt="The capital of France is",
+                atol=0.01,
+                rtol=0.02,
+            )
+            result = asyncio.run(api_server.compare_generator_next_token(request))
+        finally:
+            api_server.generator = original_generator
+
+        self.assertEqual(result["prompt"], "The capital of France is")
+        self.assertTrue(result["allclose"])
+        self.assertEqual(dummy.received_prompt, "The capital of France is")
+        self.assertEqual(dummy.received_atol, 0.01)
+        self.assertEqual(dummy.received_rtol, 0.02)
+
+    def test_compare_generated_output_matches_direct_reference_greedy(self) -> None:
+        class DummyTokenizer:
+            eos_token_id = 0
+            pad_token_id = 0
+
+            def encode(self, prompt: str, return_tensors: str = "pt") -> torch.Tensor:
+                return torch.tensor([[1, 2]])
+
+            def decode(self, token_ids, skip_special_tokens: bool = True) -> str:
+                if isinstance(token_ids, torch.Tensor):
+                    token_ids = token_ids.tolist()
+                return "".join(
+                    {0: "", 1: "a", 2: "b", 3: "c"}.get(int(token_id), "?")
+                    for token_id in token_ids
+                )
+
+        class TinyGenerateModel(nn.Module):
+            def to(self, device):
+                return self
+
+            def eval(self):
+                return self
+
+            def generate(self, **kwargs):
+                return torch.tensor([[1, 2, 3]])
+
+        class IdentitySequential:
+            def forward(
+                self,
+                hidden_states: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+                position_ids: torch.Tensor | None = None,
+            ) -> tuple[torch.Tensor, list[str]]:
+                return hidden_states, ["peer… (layers 0→1)"]
+
+        generator = DistributedGenerator("facebook/opt-125m", sequential=IdentitySequential())
+        generator._loaded = True
+        generator.tokenizer = DummyTokenizer()
+        generator.embed_tokens = nn.Embedding(10, 4)
+        generator.norm = nn.Identity()
+        generator.lm_head = nn.Linear(4, 10)
+        generator._loaded_model = TinyGenerateModel()
+        generator.architecture_adapter = None
+        generator._sample = lambda logits, **kwargs: torch.tensor([[3]])
+
+        result = asyncio.run(
+            generator.compare_generated_output(
+                "hello",
+                max_new_tokens=1,
+                repetition_penalty=1.0,
+                do_sample=False,
+            )
+        )
+
+        self.assertEqual(result["direct_response"], "c")
+        self.assertEqual(result["distributed_response"], "c")
+        self.assertTrue(result["exact_text_match"])
+        self.assertFalse(result["generation_config"]["do_sample"])
+        self.assertEqual(result["node_trace"], ["peer… (layers 0→1)"])
+
+    def test_compare_generated_output_endpoint_uses_loaded_generator(self) -> None:
+        from api import server as api_server
+
+        class DummyGenerator:
+            def __init__(self) -> None:
+                self.received: dict[str, object] = {}
+
+            def is_loaded(self) -> bool:
+                return True
+
+            async def compare_generated_output(
+                self,
+                prompt: str,
+                max_new_tokens: int | None,
+                temperature: float | None,
+                top_p: float | None,
+                top_k: int | None,
+                repetition_penalty: float | None,
+                do_sample: bool | None,
+            ) -> dict:
+                self.received = {
+                    "prompt": prompt,
+                    "max_new_tokens": max_new_tokens,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "repetition_penalty": repetition_penalty,
+                    "do_sample": do_sample,
+                }
+                return {
+                    "prompt": prompt,
+                    "direct_response": "c",
+                    "distributed_response": "c",
+                    "exact_text_match": True,
+                }
+
+        dummy = DummyGenerator()
+        original_generator = api_server.generator
+        api_server.generator = dummy
+        try:
+            request = api_server.GeneratedParityRequest(
+                prompt="hello",
+                max_new_tokens=3,
+                temperature=0.2,
+                top_p=1.0,
+                top_k=0,
+                repetition_penalty=1.0,
+                do_sample=False,
+            )
+            result = asyncio.run(api_server.compare_generator_output(request))
+        finally:
+            api_server.generator = original_generator
+
+        self.assertTrue(result["exact_text_match"])
+        self.assertEqual(dummy.received["prompt"], "hello")
+        self.assertEqual(dummy.received["max_new_tokens"], 3)
+        self.assertEqual(dummy.received["top_k"], 0)
+        self.assertEqual(dummy.received["repetition_penalty"], 1.0)
+        self.assertFalse(dummy.received["do_sample"])
+
+    def test_trace_generation_records_token_steps(self) -> None:
+        class DummyTokenizer:
+            eos_token_id = 0
+
+            def encode(self, prompt: str, return_tensors: str = "pt") -> torch.Tensor:
+                return torch.tensor([[1, 2]])
+
+            def decode(self, token_ids, skip_special_tokens: bool = True) -> str:
+                token_id = int(token_ids[0])
+                return {0: "<eos>", 1: "a", 2: "b", 3: "c"}.get(token_id, "?")
+
+        class IdentitySequential:
+            def forward(
+                self,
+                hidden_states: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+                position_ids: torch.Tensor | None = None,
+            ) -> tuple[torch.Tensor, list[str]]:
+                return hidden_states, ["peer… (layers 0→1)"]
+
+        generator = DistributedGenerator("facebook/opt-125m", sequential=IdentitySequential())
+        generator._loaded = True
+        generator.tokenizer = DummyTokenizer()
+        generator.embed_tokens = nn.Embedding(4, 3)
+        generator.norm = nn.Identity()
+        generator.lm_head = nn.Linear(3, 4, bias=False)
+        generator.architecture_adapter = None
+
+        result = generator.trace_generation("hello", max_new_tokens=1)
+
+        self.assertEqual(result["prompt_token_ids"], [1, 2])
+        self.assertTrue(result["generation_config"]["do_sample"])
+        self.assertEqual(len(result["steps"]), 1)
+        self.assertIn("token_id", result["steps"][0])
+        self.assertIn("decoded_output_so_far", result["steps"][0])
+        self.assertIn("top_candidates", result["steps"][0])
+        self.assertEqual(result["node_trace"], ["peer… (layers 0→1)"])
+
+    def test_trace_generation_endpoint_uses_loaded_generator(self) -> None:
+        from api import server as api_server
+
+        class DummyGenerator:
+            def __init__(self) -> None:
+                self.received_prompt = None
+                self.received_max_new_tokens = None
+
+            def is_loaded(self) -> bool:
+                return True
+
+            def trace_generation(
+                self,
+                prompt: str,
+                max_new_tokens: int | None,
+                temperature: float | None,
+                top_p: float | None,
+                top_k: int | None,
+                repetition_penalty: float | None,
+                do_sample: bool | None,
+            ) -> dict:
+                self.received_prompt = prompt
+                self.received_max_new_tokens = max_new_tokens
+                return {
+                    "prompt": prompt,
+                    "steps": [],
+                    "generation_config": {
+                        "top_k": top_k,
+                        "repetition_penalty": repetition_penalty,
+                        "do_sample": do_sample,
+                    },
+                }
+
+        dummy = DummyGenerator()
+        original_generator = api_server.generator
+        original_trace_dir = api_server.TRACE_DIR
+        api_server.generator = dummy
+        with tempfile.TemporaryDirectory() as trace_dir:
+            api_server.TRACE_DIR = Path(trace_dir)
+            try:
+                request = api_server.GenerationTraceRequest(
+                    prompt="test",
+                    max_new_tokens=4,
+                    top_k=0,
+                    repetition_penalty=1.0,
+                    do_sample=False,
+                )
+                result = asyncio.run(api_server.trace_generator(request))
+            finally:
+                api_server.generator = original_generator
+                api_server.TRACE_DIR = original_trace_dir
+
+            self.assertEqual(result["prompt"], "test")
+            self.assertEqual(dummy.received_prompt, "test")
+            self.assertEqual(dummy.received_max_new_tokens, 4)
+            self.assertEqual(result["generation_config"]["top_k"], 0)
+            self.assertEqual(result["generation_config"]["repetition_penalty"], 1.0)
+            self.assertFalse(result["generation_config"]["do_sample"])
+            self.assertIn("trace_id", result)
+            self.assertIn("trace_file", result)
+            trace_document = json.loads(Path(result["trace_file"]).read_text(encoding="utf-8"))
+            self.assertEqual(trace_document["trace_id"], result["trace_id"])
+            self.assertEqual(trace_document["trace"]["prompt"], "test")
 
     def test_generator_status_reports_not_loaded(self) -> None:
         from api import server as api_server

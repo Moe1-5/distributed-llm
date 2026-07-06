@@ -76,6 +76,27 @@ Checklist:
 
 2026-07-06 output sanity addendum: completion-style prompts showed that the distributed path executes but answer quality is not dependable. `Hello, my name is` produced a plausible continuation, and `Once upon a time` produced a story-like continuation. However, `The capital of France is` produced unrelated factual continuations, and `2 + 2 =` produced algebraic nonsense. Treat this as transport/execution success only until local HuggingFace-vs-distributed parity is checked.
 
+2026-07-06 Sprint 07 parity update: local single-node full-layer OPT-125M route passed deterministic next-token argmax parity against direct HuggingFace for the baseline prompt set. Strict `1e-4` logits allclose was too tight for the live mixed-device float path, but every direct/distributed next token matched and logits were close with `atol=0.02`, `rtol=0.02`. Distributed generated text remains weak in the same ways as the direct baseline, so the current root cause is model/prompt quality rather than route corruption.
+
+2026-07-06 OPT-1.3B smoke update: local bootstrap, backend API, one CUDA serving node for `facebook/opt-1.3b` layers `0-24`, and a matching generator all started successfully. `/generator/status` reported route `12D3KooW… (layers 0→24)`. `/generator/trace` for prompt `The capital of France is` generated `Paris` as the first token and wrote a JSON trace file under `backend/traces/`; no replacement characters appeared in selected token text or decoded output. A normal sampled `/chat` call with the same prompt returned a coherent but factually bad continuation, while `/generator/parity/next-token` matched direct HuggingFace on first-token argmax (`Paris`) with `max_abs_diff=0.015625`, `mean_abs_diff=0.002189`, and `allclose=true` at `atol=0.02`, `rtol=0.02`. Current classification: the tested 1.3B route is faithful for deterministic first-token parity, and bad sampled prose is not evidence of route corruption by itself.
+
+### Model Quality Policy
+
+Changing to a better model is the right solution for user-facing answer quality, but it is not a substitute for distributed correctness validation.
+
+The OPT models currently used in local testing are base completion models. They are useful smoke-test targets because they are open, relatively small, and quick to load, but they are not reliable chat or factual-answer demos. If direct HuggingFace and the distributed route agree on deterministic next-token logits, then poor sampled prose should be classified first as model/sampling behavior, not as a distributed inference failure.
+
+For demos, prefer an instruction-tuned model that fits the current serving hardware and has a supported architecture adapter. Candidate demo models should pass the same gates as smoke-test models before they are shown as product quality:
+
+- model is registered with correct layer count, hidden size, and generation defaults
+- architecture adapter matches the HuggingFace forward path
+- direct HuggingFace versus distributed next-token parity passes
+- exact generation controls are available for reproduction, including greedy `do_sample=false`, `top_k`, and `repetition_penalty`
+- `/generator/trace` shows clean token selection and decoding, with no replacement-character corruption
+- route readiness requires complete compatible layer coverage before inference starts
+
+Why: changing models can make the answer better, but only parity and trace evidence can prove that the distributed path is correct. Without those checks, a stronger model could hide routing, adapter, decoding, or streaming bugs until a larger multi-node route fails.
+
 2026-07-06 shutdown addendum: `/node/stop` originally hung after a serving node started. Bounded RPC/DHT shutdown now lets `/node/stop` return `{"status":"stopped"}` in about five seconds. Remaining risk: backend/Hivemind worker processes can still remain after shutdown and need explicit cleanup before repeated UI start/stop cycles are trusted.
 
 ### Phase D: Local Multi-Node Layer-Split Inference Test

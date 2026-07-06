@@ -6,7 +6,6 @@
  *   - Model is now a dropdown from /models endpoint — no free text
  *   - Gated models show a HuggingFace redirect button if no token set
  *   - Layer range auto-fills based on selected model
- *   - Bootstrap peers auto-fill from server defaults if available
  *   - Generator start uses model's num_layers from server — no manual input
  */
 
@@ -46,7 +45,6 @@ function makeEntry(message: string, type: ActivityEntry['type']): ActivityEntry 
 export default function Network(): React.JSX.Element {
   const [tab, setTab] = useState<Tab>('serve')
   const [models, setModels] = useState<ModelInfo[]>([])
-  const [defaultPeers, setDefaultPeers] = useState<string[]>([])
   const [tokenAvailable, setTokenAvailable] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(true)
   const [activity, setActivity] = useState<ActivityEntry[]>([])
@@ -56,13 +54,11 @@ export default function Network(): React.JSX.Element {
   const [layerStart, setLayerStart] = useState(0)
   const [layerEnd, setLayerEnd] = useState(0)
   const [device, setDevice] = useState('cuda')
-  const [servePeers, setServePeers] = useState('')
   const [nodeRunning, setNodeRunning] = useState(false)
   const [nodeLoading, setNodeLoading] = useState(false)
 
   // Run Inference form state
   const [inferModel, setInferModel] = useState('')
-  const [inferPeers, setInferPeers] = useState('')
   const [genLoading, setGenLoading] = useState(false)
   const [genReady, setGenReady] = useState(false)
 
@@ -88,7 +84,6 @@ export default function Network(): React.JSX.Element {
         const [modelsRes, statusRes] = await Promise.all([api.getModels(), api.getStatus()])
 
         setModels(modelsRes.models)
-        setDefaultPeers(modelsRes.default_peers)
         setTokenAvailable(modelsRes.token_available)
 
         // Auto-select first model
@@ -98,12 +93,6 @@ export default function Network(): React.JSX.Element {
           setInferModel(first.id)
           setLayerStart(0)
           setLayerEnd(first.num_layers)
-        }
-
-        // Auto-fill peers from server defaults
-        if (modelsRes.default_peers.length > 0) {
-          setServePeers(modelsRes.default_peers.join('\n'))
-          setInferPeers(modelsRes.default_peers.join('\n'))
         }
 
         setBackendOk(true)
@@ -157,11 +146,6 @@ export default function Network(): React.JSX.Element {
   const handleStartNode = useCallback(async () => {
     if (!serveModel || nodeLoading) return
 
-    const peers = servePeers
-      .split('\n')
-      .map((p) => p.trim())
-      .filter(Boolean)
-
     log(`Starting node: ${serveModel} layers ${layerStart}-${layerEnd}...`)
     setNodeLoading(true)
 
@@ -171,7 +155,7 @@ export default function Network(): React.JSX.Element {
         layer_start: layerStart,
         layer_end: layerEnd,
         dht_prefix: 'distribllm',
-        initial_peers: peers,
+        initial_peers: [],
         device
       })
 
@@ -197,21 +181,7 @@ export default function Network(): React.JSX.Element {
     } finally {
       setNodeLoading(false)
     }
-  }, [serveModel, layerStart, layerEnd, device, servePeers, nodeLoading, log])
-
-  // ---------------------------------------------------------------------------
-  // Stop node
-  // ---------------------------------------------------------------------------
-
-  const handleStopNode = useCallback(async () => {
-    try {
-      await api.stopNode()
-      setNodeRunning(false)
-      log('Node stopped', 'info')
-    } catch (err) {
-      log(`Stop failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
-    }
-  }, [log])
+  }, [serveModel, layerStart, layerEnd, device, nodeLoading, log])
 
   // ---------------------------------------------------------------------------
   // Start generator
@@ -220,11 +190,6 @@ export default function Network(): React.JSX.Element {
   const handleStartGenerator = useCallback(async () => {
     if (!inferModel || genLoading) return
 
-    const peers = inferPeers
-      .split('\n')
-      .map((p) => p.trim())
-      .filter(Boolean)
-
     log(`Starting generator: ${inferModel}...`)
     setGenLoading(true)
 
@@ -232,7 +197,7 @@ export default function Network(): React.JSX.Element {
       const res = await api.startGenerator({
         model_name: inferModel,
         dht_prefix: 'distribllm',
-        initial_peers: peers
+        initial_peers: []
       })
 
       if (res.status === 'error') {
@@ -251,7 +216,7 @@ export default function Network(): React.JSX.Element {
     } finally {
       setGenLoading(false)
     }
-  }, [inferModel, inferPeers, genLoading, log])
+  }, [inferModel, genLoading, log])
 
   // ---------------------------------------------------------------------------
   // Shared input styles
@@ -336,8 +301,8 @@ export default function Network(): React.JSX.Element {
           {tab === 'serve' && (
             <>
               <p className="text-[12px] leading-relaxed text-text-secondary">
-                Serve a slice of transformer layers from this machine. Other clients will discover
-                you via the DHT.
+                Serve one local layer slice from this backend process. Manage active local nodes
+                from the Nodes page.
               </p>
 
               {/* Model dropdown */}
@@ -426,32 +391,14 @@ export default function Network(): React.JSX.Element {
                 </select>
               </div>
 
-              {/* Bootstrap peers */}
-              <div className="flex flex-col gap-1.5">
-                <label className={labelCls}>Bootstrap Peers (one per line)</label>
-                <textarea
-                  value={servePeers}
-                  onChange={(e) => setServePeers(e.target.value)}
-                  disabled={nodeRunning || nodeLoading}
-                  placeholder="/ip4/1.2.3.4/tcp/7001/p2p/12D3KooW..."
-                  rows={3}
-                  className={`${inputCls} resize-none`}
-                />
-                {defaultPeers.length > 0 && (
-                  <p className="font-mono text-[10px] text-green">
-                    ✓ Default bootstrap peers loaded from server
-                  </p>
-                )}
-              </div>
-
-              {/* Start / Stop button */}
+              {/* Start button */}
               {nodeRunning ? (
-                <button
-                  onClick={() => void handleStopNode()}
-                  className="w-full rounded-xl border border-red/30 bg-red/10 py-3 font-mono text-[12px] font-semibold text-red transition-all hover:bg-red/20"
-                >
-                  STOP NODE
-                </button>
+                <div className="rounded-xl border border-green/20 bg-green/5 px-4 py-3">
+                  <p className="font-mono text-[12px] text-green">Local node is running.</p>
+                  <p className="mt-1 text-[12px] text-text-secondary">
+                    Use the Nodes page to inspect or stop this machine's active node.
+                  </p>
+                </div>
               ) : (
                 <button
                   onClick={() => void handleStartNode()}
@@ -494,7 +441,7 @@ export default function Network(): React.JSX.Element {
                   >
                     {models.map((m) => (
                       <option key={m.id} value={m.id}>
-                        {m.id} — {m.runnable ? 'runnable' : 'not runnable'}
+                        {m.id}
                       </option>
                     ))}
                   </select>
@@ -533,19 +480,6 @@ export default function Network(): React.JSX.Element {
                     </p>
                   </div>
                 )}
-              </div>
-
-              {/* Bootstrap peers */}
-              <div className="flex flex-col gap-1.5">
-                <label className={labelCls}>Bootstrap Peers (one per line)</label>
-                <textarea
-                  value={inferPeers}
-                  onChange={(e) => setInferPeers(e.target.value)}
-                  disabled={genLoading || genReady}
-                  placeholder="/ip4/1.2.3.4/tcp/7001/p2p/12D3KooW..."
-                  rows={3}
-                  className={`${inputCls} resize-none`}
-                />
               </div>
 
               {genReady ? (

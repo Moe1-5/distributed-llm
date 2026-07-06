@@ -115,6 +115,7 @@ class DistributedGenerator:
             device_map="cpu",
             **token_kwargs,
         )
+        model.eval()
 
         self.embed_tokens = self._extract_embed_tokens(model)
         self.position_embeddings = self._extract_position_embeddings(model)
@@ -181,6 +182,9 @@ class DistributedGenerator:
         max_new_tokens: Optional[int]   = None,
         temperature:    Optional[float] = None,
         top_p:          Optional[float] = None,
+        top_k:          Optional[int]   = None,
+        repetition_penalty: Optional[float] = None,
+        do_sample:      Optional[bool]  = None,
     ) -> AsyncGenerator[dict, None]:
         if not self._loaded:
             raise RuntimeError("Generator not loaded; call load() first")
@@ -201,8 +205,13 @@ class DistributedGenerator:
         max_new_tokens = max_new_tokens if max_new_tokens is not None else cfg["max_new_tokens"]
         temperature    = temperature    if temperature    is not None else cfg["temperature"]
         top_p          = top_p          if top_p          is not None else cfg["top_p"]
-        top_k          = cfg["top_k"]
-        rep_penalty    = cfg["repetition_penalty"]
+        top_k          = top_k          if top_k          is not None else cfg["top_k"]
+        rep_penalty    = (
+            repetition_penalty
+            if repetition_penalty is not None
+            else cfg["repetition_penalty"]
+        )
+        do_sample      = do_sample      if do_sample      is not None else True
 
 
         try:
@@ -288,6 +297,7 @@ class DistributedGenerator:
                     top_p=top_p,
                     top_k=top_k,
                     repetition_penalty=rep_penalty,
+                    do_sample=do_sample,
                     generated_ids=generated_ids,
                 )
 
@@ -311,6 +321,449 @@ class DistributedGenerator:
         except Exception as e:
             logger.error(f"Generation error: {e}", exc_info=True)
             yield {"error": str(e)}
+
+    async def compare_generated_output(
+        self,
+        prompt: str,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        repetition_penalty: Optional[float] = None,
+        do_sample: Optional[bool] = None,
+    ) -> dict:
+        """
+        Compare direct HuggingFace generation against the distributed route.
+
+        Greedy generation is the intended whole-output parity mode. Sampled
+        generation can still be compared qualitatively, but stochastic outputs
+        should not be treated as an exact route-correctness signal.
+        """
+        if not self._loaded:
+            raise RuntimeError("Generator not loaded; call load() first")
+        if not prompt.strip():
+            raise ValueError("prompt must not be empty")
+        if self._loaded_model is None:
+            raise RuntimeError("Direct HuggingFace reference model is not loaded")
+
+        cfg = self._get_gen_config()
+        max_new_tokens = max_new_tokens if max_new_tokens is not None else cfg["max_new_tokens"]
+        temperature = temperature if temperature is not None else cfg["temperature"]
+        top_p = top_p if top_p is not None else cfg["top_p"]
+        top_k = top_k if top_k is not None else cfg["top_k"]
+        rep_penalty = (
+            repetition_penalty
+            if repetition_penalty is not None
+            else cfg["repetition_penalty"]
+        )
+        do_sample = do_sample if do_sample is not None else False
+
+        direct_response, direct_generated_ids = self._generate_direct_text(
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=rep_penalty,
+            do_sample=do_sample,
+        )
+
+        distributed_response = ""
+        node_trace: list[str] = []
+        async for chunk in self.generate_stream(
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=rep_penalty,
+            do_sample=do_sample,
+        ):
+            if "token" in chunk:
+                distributed_response += chunk["token"]
+            elif "done" in chunk:
+                node_trace = chunk.get("node_trace", [])
+            elif "error" in chunk:
+                raise RuntimeError(chunk["error"])
+
+        return {
+            "prompt": prompt,
+            "model_name": self.model_name,
+            "generation_config": {
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "top_k": top_k,
+                "repetition_penalty": rep_penalty,
+                "do_sample": do_sample,
+            },
+            "direct_response": direct_response,
+            "distributed_response": distributed_response,
+            "exact_text_match": direct_response == distributed_response,
+            "direct_generated_token_ids": direct_generated_ids,
+            "direct_response_contains_replacement_char": "\ufffd" in direct_response,
+            "distributed_response_contains_replacement_char": "\ufffd"
+            in distributed_response,
+            "node_trace": node_trace,
+            "interpretation": (
+                "Exact text match is meaningful for greedy generation. "
+                "Sampled generation can diverge without proving a route bug."
+            ),
+        }
+
+    def compare_next_token_logits(
+        self,
+        prompt: str,
+        atol: float = 1e-4,
+        rtol: float = 1e-4,
+    ) -> dict:
+        """
+        Deterministic parity probe for Sprint 07.
+
+        Compares the direct HuggingFace next-token logits against the
+        distributed route for the same prompt. This bypasses sampling so bad
+        prose can be classified separately from route/model mismatch.
+        """
+        if not self._loaded:
+            raise RuntimeError("Generator not loaded; call load() first")
+        if not prompt.strip():
+            raise ValueError("prompt must not be empty")
+        if self._loaded_model is None:
+            raise RuntimeError("Direct HuggingFace reference model is not loaded")
+
+        input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
+        reference_device = self._prepare_reference_model_for_parity()
+        attention_mask = torch.ones(
+            input_ids.shape,
+            device=reference_device,
+            dtype=torch.long,
+        )
+        reference_input_ids = input_ids.to(reference_device)
+
+        with torch.no_grad():
+            reference_output = self._loaded_model(
+                input_ids=reference_input_ids,
+                attention_mask=attention_mask,
+            )
+            reference_logits = reference_output.logits[:, -1, :].detach().cpu().float()
+
+        distributed_input_ids = input_ids.to(self.device)
+        distributed_attention_mask = torch.ones(
+            distributed_input_ids.shape,
+            device=self.device,
+            dtype=torch.bool,
+        )
+        distributed_position_ids = torch.arange(
+            distributed_input_ids.shape[1],
+            device=self.device,
+            dtype=torch.long,
+        ).unsqueeze(0)
+
+        with torch.no_grad():
+            hidden_states = self._prepare_hidden_states(
+                distributed_input_ids,
+                distributed_attention_mask,
+                distributed_position_ids,
+            )
+
+        self._validate_generation_inputs(
+            input_ids=distributed_input_ids,
+            hidden_states=hidden_states,
+            attention_mask=distributed_attention_mask,
+            position_ids=distributed_position_ids,
+        )
+        hidden_states, node_trace = self.sequential.forward(
+            hidden_states=hidden_states,
+            attention_mask=distributed_attention_mask,
+            position_ids=distributed_position_ids,
+        )
+        hidden_states = hidden_states.to(self.device, dtype=self.dtype)
+
+        with torch.no_grad():
+            hidden_states = self.norm(hidden_states)
+            distributed_logits = self.lm_head(hidden_states)[:, -1, :].detach().cpu().float()
+
+        if reference_logits.shape != distributed_logits.shape:
+            raise RuntimeError(
+                "Parity logits shape mismatch: "
+                f"direct={tuple(reference_logits.shape)} "
+                f"distributed={tuple(distributed_logits.shape)}"
+            )
+
+        diff = (reference_logits - distributed_logits).abs()
+        direct_token_id = int(reference_logits.argmax(dim=-1).item())
+        distributed_token_id = int(distributed_logits.argmax(dim=-1).item())
+
+        return {
+            "prompt": prompt,
+            "model_name": self.model_name,
+            "logits_shape": list(reference_logits.shape),
+            "direct_next_token_id": direct_token_id,
+            "direct_next_token_text": self.tokenizer.decode(
+                [direct_token_id],
+                skip_special_tokens=True,
+            ),
+            "distributed_next_token_id": distributed_token_id,
+            "distributed_next_token_text": self.tokenizer.decode(
+                [distributed_token_id],
+                skip_special_tokens=True,
+            ),
+            "argmax_match": direct_token_id == distributed_token_id,
+            "max_abs_diff": float(diff.max().item()),
+            "mean_abs_diff": float(diff.mean().item()),
+            "allclose": bool(
+                torch.allclose(
+                    reference_logits,
+                    distributed_logits,
+                    atol=atol,
+                    rtol=rtol,
+                )
+            ),
+            "atol": atol,
+            "rtol": rtol,
+            "node_trace": node_trace,
+        }
+
+    def _generate_direct_text(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        repetition_penalty: float,
+        do_sample: bool,
+    ) -> tuple[str, list[int]]:
+        reference_device = self._prepare_reference_model_for_parity()
+        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(reference_device)
+        attention_mask = torch.ones(
+            input_ids.shape,
+            device=reference_device,
+            dtype=torch.long,
+        )
+
+        generate_kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "max_new_tokens": max_new_tokens,
+            "do_sample": do_sample,
+            "repetition_penalty": repetition_penalty,
+        }
+        if getattr(self.tokenizer, "pad_token_id", None) is not None:
+            generate_kwargs["pad_token_id"] = self.tokenizer.pad_token_id
+        if getattr(self.tokenizer, "eos_token_id", None) is not None:
+            generate_kwargs["eos_token_id"] = self.tokenizer.eos_token_id
+        if do_sample:
+            generate_kwargs.update(
+                {
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                }
+            )
+
+        with torch.no_grad():
+            output_ids = self._loaded_model.generate(**generate_kwargs)
+
+        generated_ids = output_ids[0][input_ids.shape[1] :].detach().cpu().tolist()
+        generated_ids = [int(token_id) for token_id in generated_ids]
+        response = self.tokenizer.decode(
+            generated_ids,
+            skip_special_tokens=True,
+        )
+        return response, generated_ids
+
+    def trace_generation(
+        self,
+        prompt: str,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        repetition_penalty: Optional[float] = None,
+        do_sample: Optional[bool] = None,
+    ) -> dict:
+        """
+        Diagnostic generation path that records token-level state.
+
+        This is intentionally synchronous and non-streaming so debugging can
+        inspect exactly which token introduced odd text or replacement chars.
+        """
+        if not self._loaded:
+            raise RuntimeError("Generator not loaded; call load() first")
+        if not prompt.strip():
+            raise ValueError("prompt must not be empty")
+
+        self.clear_stop()
+        cfg = self._get_gen_config()
+        max_new_tokens = max_new_tokens if max_new_tokens is not None else cfg["max_new_tokens"]
+        temperature = temperature if temperature is not None else cfg["temperature"]
+        top_p = top_p if top_p is not None else cfg["top_p"]
+        top_k = top_k if top_k is not None else cfg["top_k"]
+        rep_penalty = (
+            repetition_penalty
+            if repetition_penalty is not None
+            else cfg["repetition_penalty"]
+        )
+        do_sample = do_sample if do_sample is not None else True
+
+        generated_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+        prompt_token_ids = [int(token_id) for token_id in generated_ids[0].tolist()]
+        steps: list[dict] = []
+        node_trace: list[str] = []
+        decoded_output = ""
+
+        for step in range(max_new_tokens):
+            position_ids = torch.arange(
+                generated_ids.shape[1],
+                device=self.device,
+                dtype=torch.long,
+            ).unsqueeze(0)
+            attention_mask = torch.ones(
+                generated_ids.shape,
+                device=self.device,
+                dtype=torch.bool,
+            )
+
+            with torch.no_grad():
+                hidden_states = self._prepare_hidden_states(
+                    generated_ids,
+                    attention_mask,
+                    position_ids,
+                )
+
+            self._validate_generation_inputs(
+                input_ids=generated_ids,
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
+            hidden_shape_before_route = list(hidden_states.shape)
+            hidden_states, node_trace = self.sequential.forward(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
+            hidden_shape_after_route = list(hidden_states.shape)
+            hidden_states = hidden_states.to(self.device, dtype=self.dtype)
+
+            with torch.no_grad():
+                hidden_states = self.norm(hidden_states)
+                logits = self.lm_head(hidden_states)
+
+            next_token_logits = logits[:, -1, :]
+            top_values, top_indices = torch.topk(
+                next_token_logits.detach().cpu().float(),
+                k=min(5, next_token_logits.shape[-1]),
+                dim=-1,
+            )
+            next_token_id = self._sample(
+                next_token_logits.clone(),
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=rep_penalty,
+                do_sample=do_sample,
+                generated_ids=generated_ids,
+            )
+            if next_token_id.shape != (1, 1):
+                raise RuntimeError(f"Expected shape (1,1), got {next_token_id.shape}")
+
+            token_id = int(next_token_id.item())
+            token_text = self.tokenizer.decode(
+                next_token_id[0],
+                skip_special_tokens=True,
+            )
+            decoded_output += token_text
+            selected_in_top_candidates = token_id in top_indices[0].tolist()
+            generated_ids = torch.cat([generated_ids, next_token_id], dim=1)
+
+            steps.append(
+                {
+                    "step": step,
+                    "context_length": int(generated_ids.shape[1] - 1),
+                    "input_token_ids_before_selection": [
+                        int(existing_token_id)
+                        for existing_token_id in generated_ids[0][:-1].tolist()
+                    ],
+                    "attention_mask_shape": list(attention_mask.shape),
+                    "position_ids": [
+                        int(position_id)
+                        for position_id in position_ids[0].tolist()
+                    ],
+                    "hidden_shape_before_route": hidden_shape_before_route,
+                    "hidden_shape_after_route": hidden_shape_after_route,
+                    "logits_shape": list(next_token_logits.shape),
+                    "token_id": token_id,
+                    "token_text": token_text,
+                    "token_text_contains_replacement_char": "\ufffd" in token_text,
+                    "selected_in_top_candidates": selected_in_top_candidates,
+                    "decoded_output_so_far": decoded_output,
+                    "decoded_output_contains_replacement_char": "\ufffd" in decoded_output,
+                    "top_candidates": [
+                        {
+                            "token_id": int(candidate_id),
+                            "token_text": self.tokenizer.decode(
+                                [int(candidate_id)],
+                                skip_special_tokens=True,
+                            ),
+                            "token_text_contains_replacement_char": (
+                                "\ufffd"
+                                in self.tokenizer.decode(
+                                    [int(candidate_id)],
+                                    skip_special_tokens=True,
+                                )
+                            ),
+                            "logit": float(candidate_logit),
+                        }
+                        for candidate_id, candidate_logit in zip(
+                            top_indices[0].tolist(),
+                            top_values[0].tolist(),
+                        )
+                    ],
+                }
+            )
+
+            if token_id == self.tokenizer.eos_token_id:
+                break
+
+        return {
+            "prompt": prompt,
+            "model_name": self.model_name,
+            "generation_config": {
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "top_k": top_k,
+                "repetition_penalty": rep_penalty,
+                "do_sample": do_sample,
+            },
+            "tokenizer_class": type(self.tokenizer).__name__,
+            "device": str(self.device),
+            "dtype": str(self.dtype),
+            "prompt_token_ids": prompt_token_ids,
+            "prompt_tokens": [
+                {
+                    "token_id": token_id,
+                    "token_text": self.tokenizer.decode(
+                        [token_id],
+                        skip_special_tokens=True,
+                    ),
+                    "token_text_contains_replacement_char": (
+                        "\ufffd"
+                        in self.tokenizer.decode(
+                            [token_id],
+                            skip_special_tokens=True,
+                        )
+                    ),
+                }
+                for token_id in prompt_token_ids
+            ],
+            "response": decoded_output,
+            "response_contains_replacement_char": "\ufffd" in decoded_output,
+            "steps": steps,
+            "node_trace": node_trace,
+        }
 
     def _prepare_hidden_states(
         self,
@@ -336,6 +789,14 @@ class DistributedGenerator:
 
         return hidden_states
 
+    def _prepare_reference_model_for_parity(self) -> torch.device:
+        if self._loaded_model is None:
+            raise RuntimeError("Direct HuggingFace reference model is not loaded")
+        reference_device = torch.device(self.device)
+        self._loaded_model.to(reference_device)
+        self._loaded_model.eval()
+        return reference_device
+
     # ------------------------------------------------------------------
     # Sampling
     # ------------------------------------------------------------------
@@ -347,6 +808,7 @@ class DistributedGenerator:
         top_p:              float = 0.92,
         top_k:              int   = 50,
         repetition_penalty: float = 1.1,
+        do_sample:          bool  = True,
         generated_ids:      Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if logits.dim() != 2:
@@ -359,6 +821,9 @@ class DistributedGenerator:
                     logits[0, token_id] *= repetition_penalty
                 else:
                     logits[0, token_id] /= repetition_penalty
+
+        if not do_sample:
+            return torch.argmax(logits, dim=-1, keepdim=True)
 
         # 2. Temperature
         if temperature > 0:

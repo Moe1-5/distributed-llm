@@ -59,14 +59,15 @@
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | `tasks/active.md`                                            | Active sprint routing table.                                                         |
 | `tasks/lessons.md`                                           | Assistant lessons: active and internalized.                                          |
-| `tasks/sprints/sprint-04-local-system-validation.md`          | Active sprint for local end-to-end distributed inference validation.                 |
-| `tasks/sprints/sprint-05-client-workflow-controls.md`          | Active sprint plan for client workflow controls, inference cancellation, hidden bootstrap, and monitoring. |
-| `tasks/sprints/sprint-06-routing-model-access-and-incentives.md` | Active sprint plan for multi-node serving strategy, runnable-model semantics, and model-aware incentive accounting. |
-| `tasks/sprints/sprint-07-output-parity-and-quality.md`        | Active sprint plan for HuggingFace-direct versus distributed-output parity and quality checks. |
-| `tasks/sprints/sprint-08-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
+| `tasks/sprints/sprint-08-client-refinements-and-generation-diagnostics.md` | Active sprint plan for client workflow refinements, monitoring redesign, and token-level output diagnostics. |
+| `tasks/sprints/sprint-10-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
 | `tasks/archive/sprint-01-stabilize-prototype.md`              | Completed sprint for stabilizing distributed inference.                              |
 | `tasks/archive/sprint-02-architecture-adapter-and-parity.md` | Completed sprint for architecture-aware distributed inference and parity validation. |
 | `tasks/archive/sprint-03-routing-and-dht-hardening.md`       | Completed sprint for DHT metadata validation, model-aware routing, and RPC UID safety. |
+| `tasks/archive/sprint-04-local-system-validation.md`          | Completed sprint for local end-to-end distributed inference validation.              |
+| `tasks/archive/sprint-05-client-workflow-controls.md`          | Completed sprint for client workflow controls, inference cancellation, hidden bootstrap, and monitoring. |
+| `tasks/archive/sprint-06-routing-model-access-and-incentives.md` | Completed sprint for multi-node serving strategy, runnable-model semantics, and model-aware incentive accounting. |
+| `tasks/archive/sprint-07-output-parity-and-quality.md`        | Completed sprint for HuggingFace-direct versus distributed-output parity and quality checks. |
 | `tasks/archive/`                                             | Closed sprint audit trail.                                                           |
 
 ---
@@ -98,6 +99,7 @@
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
 | `backend/node/`          | Serving node, layer loading, Hivemind RPC, and GPU monitoring.                       |
 | `backend/models/`        | Model-specific adapter placeholders and architecture-specific preprocessing helpers. |
+| `backend/traces/`        | Gitignored runtime JSON generation traces written by `/generator/trace`.             |
 | `backend/bootstrap.py`   | Hivemind DHT bootstrap node.                                                         |
 | `backend/constants.py`   | Supported models, DHT constants, and generation defaults.                            |
 | `backend/pyproject.toml` | Python project metadata and dependencies.                                            |

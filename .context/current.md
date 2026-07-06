@@ -11,8 +11,8 @@
 
 ## Active Sprint
 
-**Sprint:** Sprint 04 - Local System Validation remains the current lowest active sprint. Sprint 05 through Sprint 07 are planned follow-on splits.
-**Goal:** Prove local end-to-end distributed inference first, then clean up client workflow controls, routing/model-access/incentives, and output parity.
+**Sprint:** Sprint 08 is the lowest active sprint; Sprint 04 through Sprint 07 are closed, and Sprint 10 is planned.
+**Goal:** Refine client workflow and generation diagnostics before moving toward real incentive prerequisites.
 
 ## Tech Stack
 
@@ -33,9 +33,8 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 
 **Latest Sprint Update**
 
-- Sprint 04 local smoke test passed for bootstrap, API, single OPT-125M serving node, generator readiness, and short `/chat` inference.
-- Sprint 04 found two blockers: one backend process cannot host multiple local layer slices, and node shutdown needed bounded cleanup. `/node/stop` now returns, but Hivemind worker cleanup remains open.
-- Sprint 05 client workflow cleanup is implemented pending user review: bootstrap is hidden from normal tabs, Nodes has local stop control, Inference gates send by backend/WebSocket/generator/route readiness, and Monitoring shows real status/coverage.
-- Sprint 06 implementation is complete pending review: one backend process per serving participant, runnable-model status in `/models`, and simulated contribution accounting only.
-- Sprint 07 now holds HuggingFace-direct versus distributed output parity and quality checks.
-- Sprint 08 now holds real incentives/rewards/settlement, blocked until correctness, health, proof/receipt, and anti-abuse prerequisites are ready.
+- Sprint 04 closed: local smoke test passed for bootstrap, API, single OPT-125M serving node, generator readiness, and short `/chat` inference; one backend process still serves only one local layer slice, and Hivemind worker cleanup remains a follow-up issue.
+- Sprint 05 closed: bootstrap is hidden from normal tabs, Nodes has local stop control, Inference gates send by backend/WebSocket/generator/route readiness, and Monitoring shows real status/coverage.
+- Sprint 06 closed: one backend process per serving participant, runnable-model status in `/models`, simulated contribution accounting only, and real incentives deferred to Sprint 10.
+- Sprint 07 closed: single-node OPT-125M parity passed, a live full-layer OPT-1.3B smoke trace/parity probe passed for first-token correctness, exact generation controls are exposed, and generated-output parity can compare direct HuggingFace text with distributed text. Broader live OPT-1.3B and true multi-node parity are downstream live-route validation items.
+- Sprint 08 is current: it hides bootstrap internals, uses one Inference open/send/stop action, shows a P2P Monitoring map, and writes `/generator/trace` JSON diagnostics for token-level inspection.

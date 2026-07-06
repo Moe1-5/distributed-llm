@@ -115,7 +115,7 @@ This map ignores generated folders such as `frontend/node_modules`, `frontend/ou
 
 - `frontend/src/renderer/src/api/client.ts`
   - Central HTTP/WebSocket client.
-  - Currently hardcodes backend IP `172.27.32.227:8000`.
+  - Defaults to localhost backend URLs and supports Vite env overrides.
 
 - `frontend/src/renderer/src/pages/Dashboard.tsx`
   - Polls backend status, stats, and discovered nodes.
@@ -146,4 +146,3 @@ This map ignores generated folders such as `frontend/node_modules`, `frontend/ou
 - `backend/cuda-keyring_1.1-1_all.deb.1`
 
 These should generally not be part of architectural reasoning or committed source changes.
-

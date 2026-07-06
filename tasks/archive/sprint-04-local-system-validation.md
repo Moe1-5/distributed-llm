@@ -2,7 +2,7 @@
 
 **Goal:** Prove the core distributed inference flow works locally before adding real public bootstrap nodes, fault tolerance, monitoring, API keys, incentives, or distributed training/resource features.
 **Start:** 2026-07-03
-**End:** TBD
+**End:** 2026-07-06
 
 ---
 
@@ -139,3 +139,9 @@ The screenshots and review notes exposed workflow and product issues that should
 - What changed: added a Sprint 04 disposition table for each user-review workflow finding and marked the remaining validation acceptance criteria complete by documenting fixed items or explicit follow-on owners.
 - Why: Sprint 04 should end with local system validation understood, while UI workflow, multi-node strategy, model-access semantics, incentives, and output parity stay out of the validation sprint.
 - Status: Sprint 04 is ready for user review or explicit closure. Follow-on work is owned by Sprint 05, Sprint 06, and Sprint 07.
+
+### 2026-07-06 - Close Sprint 04
+
+- What changed: archived Sprint 04 after confirming the local validation checklist and acceptance criteria were complete.
+- Why: the user explicitly asked to close Sprint 04.
+- Status: Sprint 04 is closed and archived. Remaining follow-ups are owned by Sprint 07, Sprint 08, and Sprint 10.
