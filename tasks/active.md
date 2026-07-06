@@ -9,6 +9,7 @@
 | Sprint 05 | `tasks/sprints/sprint-05-client-workflow-controls.md` | Clean up client workflow controls after local validation: hidden bootstrap, stop controls, cancellation, and monitoring. |
 | Sprint 06 | `tasks/sprints/sprint-06-routing-model-access-and-incentives.md` | Define multi-node serving, runnable-model semantics, and model-aware incentive accounting. |
 | Sprint 07 | `tasks/sprints/sprint-07-output-parity-and-quality.md` | Compare HuggingFace-direct and distributed outputs before trusting generated text quality. |
+| Sprint 08 | `tasks/sprints/sprint-08-real-incentives-and-settlement.md` | Add real incentive rewards and settlement only after correctness, proof, health, and anti-abuse prerequisites are ready. |
 
 ## Completed Sprints
 

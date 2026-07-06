@@ -36,5 +36,6 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 04 local smoke test passed for bootstrap, API, single OPT-125M serving node, generator readiness, and short `/chat` inference.
 - Sprint 04 found two blockers: one backend process cannot host multiple local layer slices, and node shutdown needed bounded cleanup. `/node/stop` now returns, but Hivemind worker cleanup remains open.
 - Sprint 05 client workflow cleanup is implemented pending user review: bootstrap is hidden from normal tabs, Nodes has local stop control, Inference gates send by backend/WebSocket/generator/route readiness, and Monitoring shows real status/coverage.
-- Sprint 06 implementation is complete pending review: one backend process per serving participant, runnable-model status in `/models`, and simulated contribution accounting with no token UI or settlement.
+- Sprint 06 implementation is complete pending review: one backend process per serving participant, runnable-model status in `/models`, and simulated contribution accounting only.
 - Sprint 07 now holds HuggingFace-direct versus distributed output parity and quality checks.
+- Sprint 08 now holds real incentives/rewards/settlement, blocked until correctness, health, proof/receipt, and anti-abuse prerequisites are ready.

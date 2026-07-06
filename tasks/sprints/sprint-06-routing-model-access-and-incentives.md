@@ -1,6 +1,6 @@
 # Sprint 06 - Routing, Model Access, and Incentives
 
-**Goal:** Define and implement the next backend/product layer after local validation and client workflow cleanup: multi-node serving strategy, runnable-model semantics, and model-aware contribution accounting.
+**Goal:** Define and implement the next backend/product layer after local validation and client workflow cleanup: multi-node serving strategy, runnable-model semantics, and simulated model-aware contribution accounting.
 **Start:** 2026-07-06
 **End:** TBD
 
@@ -12,9 +12,9 @@ The system needs explicit answers for three structural questions:
 
 1. Can one backend process serve multiple local layer slices, or should local split testing run multiple backend processes?
 2. Can users inference any registered model, or only models with complete compatible coverage in the current network?
-3. Are incentives global, or model/contribution specific?
+3. Are future incentives global, or model/contribution specific?
 
-Sprint 06 should not begin until Sprint 04 validates the local inference path and Sprint 05 gives users reliable controls/status. Incentive work before correctness would reward untrusted or useless compute.
+Sprint 06 should not begin until Sprint 04 validates the local inference path and Sprint 05 gives users reliable controls/status. Real incentive/reward work before correctness would reward untrusted or useless compute, so Sprint 06 only defines and exposes simulated accounting fields. Real rewards and settlement are deferred to Sprint 08.
 
 ---
 
@@ -32,6 +32,7 @@ Sprint 06 should not begin until Sprint 04 validates the local inference path an
 - [x] Define model-aware incentive accounting fields: model, layer range, tokens/requests served, latency, success/failure, hardware class, and identity.
 - [x] Decide whether initial rewards are simulated accounting only before real token integration.
 - [x] Add tests for model-runnable state and multi-node route readiness.
+- [x] Defer real token incentives, balances, claims, payouts, and settlement to Sprint 08 until prerequisites are complete.
 
 ## Done
 
@@ -42,6 +43,7 @@ Sprint 06 should not begin until Sprint 04 validates the local inference path an
 - [x] Current Sprint 06 does not design a node registry because the chosen prototype strategy is one backend process per participant; registry design remains future work if the project needs multi-node-per-process support.
 - [x] Serving nodes record simulated contribution metrics for model, layer range, device, request success/failure, token positions served, latency, and identity.
 - [x] `/incentives/accounting` exposes simulated accounting only, with token UI and reward settlement disabled.
+- [x] Real incentive rewards and settlement are deferred to Sprint 08.
 
 ---
 
@@ -50,7 +52,7 @@ Sprint 06 should not begin until Sprint 04 validates the local inference path an
 - [x] Multi-node local testing strategy is explicit and testable.
 - [x] The app can explain why a model is or is not currently runnable.
 - [x] Inference is gated by complete compatible route coverage, not only by model registry membership.
-- [x] Incentive semantics are model-aware and contribution-aware.
+- [x] Future incentive semantics are model-aware and contribution-aware; Sprint 06 implements simulated accounting only.
 - [x] No token UI is added before route correctness and accounting fields are validated.
 - [x] Backend tests cover the chosen model/routing semantics.
 
@@ -75,3 +77,9 @@ Sprint 06 should not begin until Sprint 04 validates the local inference path an
 - What changed: added simulated serving contribution metrics to `InferenceHandler` and local node status; added `/incentives/accounting` with token UI and settlement disabled; documented the no-registry and simulated-accounting decisions; added tests for accounting success, failure, and endpoint contract.
 - Why: Sprint 06 needs incentive semantics to be model-aware and contribution-aware without introducing real token rewards before route correctness, health checks, and anti-abuse validation.
 - Status: focused backend readiness tests pass with 31 tests. Sprint 06 implementation criteria are satisfied pending user review or explicit sprint closure.
+
+### 2026-07-06 - Defer real incentives to Sprint 08
+
+- What changed: clarified that Sprint 06 implemented simulated accounting only and created Sprint 08 for real rewards, token UI, receipt/proof validation, anti-abuse checks, and settlement.
+- Why: the source system is not ready to safely issue incentives until parity, multi-node validation, health checks, receipt/proof design, and anti-abuse prerequisites are complete.
+- Status: real incentives are deferred; Sprint 06 remains complete as the accounting-contract sprint.
