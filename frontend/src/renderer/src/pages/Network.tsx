@@ -48,6 +48,10 @@ export default function Network(): React.JSX.Element {
   const [tokenAvailable, setTokenAvailable] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(true)
   const [activity, setActivity] = useState<ActivityEntry[]>([])
+  const [tokenModalOpen, setTokenModalOpen] = useState(false)
+  const [tokenInput, setTokenInput] = useState('')
+  const [tokenSaving, setTokenSaving] = useState(false)
+  const [tokenError, setTokenError] = useState<string | null>(null)
 
   // Serve Layers form state
   const [serveModel, setServeModel] = useState('')
@@ -139,12 +143,47 @@ export default function Network(): React.JSX.Element {
     window.open('https://huggingface.co/settings/tokens', '_blank')
   }
 
+  const openTokenModal = useCallback(() => {
+    setTokenError(null)
+    setTokenModalOpen(true)
+  }, [])
+
+  const handleSaveToken = useCallback(async () => {
+    const token = tokenInput.trim()
+    if (!token) {
+      setTokenError('Token must not be empty')
+      return
+    }
+    if (!token.startsWith('hf_')) {
+      setTokenError("HuggingFace tokens start with 'hf_'")
+      return
+    }
+
+    setTokenSaving(true)
+    setTokenError(null)
+    try {
+      await api.saveToken(token)
+      setTokenAvailable(true)
+      setTokenInput('')
+      setTokenModalOpen(false)
+      log('HuggingFace token saved', 'success')
+    } catch (err) {
+      setTokenError(err instanceof Error ? err.message : 'Failed to save token')
+    } finally {
+      setTokenSaving(false)
+    }
+  }, [log, tokenInput])
+
   // ---------------------------------------------------------------------------
   // Start node
   // ---------------------------------------------------------------------------
 
   const handleStartNode = useCallback(async () => {
     if (!serveModel || nodeLoading) return
+    if (serveNeedsToken) {
+      openTokenModal()
+      return
+    }
 
     log(`Starting node: ${serveModel} layers ${layerStart}-${layerEnd}...`)
     setNodeLoading(true)
@@ -181,7 +220,16 @@ export default function Network(): React.JSX.Element {
     } finally {
       setNodeLoading(false)
     }
-  }, [serveModel, layerStart, layerEnd, device, nodeLoading, log])
+  }, [
+    serveModel,
+    nodeLoading,
+    serveNeedsToken,
+    log,
+    layerStart,
+    layerEnd,
+    device,
+    openTokenModal
+  ])
 
   // ---------------------------------------------------------------------------
   // Start generator
@@ -189,6 +237,10 @@ export default function Network(): React.JSX.Element {
 
   const handleStartGenerator = useCallback(async () => {
     if (!inferModel || genLoading) return
+    if (inferNeedsToken) {
+      openTokenModal()
+      return
+    }
 
     log(`Starting generator: ${inferModel}...`)
     setGenLoading(true)
@@ -216,7 +268,28 @@ export default function Network(): React.JSX.Element {
     } finally {
       setGenLoading(false)
     }
-  }, [inferModel, genLoading, log])
+  }, [inferModel, genLoading, inferNeedsToken, log, openTokenModal])
+
+  const handleStopGenerator = useCallback(async () => {
+    if (!genReady || genLoading) return
+
+    log('Stopping generator...')
+    setGenLoading(true)
+
+    try {
+      const res = await api.stopGenerator()
+      if (res.status === 'stop_requested') {
+        log('Generator stop requested', 'success')
+      } else {
+        log(`Generator status: ${res.status}`, 'info')
+      }
+      setGenReady(false)
+    } catch (err) {
+      log(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
+    } finally {
+      setGenLoading(false)
+    }
+  }, [genLoading, genReady, log])
 
   // ---------------------------------------------------------------------------
   // Shared input styles
@@ -300,11 +373,6 @@ export default function Network(): React.JSX.Element {
           {/* ── SERVE LAYERS ── */}
           {tab === 'serve' && (
             <>
-              <p className="text-[12px] leading-relaxed text-text-secondary">
-                Serve one local layer slice from this backend process. Manage active local nodes
-                from the Nodes page.
-              </p>
-
               {/* Model dropdown */}
               <div className="flex flex-col gap-1.5">
                 <label className={labelCls}>Model</label>
@@ -314,7 +382,7 @@ export default function Network(): React.JSX.Element {
                   <select
                     value={serveModel}
                     onChange={(e) => handleServeModelChange(e.target.value)}
-                    disabled={nodeRunning || nodeLoading}
+                    disabled={nodeLoading}
                     className={inputCls}
                   >
                     {models.map((m) => (
@@ -323,21 +391,6 @@ export default function Network(): React.JSX.Element {
                       </option>
                     ))}
                   </select>
-                )}
-
-                {/* Gated model warning */}
-                {serveNeedsToken && (
-                  <div className="flex items-center justify-between rounded-lg border border-red/20 bg-red/5 px-3 py-2.5">
-                    <p className="font-mono text-[11px] text-red">
-                      Gated model — HuggingFace token required
-                    </p>
-                    <button
-                      onClick={openHuggingFace}
-                      className="ml-3 flex-shrink-0 rounded-lg border border-red/30 px-3 py-1 font-mono text-[10px] text-red hover:bg-red/10 transition-colors"
-                    >
-                      GET TOKEN ↗
-                    </button>
-                  </div>
                 )}
 
                 {/* Model info */}
@@ -359,7 +412,7 @@ export default function Network(): React.JSX.Element {
                     min={0}
                     max={layerEnd - 1}
                     onChange={(e) => setLayerStart(Number(e.target.value))}
-                    disabled={nodeRunning || nodeLoading}
+                    disabled={nodeLoading}
                     className={inputCls}
                   />
                 </div>
@@ -371,7 +424,7 @@ export default function Network(): React.JSX.Element {
                     min={layerStart + 1}
                     max={selectedServeModel?.num_layers ?? 999}
                     onChange={(e) => setLayerEnd(Number(e.target.value))}
-                    disabled={nodeRunning || nodeLoading}
+                    disabled={nodeLoading}
                     className={inputCls}
                   />
                 </div>
@@ -383,7 +436,7 @@ export default function Network(): React.JSX.Element {
                 <select
                   value={device}
                   onChange={(e) => setDevice(e.target.value)}
-                  disabled={nodeRunning || nodeLoading}
+                  disabled={nodeLoading}
                   className={inputCls}
                 >
                   <option value="cuda">CUDA (GPU)</option>
@@ -391,31 +444,21 @@ export default function Network(): React.JSX.Element {
                 </select>
               </div>
 
-              {/* Start button */}
-              {nodeRunning ? (
-                <div className="rounded-xl border border-green/20 bg-green/5 px-4 py-3">
-                  <p className="font-mono text-[12px] text-green">Local node is running.</p>
-                  <p className="mt-1 text-[12px] text-text-secondary">
-                    Use the Nodes page to inspect or stop this machine's active node.
-                  </p>
-                </div>
-              ) : (
-                <button
-                  onClick={() => void handleStartNode()}
-                  disabled={nodeLoading || serveNeedsToken || !serveModel}
-                  className={`
-                    w-full rounded-xl border py-3 font-mono text-[12px] font-semibold
-                    transition-all duration-150
-                    ${
-                      nodeLoading || serveNeedsToken || !serveModel
-                        ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
-                        : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
-                    }
-                  `}
-                >
-                  {nodeLoading ? 'STARTING... (downloading model)' : 'START NODE'}
-                </button>
-              )}
+              <button
+                onClick={() => void handleStartNode()}
+                disabled={nodeLoading || !serveModel}
+                className={`
+                  w-full rounded-xl border py-3 font-mono text-[12px] font-semibold
+                  transition-all duration-150
+                  ${
+                    nodeLoading || !serveModel
+                      ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
+                      : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
+                  }
+                `}
+              >
+                {nodeLoading ? 'STARTING... (downloading model)' : 'START NODE'}
+              </button>
             </>
           )}
 
@@ -447,20 +490,6 @@ export default function Network(): React.JSX.Element {
                   </select>
                 )}
 
-                {inferNeedsToken && (
-                  <div className="flex items-center justify-between rounded-lg border border-red/20 bg-red/5 px-3 py-2.5">
-                    <p className="font-mono text-[11px] text-red">
-                      Gated model — HuggingFace token required
-                    </p>
-                    <button
-                      onClick={openHuggingFace}
-                      className="ml-3 flex-shrink-0 rounded-lg border border-red/30 px-3 py-1 font-mono text-[10px] text-red hover:bg-red/10 transition-colors"
-                    >
-                      GET TOKEN ↗
-                    </button>
-                  </div>
-                )}
-
                 {selectedInferModel && (
                   <div className="rounded-lg border border-border bg-bg-surface px-3 py-2.5">
                     <p
@@ -483,20 +512,40 @@ export default function Network(): React.JSX.Element {
               </div>
 
               {genReady ? (
-                <div className="rounded-xl border border-green/20 bg-green/5 px-4 py-3">
-                  <p className="font-mono text-[12px] text-green">
-                    ✓ Generator ready — go to Inference page to start chatting
-                  </p>
+                <div className="flex flex-col gap-3 rounded-xl border border-green/20 bg-green/5 px-4 py-3">
+                  <div>
+                    <p className="font-mono text-[12px] text-green">
+                      ✓ Generator ready — go to Inference page to start chatting
+                    </p>
+                    <p className="mt-1 text-[12px] text-text-secondary">
+                      Stop the generator when changing models or freeing local components.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => void handleStopGenerator()}
+                    disabled={genLoading}
+                    className={`
+                      w-full rounded-lg border py-2.5 font-mono text-[11px] font-semibold
+                      transition-all duration-150
+                      ${
+                        genLoading
+                          ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
+                          : 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
+                      }
+                    `}
+                  >
+                    {genLoading ? 'STOPPING...' : 'STOP GENERATOR'}
+                  </button>
                 </div>
               ) : (
                 <button
                   onClick={() => void handleStartGenerator()}
-                  disabled={genLoading || inferNeedsToken || !inferModel}
+                  disabled={genLoading || !inferModel}
                   className={`
                     w-full rounded-xl border py-3 font-mono text-[12px] font-semibold
                     transition-all duration-150
                     ${
-                      genLoading || inferNeedsToken || !inferModel
+                      genLoading || !inferModel
                         ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
                         : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
                     }
@@ -553,6 +602,75 @@ export default function Network(): React.JSX.Element {
           )}
         </div>
       </div>
+
+      {tokenModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg-base/80 px-4">
+          <div className="w-full max-w-md rounded-xl border border-border bg-bg-elevated p-5 shadow-2xl">
+            <div className="mb-4 flex items-start justify-between gap-4">
+              <div>
+                <h2 className="font-mono text-[13px] font-semibold text-text-primary">
+                  HuggingFace Token
+                </h2>
+                <p className="mt-1 text-[12px] leading-relaxed text-text-secondary">
+                  Add a read token to download gated model weights on this backend.
+                </p>
+              </div>
+              <button
+                onClick={() => setTokenModalOpen(false)}
+                disabled={tokenSaving}
+                className="rounded border border-border px-2 py-1 font-mono text-[10px] text-text-dim hover:text-text-secondary disabled:opacity-50"
+              >
+                ESC
+              </button>
+            </div>
+
+            <input
+              type="password"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  void handleSaveToken()
+                }
+              }}
+              placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxx"
+              disabled={tokenSaving}
+              className={inputCls}
+            />
+
+            {tokenError && (
+              <div className="mt-3 rounded-lg border border-red/20 bg-red/5 px-3 py-2">
+                <p className="font-mono text-[11px] text-red">{tokenError}</p>
+              </div>
+            )}
+
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                onClick={() => void handleSaveToken()}
+                disabled={!tokenInput.trim() || tokenSaving}
+                className={`
+                  h-10 flex-1 rounded-lg border font-mono text-[11px] font-semibold
+                  transition-colors
+                  ${
+                    !tokenInput.trim() || tokenSaving
+                      ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
+                      : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
+                  }
+                `}
+              >
+                {tokenSaving ? 'SAVING...' : 'SAVE TOKEN'}
+              </button>
+              <button
+                onClick={openHuggingFace}
+                className="h-10 rounded-lg border border-border px-3 font-mono text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+              >
+                GET TOKEN ↗
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

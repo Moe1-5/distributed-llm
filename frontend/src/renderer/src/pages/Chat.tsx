@@ -54,6 +54,7 @@ export default function Chat(): React.JSX.Element {
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [traceLoading, setTraceLoading] = useState(false)
   const [connState, setConnState] = useState<ConnectionState>('closed')
   const [backendState, setBackendState] = useState<BackendState>('checking')
   const [generatorStatus, setGeneratorStatus] = useState<GeneratorStatus | null>(null)
@@ -260,6 +261,62 @@ export default function Chat(): React.JSX.Element {
     void refreshReadiness()
   }, [loading, refreshReadiness])
 
+  const handleTrace = useCallback(async () => {
+    const text = input.trim()
+    if (!text || loading || traceLoading || !generatorStatus?.ready || !generatorStatus.route_ready) return
+
+    setTraceLoading(true)
+    try {
+      const trace = await api.traceGeneration(text, {
+        maxNewTokens: 8,
+        topK: 0,
+        repetitionPenalty: 1,
+        doSample: false
+      })
+      const firstStep = trace.steps[0]
+      const firstToken = firstStep
+        ? `${firstStep.token_text || '(empty)'} [${firstStep.token_id}]`
+        : 'none'
+      const topCandidates =
+        firstStep?.top_candidates
+          .map((candidate) => {
+            const token = candidate.token_text || '(empty)'
+            return `${token} [${candidate.token_id}] ${candidate.logit.toFixed(3)}`
+          })
+          .join(', ') || 'none'
+      const result = [
+        `Trace ${trace.trace_id}`,
+        `Model: ${trace.model_name}`,
+        `Steps: ${trace.steps.length}`,
+        `Greedy response: ${trace.response || '(empty)'}`,
+        `First token: ${firstToken}`,
+        `First-step candidates: ${topCandidates}`,
+        `Replacement chars: ${trace.response_contains_replacement_char ? 'yes' : 'no'}`,
+        `Trace file: ${trace.trace_file}`
+      ].join('\n')
+
+      setMessages((prev) => [
+        ...prev,
+        makeMessage('user', text),
+        makeMessage('assistant', result, { nodeTrace: trace.node_trace })
+      ])
+      setInput('')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Trace request failed'
+      setMessages((prev) => [...prev, makeMessage('assistant', `Error: ${msg}`, { error: true })])
+    } finally {
+      setTraceLoading(false)
+      void refreshReadiness()
+    }
+  }, [
+    generatorStatus?.ready,
+    generatorStatus?.route_ready,
+    input,
+    loading,
+    refreshReadiness,
+    traceLoading
+  ])
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>): void {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -292,8 +349,17 @@ export default function Chat(): React.JSX.Element {
     connState === 'open' &&
     generatorReady &&
     routeReady
+  const canTrace =
+    Boolean(input.trim()) &&
+    !loading &&
+    !traceLoading &&
+    backendState === 'online' &&
+    generatorReady &&
+    routeReady
   const inputPlaceholder = loading
     ? 'Generating...'
+    : traceLoading
+      ? 'Tracing...'
     : !generatorReady || !routeReady
       ? 'Generator route not ready'
       : connState !== 'open'
@@ -393,7 +459,7 @@ export default function Chat(): React.JSX.Element {
 
             {/* Bubble */}
             <div
-              className={`rounded-xl border px-4 py-3 text-[14px] leading-relaxed ${
+              className={`whitespace-pre-wrap rounded-xl border px-4 py-3 text-[14px] leading-relaxed ${
                 msg.error
                   ? 'rounded-bl-sm border-red/20 bg-red/5 text-red'
                   : msg.role === 'user'
@@ -439,7 +505,7 @@ export default function Chat(): React.JSX.Element {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          disabled={loading}
+          disabled={loading || traceLoading}
           placeholder={inputPlaceholder}
           rows={1}
           className="
@@ -449,6 +515,22 @@ export default function Chat(): React.JSX.Element {
             min-h-[46px] max-h-[140px] disabled:opacity-50
           "
         />
+        <button
+          onClick={handleTrace}
+          disabled={!canTrace}
+          className={`
+            flex h-[46px] w-[68px] flex-shrink-0 items-center justify-center
+            rounded-xl border font-mono text-[11px] font-semibold transition-all duration-150
+            ${
+              canTrace
+                ? 'cursor-pointer border-amber/30 bg-amber/10 text-amber hover:bg-amber/20'
+                : 'cursor-not-allowed border-border bg-bg-elevated text-text-dim opacity-50'
+            }
+          `}
+          title="Run token trace"
+        >
+          {traceLoading ? '...' : 'TRACE'}
+        </button>
         <button
           onClick={loading ? handleStop : connState === 'open' ? handleSend : connectStream}
           disabled={!loading && (connState === 'open' ? !canSend : !canConnect)}

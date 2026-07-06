@@ -30,6 +30,8 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+.hf_token
+backend/.hf_token
 
 # Assistant/session state
 .claude/sprint-sessions/

@@ -105,9 +105,104 @@ def _write_generation_trace(trace: dict) -> dict:
 
 gpu_monitor: Optional[GPUMonitor]           = None
 node:        Optional[Node]                 = None
+local_nodes: dict[str, Node]                = {}
 generator:   Optional[DistributedGenerator] = None
 client_dht:  Optional[hivemind.DHT]         = None
 client_dht_prefix: str = DHT_PREFIX
+
+
+def _sync_primary_node() -> None:
+    global node
+    node = next(iter(local_nodes.values()), None)
+
+
+def _local_node_list() -> list[Node]:
+    if local_nodes:
+        return list(local_nodes.values())
+    return [node] if node is not None else []
+
+
+def _register_local_node(local_node: Node) -> None:
+    local_nodes[local_node.node_id] = local_node
+    _sync_primary_node()
+
+
+def _unregister_local_node(local_node: Node) -> None:
+    node_id = getattr(local_node, "node_id", None)
+    if node_id is not None:
+        local_nodes.pop(node_id, None)
+    global node
+    if node is local_node:
+        if local_nodes:
+            _sync_primary_node()
+        else:
+            node = None
+
+
+def _find_local_node(node_id: Optional[str] = None) -> Optional[Node]:
+    if node_id:
+        found = local_nodes.get(node_id)
+        if found is not None:
+            return found
+        if node is not None and node.node_id == node_id:
+            return node
+        return None
+    nodes = _local_node_list()
+    if not nodes:
+        return None
+    if len(nodes) > 1:
+        raise ValueError("node_id is required when multiple local nodes exist")
+    return nodes[0]
+
+
+def _active_local_dht() -> Optional[hivemind.DHT]:
+    for local_node in _local_node_list():
+        if local_node.dht is not None:
+            return local_node.dht
+    return None
+
+
+def _active_dht_prefix() -> str:
+    for local_node in _local_node_list():
+        return local_node.dht_prefix
+    return client_dht_prefix or DHT_PREFIX
+
+
+def _active_model_name() -> Optional[str]:
+    models = {
+        model_name
+        for model_name in (getattr(local_node, "model_name", None) for local_node in _local_node_list())
+        if model_name is not None
+    }
+    if len(models) == 1:
+        return next(iter(models))
+    return generator.model_name if generator is not None else None
+
+
+def _local_node_key(info: dict) -> str:
+    node_id = info.get("node_id")
+    if node_id:
+        return f"node:{node_id}"
+    return (
+        f"peer:{info.get('peer_id')}:{info.get('model_name')}:"
+        f"{info.get('layer_start')}:{info.get('layer_end')}"
+    )
+
+
+def _local_node_infos() -> list[dict]:
+    return [local_node.get_info() for local_node in _local_node_list()]
+
+
+def _has_overlapping_local_node(req) -> Optional[Node]:
+    for local_node in _local_node_list():
+        if (
+            local_node.model_name != req.model_name
+            or local_node.dht_prefix != req.dht_prefix
+        ):
+            continue
+        if req.layer_start < local_node.layer_end and req.layer_end > local_node.layer_start:
+            return local_node
+    return None
 
 
 @asynccontextmanager
@@ -120,7 +215,10 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("Shutting down...")
     if gpu_monitor is not None: gpu_monitor.stop()
-    if node        is not None: node.stop()
+    for local_node in _local_node_list():
+        local_node.stop()
+    local_nodes.clear()
+    _sync_primary_node()
     if client_dht  is not None: client_dht.shutdown()
     logger.info("Shutdown complete.")
 
@@ -360,10 +458,13 @@ class TokenRequest(BaseModel):
 
 @app.get("/status")
 async def get_status() -> dict:
+    local_infos = _local_node_infos()
     return {
         "status":          "online",
-        "node_running":    node.is_running()     if node      else False,
-        "node_info":       node.get_info()        if node      else None,
+        "node_running":    any(local_node.is_running() for local_node in _local_node_list()),
+        "node_info":       local_infos[0] if local_infos else None,
+        "node_infos":      local_infos,
+        "local_node_ids":  [info["node_id"] for info in local_infos if info.get("node_id")],
         "gpu_available":   torch.cuda.is_available(),
         "generator_ready": generator.is_loaded() if generator else False,
         "token_set":       token_is_set(),
@@ -379,28 +480,29 @@ async def get_stats() -> dict:
 
 @app.get("/nodes")
 async def get_nodes() -> dict:
-    dht = (node.dht if node is not None else None) or client_dht
+    dht = _active_local_dht() or client_dht
     if dht is None:
+        local_infos = _local_node_infos()
+        if local_infos:
+            return {
+                "nodes": local_infos,
+                "warning": "No active DHT connection; showing local loaded node only.",
+            }
         return {"nodes": [], "warning": "No DHT connection yet."}
     try:
-        active_prefix = (
-            getattr(node, "dht_prefix", None)
-            if node is not None
-            else client_dht_prefix
-        ) or DHT_PREFIX
-        active_model = (
-            getattr(node, "model_name", None)
-            if node is not None
-            else (generator.model_name if generator is not None else None)
-        )
         seq = RemoteSequential(
             dht=dht,
-            dht_prefix=active_prefix,
+            dht_prefix=_active_dht_prefix(),
             num_layers=0,
-            model_name=active_model,
+            model_name=_active_model_name(),
         )
         status = seq.get_network_status()
-        return {"nodes": status["nodes"]}
+        discovered_nodes = status["nodes"]
+        discovered_keys = {_local_node_key(info) for info in discovered_nodes}
+        local_only_nodes = [
+            info for info in _local_node_infos() if _local_node_key(info) not in discovered_keys
+        ]
+        return {"nodes": [*discovered_nodes, *local_only_nodes]}
     except Exception as e:
         logger.error(f"Node discovery failed: {e}", exc_info=True)
         return {"nodes": [], "error": str(e)}
@@ -415,12 +517,8 @@ async def get_models() -> dict:
     frontend can show the HuggingFace redirect prompt.
     """
     token_available = token_is_set()
-    dht = (node.dht if node is not None else None) or client_dht
-    active_prefix = (
-        getattr(node, "dht_prefix", None)
-        if node is not None
-        else client_dht_prefix
-    ) or DHT_PREFIX
+    dht = _active_local_dht() or client_dht
+    active_prefix = _active_dht_prefix()
     models = []
     for model_id, info in SUPPORTED_MODELS.items():
         route_status = _get_model_route_status(
@@ -495,7 +593,7 @@ def _get_model_route_status(
             "covered_layers": network_status["covered_layers"],
             "missing_layers": network_status["missing_layers"],
             "total_layers": total_layers,
-            "compatible_nodes": len(nodes),
+            "compatible_nodes": len(route),
             "route_trace": _format_route_trace(route),
         }
     except Exception as e:
@@ -526,7 +624,9 @@ async def get_incentive_accounting() -> dict:
     Return simulated contribution accounting only.
     This intentionally does not expose balances, token claims, or payout actions.
     """
-    local_contribution = node.get_accounting_snapshot() if node is not None else None
+    local_contributions = [
+        local_node.get_accounting_snapshot() for local_node in _local_node_list()
+    ]
     return {
         "mode": "simulated",
         "token_ui_enabled": False,
@@ -551,7 +651,8 @@ async def get_incentive_accounting() -> dict:
             "last_success_at",
             "last_error_at",
         ],
-        "local_contribution": local_contribution,
+        "local_contribution": local_contributions[0] if local_contributions else None,
+        "local_contributions": local_contributions,
     }
 
 
@@ -591,10 +692,65 @@ async def remove_token() -> dict:
 
 @app.post("/node/start")
 async def start_node(req: NodeStartRequest) -> dict:
-    global node
+    for local_node in _local_node_list():
+        if (
+            local_node.model_name == req.model_name
+            and local_node.layer_start == req.layer_start
+            and local_node.layer_end == req.layer_end
+            and local_node.dht_prefix == req.dht_prefix
+            and local_node.device == req.device
+        ):
+            if local_node.is_running():
+                return {"status": "already_running", "info": local_node.get_info()}
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, local_node.start)
+                return {"status": "resumed", "info": local_node.get_info()}
+            except Exception as e:
+                logger.error(f"Node resume failed: {e}", exc_info=True)
+                return {"status": "error", "error": str(e)}
 
-    if node is not None and node.is_running():
-        return {"status": "already_running", "info": node.get_info()}
+    existing_models = {local_node.model_name for local_node in _local_node_list()}
+    if existing_models and req.model_name not in existing_models:
+        return {
+            "status": "error",
+            "error": "multi_model_local_nodes_not_supported",
+            "message": (
+                "This backend currently serves multiple local nodes only for one model. "
+                "Delete existing local nodes before serving a different model."
+            ),
+        }
+    existing_prefixes = {local_node.dht_prefix for local_node in _local_node_list()}
+    if existing_prefixes and req.dht_prefix not in existing_prefixes:
+        return {
+            "status": "error",
+            "error": "multi_prefix_local_nodes_not_supported",
+            "message": (
+                "Multiple local nodes in one backend must use the same DHT prefix "
+                "so they participate in one route."
+            ),
+        }
+
+    overlapping_node = _has_overlapping_local_node(req)
+    if overlapping_node is not None:
+        if overlapping_node.layer_start == req.layer_start and overlapping_node.layer_end == req.layer_end:
+            return {
+                "status": "error",
+                "error": "duplicate_layer_replicas_not_supported",
+                "message": (
+                    "This backend does not yet support duplicate local replicas "
+                    "for the same model layer range."
+                ),
+            }
+        return {
+            "status": "error",
+            "error": "overlapping_layer_range",
+            "message": (
+                f"Requested layers {req.layer_start}-{req.layer_end} overlap "
+                f"existing local node {overlapping_node.layer_start}-{overlapping_node.layer_end}. "
+                "Use a non-overlapping slice."
+            ),
+        }
 
     # Check token for gated models
     model_info = SUPPORTED_MODELS[req.model_name]
@@ -614,7 +770,7 @@ async def start_node(req: NodeStartRequest) -> dict:
     peers = req.initial_peers or DISTRIBLLM_INITIAL_PEERS
 
     try:
-        node = Node(
+        local_node = Node(
             model_name=req.model_name,
             layer_start=req.layer_start,
             layer_end=req.layer_end,
@@ -624,31 +780,82 @@ async def start_node(req: NodeStartRequest) -> dict:
             hf_token=hf_token,
         )
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, node.start)
-        if not node.is_running():
+        await loop.run_in_executor(None, local_node.start)
+        if not local_node.is_running():
             raise RuntimeError("node.start() completed but is_running() is False")
-        return {"status": "started", "info": node.get_info()}
+        _register_local_node(local_node)
+        return {"status": "started", "info": local_node.get_info()}
 
     except AssertionError as e:
-        node = None
         return {"status": "error", "error": str(e)}
     except Exception as e:
         logger.error(f"Node start failed: {e}", exc_info=True)
-        node = None
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/node/turn-on")
+async def turn_on_node(node_id: Optional[str] = None) -> dict:
+    try:
+        local_node = _find_local_node(node_id)
+    except ValueError as e:
+        return {"status": "error", "error": str(e)}
+    if local_node is None:
+        return {"status": "not_found"}
+    if local_node.is_running():
+        return {"status": "already_running", "info": local_node.get_info()}
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, local_node.start)
+        return {"status": "turned_on", "info": local_node.get_info()}
+    except Exception as e:
+        logger.error(f"Node turn-on failed: {e}", exc_info=True)
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/node/turn-off")
+async def turn_off_node(node_id: Optional[str] = None) -> dict:
+    try:
+        local_node = _find_local_node(node_id)
+    except ValueError as e:
+        return {"status": "error", "error": str(e)}
+    if local_node is None:
+        return {"status": "not_found"}
+    if not local_node.is_running():
+        return {"status": "already_off", "info": local_node.get_info()}
+    try:
+        local_node.turn_off()
+        return {"status": "turned_off", "info": local_node.get_info()}
+    except Exception as e:
+        logger.error(f"Node turn-off failed: {e}", exc_info=True)
+        return {"status": "error", "error": str(e)}
+
+
+@app.delete("/node")
+async def delete_node(node_id: Optional[str] = None) -> dict:
+    try:
+        local_node = _find_local_node(node_id)
+    except ValueError as e:
+        return {"status": "error", "error": str(e)}
+    if local_node is None:
+        return {"status": "not_found"}
+    try:
+        local_node.stop()
+        _unregister_local_node(local_node)
+        return {"status": "deleted"}
+    except Exception as e:
+        logger.error(f"Node delete failed: {e}", exc_info=True)
         return {"status": "error", "error": str(e)}
 
 
 @app.post("/node/stop")
-async def stop_node() -> dict:
-    global node
-    if node is None or not node.is_running():
-        return {"status": "not_running"}
-    try:
-        node.stop()
-        node = None
+async def stop_node(node_id: Optional[str] = None) -> dict:
+    result = await delete_node(node_id)
+    if result["status"] == "deleted":
         return {"status": "stopped"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+    if result["status"] == "not_found":
+        return {"status": "not_running"}
+    return result
+
 
 
 # ---------------------------------------------------------------------------

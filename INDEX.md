@@ -59,7 +59,7 @@
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | `tasks/active.md`                                            | Active sprint routing table.                                                         |
 | `tasks/lessons.md`                                           | Assistant lessons: active and internalized.                                          |
-| `tasks/sprints/sprint-08-client-refinements-and-generation-diagnostics.md` | Active sprint plan for client workflow refinements, monitoring redesign, and token-level output diagnostics. |
+| `tasks/sprints/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Active sprint plan for safe node lifecycle, multi-node local serving, HuggingFace token validation, and trace analysis. |
 | `tasks/sprints/sprint-10-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
 | `tasks/archive/sprint-01-stabilize-prototype.md`              | Completed sprint for stabilizing distributed inference.                              |
 | `tasks/archive/sprint-02-architecture-adapter-and-parity.md` | Completed sprint for architecture-aware distributed inference and parity validation. |
@@ -68,6 +68,7 @@
 | `tasks/archive/sprint-05-client-workflow-controls.md`          | Completed sprint for client workflow controls, inference cancellation, hidden bootstrap, and monitoring. |
 | `tasks/archive/sprint-06-routing-model-access-and-incentives.md` | Completed sprint for multi-node serving strategy, runnable-model semantics, and model-aware incentive accounting. |
 | `tasks/archive/sprint-07-output-parity-and-quality.md`        | Completed sprint for HuggingFace-direct versus distributed-output parity and quality checks. |
+| `tasks/archive/sprint-08-client-refinements-and-generation-diagnostics.md` | Completed sprint for client workflow refinements, monitoring redesign, token-level output diagnostics, generator stop control, and same-model non-overlapping local served nodes. |
 | `tasks/archive/`                                             | Closed sprint audit trail.                                                           |
 
 ---

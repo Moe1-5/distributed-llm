@@ -72,12 +72,33 @@ function StatTile({
 interface NodeCardProps {
   node: NodeInfo
   isLocal: boolean
-  stopping: boolean
-  onStop: () => void
+  lifecycleAction: 'turning-on' | 'turning-off' | 'deleting' | null
+  onTurnOn: () => void
+  onTurnOff: () => void
+  onDelete: () => void
 }
 
-function NodeCard({ node, isLocal, stopping, onStop }: NodeCardProps): React.JSX.Element {
-  const isOnline = node.running && node.rpc_running
+function NodeCard({
+  node,
+  isLocal,
+  lifecycleAction,
+  onTurnOn,
+  onTurnOff,
+  onDelete
+}: NodeCardProps): React.JSX.Element {
+  const isOnline = Boolean(node.running ?? (node.layers_loaded && node.rpc_running))
+  const isBusy = lifecycleAction !== null
+  const canTurnOn = !isOnline && node.layers_loaded
+  const toggleLabel = isOnline
+    ? lifecycleAction === 'turning-off'
+      ? 'TURNING OFF...'
+      : 'TURN OFF'
+    : lifecycleAction === 'turning-on'
+      ? 'TURNING ON...'
+      : 'TURN ON'
+  const toggleTitle = isOnline
+    ? 'Stop RPC serving but keep loaded layers in memory'
+    : 'Resume RPC serving with the already-loaded layers'
 
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-bg-elevated p-5">
@@ -139,20 +160,40 @@ function NodeCard({ node, isLocal, stopping, onStop }: NodeCardProps): React.JSX
       </div>
 
       {isLocal && (
-        <button
-          onClick={onStop}
-          disabled={stopping}
-          className={`
-            mt-1 h-9 rounded-lg border font-mono text-[10px] font-semibold transition-all
-            ${
-              stopping
-                ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim'
-                : 'border-red/30 bg-red/10 text-red hover:bg-red/20'
-            }
-          `}
-        >
-          {stopping ? 'STOPPING...' : 'STOP LOCAL NODE'}
-        </button>
+        <div className="mt-1 grid grid-cols-2 gap-2">
+          <button
+            onClick={isOnline ? onTurnOff : onTurnOn}
+            disabled={isBusy || (!isOnline && !canTurnOn)}
+            className={`
+              h-9 rounded-lg border font-mono text-[10px] font-semibold transition-all
+              ${
+                isBusy || (!isOnline && !canTurnOn)
+                  ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim'
+                  : isOnline
+                    ? 'border-amber/30 bg-amber/10 text-amber hover:bg-amber/20'
+                    : 'border-green/20 bg-green/5 text-green hover:bg-green/10'
+              }
+            `}
+            title={toggleTitle}
+          >
+            {toggleLabel}
+          </button>
+          <button
+            onClick={onDelete}
+            disabled={isBusy}
+            className={`
+              h-9 rounded-lg border font-mono text-[10px] font-semibold transition-all
+              ${
+                isBusy
+                  ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim'
+                  : 'border-red/30 bg-red/10 text-red hover:bg-red/20'
+              }
+            `}
+            title="Unload layers and remove this local node"
+          >
+            {lifecycleAction === 'deleting' ? 'DELETING...' : 'DELETE NODE'}
+          </button>
+        </div>
       )}
     </div>
   )
@@ -170,7 +211,10 @@ export default function Dashboard(): React.JSX.Element {
     nodes: [],
     lastError: null
   })
-  const [stoppingNode, setStoppingNode] = useState(false)
+  const [nodeAction, setNodeAction] = useState<{
+    nodeId: string
+    action: 'turning-on' | 'turning-off' | 'deleting'
+  } | null>(null)
 
   // Use refs for interval IDs so cleanup is always correct
   const statsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -217,28 +261,69 @@ export default function Dashboard(): React.JSX.Element {
     }
   }, [])
 
-  const stopLocalNode = useCallback(async () => {
-    if (stoppingNode) return
+  const refreshLocalNodeState = useCallback(async () => {
+    const [statusRes, nodesRes] = await Promise.all([api.getStatus(), api.getNodes()])
+    setState((prev) => ({
+      ...prev,
+      status: statusRes,
+      nodes: nodesRes.nodes ?? [],
+      lastError: null
+    }))
+  }, [])
 
-    setStoppingNode(true)
+  const turnOnLocalNode = useCallback(async (nodeId: string) => {
+    if (nodeAction) return
+
+    setNodeAction({ nodeId, action: 'turning-on' })
     try {
-      await api.stopNode()
-      const [statusRes, nodesRes] = await Promise.all([api.getStatus(), api.getNodes()])
-      setState((prev) => ({
-        ...prev,
-        status: statusRes,
-        nodes: nodesRes.nodes ?? [],
-        lastError: null
-      }))
+      const res = await api.turnOnNode(nodeId)
+      if (res.status === 'error') throw new Error(res.error ?? 'Failed to turn on local node')
+      await refreshLocalNodeState()
     } catch (err) {
       setState((prev) => ({
         ...prev,
-        lastError: err instanceof Error ? err.message : 'Failed to stop local node'
+        lastError: err instanceof Error ? err.message : 'Failed to turn on local node'
       }))
     } finally {
-      setStoppingNode(false)
+      setNodeAction(null)
     }
-  }, [stoppingNode])
+  }, [nodeAction, refreshLocalNodeState])
+
+  const turnOffLocalNode = useCallback(async (nodeId: string) => {
+    if (nodeAction) return
+
+    setNodeAction({ nodeId, action: 'turning-off' })
+    try {
+      const res = await api.turnOffNode(nodeId)
+      if (res.status === 'error') throw new Error(res.error ?? 'Failed to turn off local node')
+      await refreshLocalNodeState()
+    } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        lastError: err instanceof Error ? err.message : 'Failed to turn off local node'
+      }))
+    } finally {
+      setNodeAction(null)
+    }
+  }, [nodeAction, refreshLocalNodeState])
+
+  const deleteLocalNode = useCallback(async (nodeId: string) => {
+    if (nodeAction) return
+
+    setNodeAction({ nodeId, action: 'deleting' })
+    try {
+      const res = await api.deleteNode(nodeId)
+      if (res.status === 'error') throw new Error(res.error ?? 'Failed to delete local node')
+      await refreshLocalNodeState()
+    } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        lastError: err instanceof Error ? err.message : 'Failed to delete local node'
+      }))
+    } finally {
+      setNodeAction(null)
+    }
+  }, [nodeAction, refreshLocalNodeState])
 
   // ---------------------------------------------------------------------------
   // Mount — kick off initial fetches then set up polling
@@ -270,7 +355,7 @@ export default function Dashboard(): React.JSX.Element {
   const isLoading = backend === 'connecting'
   const onlineCount = nodes.filter((n) => n.running && n.rpc_running).length
   const offlineCount = nodes.length - onlineCount
-  const localPeerId = status?.node_info?.peer_id
+  const localNodeIds = new Set(status?.local_node_ids ?? [])
 
   // ---------------------------------------------------------------------------
   // Render
@@ -381,15 +466,21 @@ export default function Dashboard(): React.JSX.Element {
 
           {nodes.length > 0 && (
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
-              {nodes.map((node) => (
-                <NodeCard
-                  key={`${node.peer_id}-${node.layer_start}-${node.layer_end}`}
-                  node={node}
-                  isLocal={Boolean(localPeerId && node.peer_id === localPeerId)}
-                  stopping={stoppingNode}
-                  onStop={() => void stopLocalNode()}
-                />
-              ))}
+              {nodes.map((node) => {
+                const lifecycleAction =
+                  nodeAction && nodeAction.nodeId === node.node_id ? nodeAction.action : null
+                return (
+                  <NodeCard
+                    key={`${node.node_id ?? node.peer_id}-${node.layer_start}-${node.layer_end}`}
+                    node={node}
+                    isLocal={Boolean(node.node_id && localNodeIds.has(node.node_id))}
+                    lifecycleAction={lifecycleAction}
+                    onTurnOn={() => node.node_id && void turnOnLocalNode(node.node_id)}
+                    onTurnOff={() => node.node_id && void turnOffLocalNode(node.node_id)}
+                    onDelete={() => node.node_id && void deleteLocalNode(node.node_id)}
+                  />
+                )
+              })}
             </div>
           )}
         </section>

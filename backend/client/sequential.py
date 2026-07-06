@@ -195,6 +195,10 @@ class RemoteSequential:
         if not rpc_uid:
             raise ValueError(f"Node {metadata_peer_id[:8]} has empty rpc_uid")
 
+        layers_loaded = bool(info.get("layers_loaded", True))
+        rpc_running = bool(info.get("rpc_running", True))
+        running = bool(info.get("running", layers_loaded and rpc_running))
+
         return {
             **info,
             "peer_id": metadata_peer_id,
@@ -202,7 +206,20 @@ class RemoteSequential:
             "layer_start": layer_start,
             "layer_end": layer_end,
             "rpc_uid": rpc_uid,
+            "device": str(info.get("device", "unknown")),
+            "maddrs": info.get("maddrs", []),
+            "layers_loaded": layers_loaded,
+            "rpc_running": rpc_running,
+            "running": running,
         }
+
+    def _is_serving_node(self, node: dict) -> bool:
+        return (
+            bool(node.get("running", False))
+            and bool(node.get("layers_loaded", False))
+            and bool(node.get("rpc_running", False))
+            and bool(str(node.get("rpc_uid", "")).strip())
+        )
 
     def _plan_route(self, nodes: list[dict]) -> list[dict]:
         """Order nodes by layer start and enforce a contiguous, non-overlapping route."""
@@ -256,13 +273,19 @@ class RemoteSequential:
             for node in discovered_nodes
         ]
 
-        coverage = self._check_coverage(validated_nodes)
+        serving_nodes = [node for node in validated_nodes if self._is_serving_node(node)]
+        if not serving_nodes:
+            raise RuntimeError(
+                "No serving nodes found on the DHT. Make sure at least one node is online."
+            )
+
+        coverage = self._check_coverage(serving_nodes)
         if not coverage["complete"]:
             raise RuntimeError(
                 f"Incomplete layer coverage — missing: {coverage['missing']}"
             )
 
-        ordered_nodes = self._plan_route(validated_nodes)
+        ordered_nodes = self._plan_route(serving_nodes)
         route_str = " -> ".join(
             f"layers {n['layer_start']}–{n['layer_end']} @ {_peer_short(n['peer_id'])}"
             for n in ordered_nodes
@@ -529,7 +552,8 @@ class RemoteSequential:
 
     def get_network_status(self) -> dict:
         nodes    = self._discover_nodes()
-        coverage = self._check_coverage(nodes)
+        serving_nodes = [node for node in nodes if self._is_serving_node(node)]
+        coverage = self._check_coverage(serving_nodes)
         return {
             "nodes":            nodes,
             "total_layers":     self.num_layers,

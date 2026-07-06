@@ -95,6 +95,68 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         self.assertEqual([node["peer_id"] for node in nodes], ["good-peer"])
 
+    def test_discovered_node_running_defaults_to_loaded_rpc_state(self) -> None:
+        dht = MappingDHT(
+            {
+                "test-prefix.members": ["peer"],
+                "test-prefix.node_info.peer": {
+                    **self.make_node(0, 8, "peer"),
+                    "layers_loaded": True,
+                    "rpc_running": True,
+                },
+            }
+        )
+        sequential = RemoteSequential(
+            dht,
+            "test-prefix",
+            num_layers=8,
+            model_name="facebook/opt-125m",
+        )
+
+        nodes = sequential._discover_nodes()
+
+        self.assertEqual(len(nodes), 1)
+        self.assertTrue(nodes[0]["running"])
+        self.assertEqual(nodes[0]["maddrs"], [])
+
+    def test_validate_route_ignores_offline_loaded_nodes(self) -> None:
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
+        offline_node = {
+            **self.make_node(0, 8, "offline-peer"),
+            "layers_loaded": True,
+            "rpc_running": False,
+            "running": False,
+        }
+        sequential._discover_nodes = lambda: [offline_node]
+
+        with self.assertRaisesRegex(RuntimeError, "No serving nodes"):
+            sequential.validate_route()
+
+    def test_network_status_keeps_offline_node_but_excludes_it_from_coverage(self) -> None:
+        dht = MappingDHT(
+            {
+                "test-prefix.members": ["offline-peer"],
+                "test-prefix.node_info.offline-peer": {
+                    **self.make_node(0, 8, "offline-peer"),
+                    "layers_loaded": True,
+                    "rpc_running": False,
+                    "running": False,
+                },
+            }
+        )
+        sequential = RemoteSequential(
+            dht,
+            "test-prefix",
+            num_layers=8,
+            model_name="facebook/opt-125m",
+        )
+
+        status = sequential.get_network_status()
+
+        self.assertEqual(len(status["nodes"]), 1)
+        self.assertEqual(status["covered_layers"], 0)
+        self.assertEqual(status["missing_layers"], list(range(8)))
+
     def test_wrong_model_node_metadata_is_rejected(self) -> None:
         sequential = RemoteSequential(
             DummyDHT(),
@@ -223,6 +285,105 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertIsNone(node.handler)
         self.assertIsNone(node.dht)
         self.assertFalse(node.is_running())
+
+    def test_node_turn_off_stops_rpc_but_keeps_loaded_layers(self) -> None:
+        class FakeRPC:
+            def __init__(self) -> None:
+                self.timeout = None
+                self.running = True
+
+            def stop(self, timeout: float = 5.0) -> None:
+                self.timeout = timeout
+                self.running = False
+
+            def is_running(self) -> bool:
+                return self.running
+
+            def get_uid(self) -> str:
+                return "test-prefix.0.1"
+
+        class FakeHandler:
+            def __init__(self) -> None:
+                self.unloaded = False
+
+            def unload(self) -> None:
+                self.unloaded = True
+
+            def is_loaded(self) -> bool:
+                return not self.unloaded
+
+            def get_accounting_snapshot(self) -> dict:
+                return {}
+
+        class FakeDHT:
+            peer_id = "peer"
+
+            def __init__(self) -> None:
+                self.values: dict[str, object] = {}
+
+            def store(self, key: str, value: object, expiration_time: float) -> None:
+                self.values[key] = value
+
+            def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
+                value = self.values.get(key)
+                return DummyDHTResult(value) if value is not None else None
+
+            def get_visible_maddrs(self) -> list[str]:
+                return ["/ip4/127.0.0.1/tcp/1234"]
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        fake_rpc = FakeRPC()
+        fake_handler = FakeHandler()
+        fake_dht = FakeDHT()
+        node.rpc = fake_rpc
+        node.handler = fake_handler
+        node.dht = fake_dht
+        node._running = True
+        node._ensure_announce_thread = lambda: None
+
+        node.turn_off(timeout=0.01)
+
+        self.assertEqual(fake_rpc.timeout, 0.01)
+        self.assertFalse(fake_rpc.is_running())
+        self.assertFalse(fake_handler.unloaded)
+        self.assertIs(node.handler, fake_handler)
+        self.assertIsNone(node.rpc)
+        self.assertIsNone(node.dht)
+        self.assertFalse(node.is_running())
+        info = fake_dht.values["test-prefix.node_info.peer"]
+        self.assertTrue(info["layers_loaded"])
+        self.assertFalse(info["rpc_running"])
+        self.assertFalse(info["running"])
+        status = node.get_info()
+        self.assertEqual(status["peer_id"], "peer")
+        self.assertEqual(status["maddrs"], ["/ip4/127.0.0.1/tcp/1234"])
+        self.assertTrue(status["layers_loaded"])
+        self.assertFalse(status["rpc_running"])
+
+    def test_get_visible_maddrs_falls_back_when_dht_handle_is_closed(self) -> None:
+        class ClosedDHT:
+            peer_id = "peer"
+
+            def get_visible_maddrs(self) -> list[str]:
+                raise OSError("handle is closed")
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        node.dht = ClosedDHT()
+        node._last_maddrs = ["/ip4/127.0.0.1/tcp/1234"]
+
+        self.assertEqual(node.get_visible_maddrs(), ["/ip4/127.0.0.1/tcp/1234"])
 
     def test_nodes_endpoint_uses_active_node_prefix(self) -> None:
         from api import server as api_server
@@ -1003,6 +1164,279 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "stop_requested")
         self.assertTrue(dummy.stop_requested)
+
+    def test_turn_off_node_preserves_global_node(self) -> None:
+        from api import server as api_server
+
+        class DummyNode:
+            def __init__(self) -> None:
+                self.turned_off = False
+
+            def is_running(self) -> bool:
+                return not self.turned_off
+
+            def turn_off(self) -> None:
+                self.turned_off = True
+
+            def get_info(self) -> dict:
+                return {"running": self.is_running(), "layers_loaded": True}
+
+        dummy = DummyNode()
+        original_node = api_server.node
+        api_server.node = dummy
+        try:
+            result = asyncio.run(api_server.turn_off_node())
+        finally:
+            api_server.node = original_node
+
+        self.assertEqual(result["status"], "turned_off")
+        self.assertTrue(dummy.turned_off)
+        self.assertIs(result["info"]["layers_loaded"], True)
+
+    def test_start_node_allows_second_non_overlapping_local_slice(self) -> None:
+        from api import server as api_server
+
+        created: list[object] = []
+
+        class DummyNode:
+            def __init__(
+                self,
+                model_name: str,
+                layer_start: int,
+                layer_end: int,
+                dht_prefix: str,
+                initial_peers: list[str],
+                device: str,
+                hf_token: str | None,
+            ) -> None:
+                self.node_id = f"node-{len(created) + 1}"
+                self.model_name = model_name
+                self.layer_start = layer_start
+                self.layer_end = layer_end
+                self.dht_prefix = dht_prefix
+                self.initial_peers = initial_peers
+                self.device = device
+                self.hf_token = hf_token
+                self.dht = object()
+                self.running = False
+                created.append(self)
+
+            def start(self) -> None:
+                self.running = True
+
+            def is_running(self) -> bool:
+                return self.running
+
+            def get_info(self) -> dict:
+                return {
+                    "node_id": self.node_id,
+                    "peer_id": self.node_id,
+                    "model_name": self.model_name,
+                    "layer_start": self.layer_start,
+                    "layer_end": self.layer_end,
+                    "device": self.device,
+                    "running": self.running,
+                    "maddrs": [],
+                    "layers_loaded": True,
+                    "rpc_running": self.running,
+                }
+
+        original_node = api_server.node
+        original_local_nodes = dict(api_server.local_nodes)
+        original_node_class = api_server.Node
+        api_server.node = None
+        api_server.local_nodes.clear()
+        api_server.Node = DummyNode
+        try:
+            first = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="facebook/opt-125m",
+                        layer_start=0,
+                        layer_end=6,
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                        device="cpu",
+                    )
+                )
+            )
+            second = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="facebook/opt-125m",
+                        layer_start=6,
+                        layer_end=12,
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                        device="cpu",
+                    )
+                )
+            )
+        finally:
+            api_server.Node = original_node_class
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+            api_server.node = original_node
+
+        self.assertEqual(first["status"], "started")
+        self.assertEqual(second["status"], "started")
+        self.assertEqual(first["info"]["node_id"], "node-1")
+        self.assertEqual(second["info"]["node_id"], "node-2")
+
+    def test_start_node_rejects_overlapping_or_different_model_local_slice(self) -> None:
+        from api import server as api_server
+
+        class DummyNode:
+            node_id = "node-1"
+            model_name = "facebook/opt-125m"
+            layer_start = 0
+            layer_end = 6
+            dht_prefix = "test-prefix"
+            device = "cpu"
+
+            def is_running(self) -> bool:
+                return True
+
+            def get_info(self) -> dict:
+                return {"node_id": self.node_id}
+
+        original_node = api_server.node
+        original_local_nodes = dict(api_server.local_nodes)
+        dummy = DummyNode()
+        api_server.node = dummy
+        api_server.local_nodes.clear()
+        api_server.local_nodes[dummy.node_id] = dummy
+        try:
+            overlap = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="facebook/opt-125m",
+                        layer_start=4,
+                        layer_end=8,
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                        device="cpu",
+                    )
+                )
+            )
+            different_model = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="facebook/opt-1.3b",
+                        layer_start=6,
+                        layer_end=12,
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                        device="cpu",
+                    )
+                )
+            )
+        finally:
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+            api_server.node = original_node
+
+        self.assertEqual(overlap["status"], "error")
+        self.assertEqual(overlap["error"], "overlapping_layer_range")
+        self.assertEqual(different_model["status"], "error")
+        self.assertEqual(different_model["error"], "multi_model_local_nodes_not_supported")
+
+    def test_turn_off_node_targets_one_local_node_by_id(self) -> None:
+        from api import server as api_server
+
+        class DummyNode:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.model_name = "facebook/opt-125m"
+                self.layer_start = 0
+                self.layer_end = 1
+                self.dht_prefix = "test-prefix"
+                self.device = "cpu"
+                self.turned_off = False
+
+            def is_running(self) -> bool:
+                return not self.turned_off
+
+            def turn_off(self) -> None:
+                self.turned_off = True
+
+            def get_info(self) -> dict:
+                return {"node_id": self.node_id, "running": self.is_running()}
+
+        first = DummyNode("node-1")
+        second = DummyNode("node-2")
+        original_node = api_server.node
+        original_local_nodes = dict(api_server.local_nodes)
+        api_server.local_nodes.clear()
+        api_server.local_nodes[first.node_id] = first
+        api_server.local_nodes[second.node_id] = second
+        api_server.node = first
+        try:
+            result = asyncio.run(api_server.turn_off_node(node_id="node-1"))
+        finally:
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+            api_server.node = original_node
+
+        self.assertEqual(result["status"], "turned_off")
+        self.assertTrue(first.turned_off)
+        self.assertFalse(second.turned_off)
+
+    def test_nodes_endpoint_returns_local_loaded_node_without_active_dht(self) -> None:
+        from api import server as api_server
+
+        class DummyNode:
+            dht = None
+
+            def get_info(self) -> dict:
+                return {
+                    "peer_id": "peer",
+                    "model_name": "facebook/opt-125m",
+                    "layer_start": 0,
+                    "layer_end": 1,
+                    "device": "cpu",
+                    "running": False,
+                    "maddrs": [],
+                    "layers_loaded": True,
+                    "rpc_running": False,
+                }
+
+        original_node = api_server.node
+        original_client_dht = api_server.client_dht
+        api_server.node = DummyNode()
+        api_server.client_dht = None
+        try:
+            result = asyncio.run(api_server.get_nodes())
+        finally:
+            api_server.node = original_node
+            api_server.client_dht = original_client_dht
+
+        self.assertEqual(len(result["nodes"]), 1)
+        self.assertEqual(result["nodes"][0]["peer_id"], "peer")
+        self.assertFalse(result["nodes"][0]["running"])
+        self.assertTrue(result["nodes"][0]["layers_loaded"])
+
+    def test_delete_node_unloads_and_clears_global_node(self) -> None:
+        from api import server as api_server
+
+        class DummyNode:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        dummy = DummyNode()
+        original_node = api_server.node
+        api_server.node = dummy
+        try:
+            result = asyncio.run(api_server.delete_node())
+            self.assertIsNone(api_server.node)
+        finally:
+            api_server.node = original_node
+
+        self.assertEqual(result["status"], "deleted")
+        self.assertTrue(dummy.stopped)
 
     def test_incentive_accounting_endpoint_is_simulated_only(self) -> None:
         from api import server as api_server

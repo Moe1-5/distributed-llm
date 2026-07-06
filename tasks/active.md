@@ -5,7 +5,7 @@
 
 | Sprint | File | Goal |
 | --- | --- | --- |
-| Sprint 08 | `tasks/sprints/sprint-08-client-refinements-and-generation-diagnostics.md` | Refine client workflow, monitoring, and token-level output diagnostics. |
+| Sprint 09 | `tasks/sprints/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Add safe node lifecycle controls, multi-node local serving, HuggingFace token validation, and trace analysis. |
 | Sprint 10 | `tasks/sprints/sprint-10-real-incentives-and-settlement.md` | Add real incentive rewards and settlement only after correctness, proof, health, and anti-abuse prerequisites are ready. |
 
 ## Completed Sprints
@@ -21,6 +21,7 @@ Completed sprint documents live in `tasks/archive/`.
 | Sprint 05 | `tasks/archive/sprint-05-client-workflow-controls.md` | Completed and archived. |
 | Sprint 06 | `tasks/archive/sprint-06-routing-model-access-and-incentives.md` | Completed and archived. |
 | Sprint 07 | `tasks/archive/sprint-07-output-parity-and-quality.md` | Completed and archived. |
+| Sprint 08 | `tasks/archive/sprint-08-client-refinements-and-generation-diagnostics.md` | Completed and archived. |
 
 ---
 

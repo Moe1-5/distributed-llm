@@ -12,6 +12,7 @@ const WS_URL = import.meta.env.VITE_WS_BASE_URL ?? BASE_URL.replace(/^http/, 'ws
 
 export interface NodeInfo {
   peer_id: string
+  node_id?: string
   model_name: string
   layer_start: number
   layer_end: number
@@ -58,6 +59,8 @@ export interface NetworkStatus {
   status: string
   node_running: boolean
   node_info: NodeInfo | null
+  node_infos?: NodeInfo[]
+  local_node_ids?: string[]
   gpu_available: boolean
   generator_ready: boolean
   token_set: boolean
@@ -100,6 +103,53 @@ export interface GenerationOptions {
   doSample?: boolean
 }
 
+export interface GenerationTraceResult {
+  prompt: string
+  model_name: string
+  generation_config: {
+    max_new_tokens: number
+    temperature: number
+    top_p: number
+    top_k: number
+    repetition_penalty: number
+    do_sample: boolean
+  }
+  response: string
+  response_contains_replacement_char: boolean
+  steps: Array<{
+    step: number
+    token_id: number
+    token_text: string
+    token_text_contains_replacement_char: boolean
+    decoded_output_so_far: string
+    decoded_output_contains_replacement_char: boolean
+    selected_in_top_candidates: boolean
+    top_candidates: Array<{
+      token_id: number
+      token_text: string
+      token_text_contains_replacement_char: boolean
+      logit: number
+    }>
+  }>
+  node_trace: string[]
+  trace_id: string
+  trace_file: string
+  trace_created_at: string
+}
+
+function generationOptionsPayload(options: GenerationOptions): Record<string, unknown> {
+  return {
+    ...(options.maxNewTokens !== undefined && { max_new_tokens: options.maxNewTokens }),
+    ...(options.temperature !== undefined && { temperature: options.temperature }),
+    ...(options.topP !== undefined && { top_p: options.topP }),
+    ...(options.topK !== undefined && { top_k: options.topK }),
+    ...(options.repetitionPenalty !== undefined && {
+      repetition_penalty: options.repetitionPenalty
+    }),
+    ...(options.doSample !== undefined && { do_sample: options.doSample })
+  }
+}
+
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
@@ -116,7 +166,17 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined
   })
-  if (!res.ok) throw new Error(`POST ${path} failed: ${res.status}`)
+  if (!res.ok) {
+    let detail = ''
+    try {
+      const payload = (await res.json()) as { detail?: unknown; error?: unknown; message?: unknown }
+      const rawDetail = payload.detail ?? payload.error ?? payload.message
+      detail = typeof rawDetail === 'string' ? `: ${rawDetail}` : ''
+    } catch {
+      detail = ''
+    }
+    throw new Error(`POST ${path} failed: ${res.status}${detail}`)
+  }
   return res.json() as Promise<T>
 }
 
@@ -150,6 +210,18 @@ export const api = {
       '/node/start',
       params
     ),
+  turnOnNode: (nodeId?: string) =>
+    post<{ status: string; info?: NodeInfo; error?: string }>(
+      `/node/turn-on${nodeId ? `?node_id=${encodeURIComponent(nodeId)}` : ''}`
+    ),
+  turnOffNode: (nodeId?: string) =>
+    post<{ status: string; info?: NodeInfo; error?: string }>(
+      `/node/turn-off${nodeId ? `?node_id=${encodeURIComponent(nodeId)}` : ''}`
+    ),
+  deleteNode: (nodeId?: string) =>
+    del<{ status: string; error?: string }>(
+      `/node${nodeId ? `?node_id=${encodeURIComponent(nodeId)}` : ''}`
+    ),
   stopNode: () => post<{ status: string }>('/node/stop'),
 
   // Generator
@@ -171,16 +243,14 @@ export const api = {
         : { maxNewTokens: maxNewTokensOrOptions, temperature, topP }
     return post<{ response: string; node_trace: string[]; error?: string }>('/chat', {
       message,
-      ...(options.maxNewTokens !== undefined && { max_new_tokens: options.maxNewTokens }),
-      ...(options.temperature !== undefined && { temperature: options.temperature }),
-      ...(options.topP !== undefined && { top_p: options.topP }),
-      ...(options.topK !== undefined && { top_k: options.topK }),
-      ...(options.repetitionPenalty !== undefined && {
-        repetition_penalty: options.repetitionPenalty
-      }),
-      ...(options.doSample !== undefined && { do_sample: options.doSample })
+      ...generationOptionsPayload(options)
     })
   },
+  traceGeneration: (prompt: string, options: GenerationOptions = {}) =>
+    post<GenerationTraceResult>('/generator/trace', {
+      prompt,
+      ...generationOptionsPayload(options)
+    }),
 
   // Settings
   getSettings: () => get<AppSettings>('/settings'),
@@ -260,14 +330,7 @@ export function createStreamSocket(
           : { maxNewTokens: maxNewTokensOrOptions, temperature, topP }
       const payload = JSON.stringify({
         message,
-        ...(options.maxNewTokens !== undefined && { max_new_tokens: options.maxNewTokens }),
-        ...(options.temperature !== undefined && { temperature: options.temperature }),
-        ...(options.topP !== undefined && { top_p: options.topP }),
-        ...(options.topK !== undefined && { top_k: options.topK }),
-        ...(options.repetitionPenalty !== undefined && {
-          repetition_penalty: options.repetitionPenalty
-        }),
-        ...(options.doSample !== undefined && { do_sample: options.doSample })
+        ...generationOptionsPayload(options)
       })
 
       if (ws.readyState === WebSocket.OPEN) {

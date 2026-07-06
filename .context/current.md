@@ -11,8 +11,8 @@
 
 ## Active Sprint
 
-**Sprint:** Sprint 08 is the lowest active sprint; Sprint 04 through Sprint 07 are closed, and Sprint 10 is planned.
-**Goal:** Refine client workflow and generation diagnostics before moving toward real incentive prerequisites.
+**Sprint:** Sprint 09 is the lowest active sprint; Sprint 10 is planned for incentives.
+**Goal:** Add safe node lifecycle controls, multi-node local serving, HuggingFace token validation, and trace analysis.
 
 ## Tech Stack
 
@@ -37,4 +37,5 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 05 closed: bootstrap is hidden from normal tabs, Nodes has local stop control, Inference gates send by backend/WebSocket/generator/route readiness, and Monitoring shows real status/coverage.
 - Sprint 06 closed: one backend process per serving participant, runnable-model status in `/models`, simulated contribution accounting only, and real incentives deferred to Sprint 10.
 - Sprint 07 closed: single-node OPT-125M parity passed, a live full-layer OPT-1.3B smoke trace/parity probe passed for first-token correctness, exact generation controls are exposed, and generated-output parity can compare direct HuggingFace text with distributed text. Broader live OPT-1.3B and true multi-node parity are downstream live-route validation items.
-- Sprint 08 is current: it hides bootstrap internals, uses one Inference open/send/stop action, shows a P2P Monitoring map, and writes `/generator/trace` JSON diagnostics for token-level inspection.
+- Sprint 08 closed: it hides bootstrap internals, uses one Inference open/send/stop action, shows a P2P Monitoring map, writes `/generator/trace` JSON diagnostics, exposes trace UI, adds generator stop control, separates node turn-off/delete actions, and supports same-model non-overlapping local served nodes.
+- Sprint 09 is current: non-destructive node pause/resume/delete semantics, duplicate and multi-model local serving scope, HuggingFace token validation, structured trace-artifact analysis, and backend shutdown hardening.

@@ -19,6 +19,11 @@
 
 > Lessons that still need active enforcement.
 
+### [2026-07-06] Separate stop, offline, and unload semantics
+**Problem:** I treated stopping a local node as equivalent to deleting the node and unloading its layers, but the user expects stop to make a node offline while preserving loaded layers, with a separate delete/unload action for destructive cleanup.
+**Rule:** Model serving lifecycle controls must distinguish pause/offline, resume/online, and delete/unload. UI labels must not hide destructive behavior behind a generic stop button.
+**Why:** DistribLLM needs node operators to manage availability without paying reload costs or accidentally losing loaded model state.
+
 ### [2026-07-06] Split oversized sprint scopes before coding
 **Problem:** User-review findings were documented inside Sprint 04 even though several items are product workflow, monitoring, and incentive-design work beyond local validation.
 **Rule:** Keep the current sprint focused on its acceptance criteria; when new work would overload it, create later sprint plans before implementation and continue from the lowest active sprint.

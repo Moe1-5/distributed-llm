@@ -13,6 +13,7 @@ Startup sequence:
 import time
 import threading
 from typing import Optional
+from uuid import uuid4
 
 import hivemind
 import torch
@@ -37,6 +38,7 @@ class Node:
         device:        str = "cuda",
         dtype:         torch.dtype = torch.float16,
         hf_token:      Optional[str] = None,
+        node_id:       Optional[str] = None,
     ):
         if not model_name.strip():
             raise ValueError("model_name must not be empty")
@@ -62,13 +64,17 @@ class Node:
         self.device        = device
         self.dtype         = dtype
         self.hf_token      = hf_token
+        self.node_id       = node_id or uuid4().hex[:12]
 
         self.dht:     Optional[hivemind.DHT]     = None
         self.handler: Optional[InferenceHandler] = None
         self.rpc:     Optional[RPCServer]        = None
 
         self._running         = False
+        self._announce_enabled = False
         self._announce_thread: Optional[threading.Thread] = None
+        self._last_peer_id: Optional[str] = None
+        self._last_maddrs: list[str] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -81,38 +87,46 @@ class Node:
         )
 
         # Step 1: DHT
-        logger.info("Step 1/4: Starting DHT...")
-        self.dht = hivemind.DHT(
-            host_maddrs=["/ip4/0.0.0.0/tcp/0"],
-            initial_peers=self.initial_peers,
-            start=True,
-            use_ipfs=False,
-        )
+        if self.dht is None:
+            logger.info("Step 1/4: Starting DHT...")
+            self.dht = hivemind.DHT(
+                host_maddrs=["/ip4/0.0.0.0/tcp/0"],
+                initial_peers=self.initial_peers,
+                start=True,
+                use_ipfs=False,
+            )
+        else:
+            logger.info("Step 1/4: Reusing existing DHT...")
         if self.dht.peer_id is None:
             raise RuntimeError("DHT started but peer_id is None")
+        self._last_peer_id = str(self.dht.peer_id)
         logger.info(f"DHT started. Peer ID: {self.dht.peer_id}")
 
         # Step 2: Load layers
-        logger.info("Step 2/4: Loading transformer layers...")
-        self.handler = InferenceHandler(
-            model_name=self.model_name,
-            layer_start=self.layer_start,
-            layer_end=self.layer_end,
-            device=self.device,
-            dtype=self.dtype,
-            hf_token=self.hf_token,
-        )
-        self.handler.load()
+        if self.handler is None or not self.handler.is_loaded():
+            logger.info("Step 2/4: Loading transformer layers...")
+            self.handler = InferenceHandler(
+                model_name=self.model_name,
+                layer_start=self.layer_start,
+                layer_end=self.layer_end,
+                device=self.device,
+                dtype=self.dtype,
+                hf_token=self.hf_token,
+            )
+            self.handler.load()
+        else:
+            logger.info("Step 2/4: Reusing loaded transformer layers...")
         if not self.handler.is_loaded():
             raise RuntimeError("handler.load() completed but is_loaded() is False")
 
         # Step 3: RPC server
         logger.info("Step 3/4: Starting RPC server...")
-        self.rpc = RPCServer(
-            handler=self.handler,
-            dht=self.dht,
-            dht_prefix=self.dht_prefix,
-        )
+        if self.rpc is None:
+            self.rpc = RPCServer(
+                handler=self.handler,
+                dht=self.dht,
+                dht_prefix=self.dht_prefix,
+            )
         self.rpc.start()
         if not self.rpc.is_running():
             raise RuntimeError("rpc.start() completed but is_running() is False")
@@ -120,20 +134,35 @@ class Node:
         # Step 4: Announce
         logger.info("Step 4/4: Announcing to DHT...")
         self._running = True
+        self._announce_enabled = True
         self._announce()
-
-        self._announce_thread = threading.Thread(
-            target=self._announce_loop,
-            daemon=True,
-            name="node-announce",
-        )
-        self._announce_thread.start()
+        self._ensure_announce_thread()
 
         logger.info(f"Node fully started. Addresses: {self.get_visible_maddrs()}")
+
+    def turn_off(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS) -> None:
+        logger.info("Node turning off serving while keeping loaded layers...")
+        self._running = False
+        self._announce_enabled = False
+        if self._announce_thread is not None:
+            self._announce_thread.join(timeout=0.2)
+            self._announce_thread = None
+        try:
+            self._announce(running=False, rpc_running=False)
+        except Exception as e:
+            logger.warning("Offline announce failed before RPC shutdown: %s", e)
+        if self.rpc is not None:
+            self.rpc.stop(timeout=timeout)
+            self.rpc = None
+        self.dht = None
+        logger.info(
+            "Node serving turned off; loaded layers are preserved and serving handles were released."
+        )
 
     def stop(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS) -> None:
         logger.info("Node stopping...")
         self._running = False
+        self._announce_enabled = False
         if self._announce_thread is not None:
             self._announce_thread.join(timeout=0.2)
             self._announce_thread = None
@@ -153,7 +182,11 @@ class Node:
     # DHT Announcement
     # ------------------------------------------------------------------
 
-    def _announce(self) -> None:
+    def _announce(
+        self,
+        running: Optional[bool] = None,
+        rpc_running: Optional[bool] = None,
+    ) -> None:
         """
         Write node metadata to DHT under two keys:
             1. {prefix}.node_info.{peer_id}  — full metadata
@@ -162,7 +195,9 @@ class Node:
         if self.dht is None:
             return
 
-        peer_id = str(self.dht.peer_id)
+        peer_id = self.get_peer_id()
+        if peer_id is None:
+            return
         expiry  = time.time() + DHT_EXPIRY_TIME   # fixed import
 
         # Write full metadata
@@ -170,12 +205,17 @@ class Node:
             key=f"{self.dht_prefix}.node_info.{peer_id}",
             value={
                 "peer_id":       peer_id,
+                "node_id":       self.node_id,
                 "model_name":    self.model_name,
                 "layer_start":   self.layer_start,
                 "layer_end":     self.layer_end,
                 "device":        self.device,
+                "running":       self.is_running() if running is None else running,
+                "maddrs":        self.get_visible_maddrs(),
                 "layers_loaded": self.handler.is_loaded() if self.handler else False,
-                "rpc_running":   self.rpc.is_running()    if self.rpc     else False,
+                "rpc_running":   (
+                    self.rpc.is_running() if self.rpc else False
+                ) if rpc_running is None else rpc_running,
                 "rpc_uid":       self.rpc.get_uid()       if self.rpc     else None,
                 "timestamp":     time.time(),
             },
@@ -195,10 +235,26 @@ class Node:
 
         logger.debug(f"Announced to DHT: layers {self.layer_start}-{self.layer_end}")
 
+    def _ensure_announce_thread(self) -> None:
+        if (
+            not self._announce_enabled
+            or (
+                self._announce_thread is not None
+                and self._announce_thread.is_alive()
+            )
+        ):
+            return
+        self._announce_thread = threading.Thread(
+            target=self._announce_loop,
+            daemon=True,
+            name="node-announce",
+        )
+        self._announce_thread.start()
+
     def _announce_loop(self) -> None:
-        while self._running:
+        while self._announce_enabled:
             time.sleep(ANNOUNCE_INTERVAL)
-            if self._running:
+            if self._announce_enabled:
                 try:
                     self._announce()
                 except Exception as e:
@@ -218,7 +274,8 @@ class Node:
 
     def get_info(self) -> dict:
         return {
-            "peer_id":       str(self.dht.peer_id) if self.dht else None,
+            "peer_id":       self.get_peer_id(),
+            "node_id":       self.node_id,
             "model_name":    self.model_name,
             "layer_start":   self.layer_start,
             "layer_end":     self.layer_end,
@@ -232,7 +289,7 @@ class Node:
 
     def get_accounting_snapshot(self) -> dict:
         base = {
-            "peer_id": str(self.dht.peer_id) if self.dht else None,
+            "peer_id": self.get_peer_id(),
             "model_name": self.model_name,
             "layer_start": self.layer_start,
             "layer_end": self.layer_end,
@@ -255,11 +312,23 @@ class Node:
 
     def get_visible_maddrs(self) -> list[str]:
         if self.dht is None:
-            return []
-        return [str(addr) for addr in self.dht.get_visible_maddrs()]
+            return self._last_maddrs
+        try:
+            self._last_maddrs = [str(addr) for addr in self.dht.get_visible_maddrs()]
+            return self._last_maddrs
+        except Exception as e:
+            logger.warning("Failed to read DHT visible addresses: %s", e)
+            return self._last_maddrs
 
     def get_peer_id(self) -> Optional[str]:
-        return str(self.dht.peer_id) if self.dht else None
+        if self.dht is None:
+            return self._last_peer_id
+        try:
+            self._last_peer_id = str(self.dht.peer_id) if self.dht.peer_id else None
+            return self._last_peer_id
+        except Exception as e:
+            logger.warning("Failed to read DHT peer id: %s", e)
+            return self._last_peer_id
 
     def __repr__(self) -> str:
         return (
