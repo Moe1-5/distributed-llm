@@ -227,6 +227,30 @@ class Node:
             "maddrs":        self.get_visible_maddrs(),
             "layers_loaded": self.handler.is_loaded() if self.handler else False,
             "rpc_running":   self.rpc.is_running()    if self.rpc     else False,
+            "accounting":    self.get_accounting_snapshot(),
+        }
+
+    def get_accounting_snapshot(self) -> dict:
+        base = {
+            "peer_id": str(self.dht.peer_id) if self.dht else None,
+            "model_name": self.model_name,
+            "layer_start": self.layer_start,
+            "layer_end": self.layer_end,
+            "layers_served": self.layer_end - self.layer_start,
+            "device": self.device,
+            "requests_served": 0,
+            "failed_requests": 0,
+            "token_positions_served": 0,
+            "total_latency_ms": 0.0,
+            "avg_latency_ms": 0.0,
+            "last_success_at": None,
+            "last_error_at": None,
+        }
+        if self.handler is None:
+            return base
+        return {
+            **base,
+            **self.handler.get_accounting_snapshot(),
         }
 
     def get_visible_maddrs(self) -> list[str]:

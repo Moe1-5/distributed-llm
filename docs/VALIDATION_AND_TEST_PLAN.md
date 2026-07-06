@@ -166,6 +166,8 @@ These checks come from the 2026-07-05 Electron screen review and should be verif
 
 Advanced features remain deferred until the follow-on phase gates are satisfied: output parity in Sprint 07, client workflow clarity in Sprint 05, and multi-node/runnable-model semantics in Sprint 06.
 
+2026-07-06 Sprint 06 update: runnable model semantics are implemented as registry support plus complete compatible route coverage reported by `/models`. Incentive semantics are simulated accounting only: contribution records are model-aware and layer-aware, but token UI and reward settlement remain disabled until correctness, health, and anti-abuse checks are proven.
+
 ## 1. Static Validation
 
 ### Backend

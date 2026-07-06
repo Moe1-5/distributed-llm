@@ -25,13 +25,13 @@ Sprint 06 should not begin until Sprint 04 validates the local inference path an
 ## Todo
 
 - [x] Decide backend serving model: node registry in one process or one process per participant.
-- [ ] If using a registry, design `/node/start`, `/node/stop`, `/status`, and `/nodes` around multiple local nodes.
+- [x] Registry path explicitly deferred; no `/node/start`, `/node/stop`, `/status`, or `/nodes` registry redesign is needed while using one backend process per participant.
 - [x] If using one process per participant, document local multi-node testing commands and UI limitations.
 - [x] Add runnable-model status: supported by registry plus complete compatible route coverage.
 - [x] Expose missing layer ranges and wrong-model route reasons before inference starts.
-- [ ] Define model-aware incentive accounting fields: model, layer range, tokens/requests served, latency, success/failure, hardware class, and identity.
-- [ ] Decide whether initial rewards are simulated accounting only before real token integration.
-- [ ] Add tests for model-runnable state and multi-node route readiness.
+- [x] Define model-aware incentive accounting fields: model, layer range, tokens/requests served, latency, success/failure, hardware class, and identity.
+- [x] Decide whether initial rewards are simulated accounting only before real token integration.
+- [x] Add tests for model-runnable state and multi-node route readiness.
 
 ## Done
 
@@ -39,6 +39,9 @@ Sprint 06 should not begin until Sprint 04 validates the local inference path an
 - [x] `/models` now reports model availability separately from runnable route coverage.
 - [x] The frontend model surfaces can explain runnable versus not runnable model state.
 - [x] WebSocket streaming reports generator readiness errors instead of mock fallback responses.
+- [x] Current Sprint 06 does not design a node registry because the chosen prototype strategy is one backend process per participant; registry design remains future work if the project needs multi-node-per-process support.
+- [x] Serving nodes record simulated contribution metrics for model, layer range, device, request success/failure, token positions served, latency, and identity.
+- [x] `/incentives/accounting` exposes simulated accounting only, with token UI and reward settlement disabled.
 
 ---
 
@@ -47,9 +50,9 @@ Sprint 06 should not begin until Sprint 04 validates the local inference path an
 - [x] Multi-node local testing strategy is explicit and testable.
 - [x] The app can explain why a model is or is not currently runnable.
 - [x] Inference is gated by complete compatible route coverage, not only by model registry membership.
-- [ ] Incentive semantics are model-aware and contribution-aware.
-- [ ] No token UI is added before route correctness and accounting fields are validated.
-- [ ] Backend tests cover the chosen model/routing semantics.
+- [x] Incentive semantics are model-aware and contribution-aware.
+- [x] No token UI is added before route correctness and accounting fields are validated.
+- [x] Backend tests cover the chosen model/routing semantics.
 
 ---
 
@@ -66,3 +69,9 @@ Sprint 06 should not begin until Sprint 04 validates the local inference path an
 - What changed: chose one backend process per serving participant for the current prototype; added route-derived runnable status fields to `/models`; updated frontend model status displays; removed the WebSocket mock generation fallback; added tests for runnable and non-runnable model status.
 - Why: users should not infer that every registered model is runnable. A model is runnable only when the active network has complete compatible layer coverage for that model.
 - Status: focused backend readiness tests pass with 28 tests and frontend typecheck passes. Incentive accounting semantics remain open.
+
+### 2026-07-06 - Add simulated contribution accounting
+
+- What changed: added simulated serving contribution metrics to `InferenceHandler` and local node status; added `/incentives/accounting` with token UI and settlement disabled; documented the no-registry and simulated-accounting decisions; added tests for accounting success, failure, and endpoint contract.
+- Why: Sprint 06 needs incentive semantics to be model-aware and contribution-aware without introducing real token rewards before route correctness, health checks, and anti-abuse validation.
+- Status: focused backend readiness tests pass with 31 tests. Sprint 06 implementation criteria are satisfied pending user review or explicit sprint closure.

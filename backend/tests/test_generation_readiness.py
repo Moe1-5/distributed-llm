@@ -609,6 +609,32 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(result["status"], "stop_requested")
         self.assertTrue(dummy.stop_requested)
 
+    def test_incentive_accounting_endpoint_is_simulated_only(self) -> None:
+        from api import server as api_server
+
+        class DummyNode:
+            def get_accounting_snapshot(self) -> dict:
+                return {
+                    "peer_id": "peer-123",
+                    "model_name": "facebook/opt-125m",
+                    "layer_start": 0,
+                    "layer_end": 1,
+                    "requests_served": 2,
+                }
+
+        original_node = api_server.node
+        api_server.node = DummyNode()
+        try:
+            result = asyncio.run(api_server.get_incentive_accounting())
+        finally:
+            api_server.node = original_node
+
+        self.assertEqual(result["mode"], "simulated")
+        self.assertFalse(result["token_ui_enabled"])
+        self.assertFalse(result["reward_settlement_enabled"])
+        self.assertEqual(result["local_contribution"]["model_name"], "facebook/opt-125m")
+        self.assertIn("token_positions_served", result["fields"])
+
     def test_handler_expands_token_mask_to_causal_decoder_mask(self) -> None:
         handler = InferenceHandler(
             model_name="facebook/opt-125m",
@@ -631,6 +657,57 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(decoder_mask[0, 0, 2, 2].item(), 0.0)
         self.assertEqual(decoder_mask[0, 0, 2, 3].item(), torch.finfo(torch.float32).min)
         self.assertEqual(decoder_mask[0, 0, 0, 1].item(), torch.finfo(torch.float32).min)
+
+    def test_handler_accounting_tracks_successful_forward(self) -> None:
+        class AddOneLayer(nn.Module):
+            def forward(
+                self,
+                hidden_states: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+                position_ids: torch.Tensor | None = None,
+            ) -> torch.Tensor:
+                return hidden_states + 1
+
+        handler = InferenceHandler(
+            model_name="facebook/opt-125m",
+            layer_start=2,
+            layer_end=3,
+            device="cpu",
+            dtype=torch.float32,
+        )
+        handler.layers = nn.ModuleList([AddOneLayer()])
+        handler._loaded = True
+
+        output = handler.forward(torch.zeros(1, 4, 8))
+        snapshot = handler.get_accounting_snapshot()
+
+        self.assertTrue(torch.allclose(output, torch.ones(1, 4, 8)))
+        self.assertEqual(snapshot["model_name"], "facebook/opt-125m")
+        self.assertEqual(snapshot["layer_start"], 2)
+        self.assertEqual(snapshot["layer_end"], 3)
+        self.assertEqual(snapshot["requests_served"], 1)
+        self.assertEqual(snapshot["failed_requests"], 0)
+        self.assertEqual(snapshot["token_positions_served"], 4)
+        self.assertGreaterEqual(snapshot["avg_latency_ms"], 0.0)
+        self.assertIsNotNone(snapshot["last_success_at"])
+
+    def test_handler_accounting_tracks_failed_forward(self) -> None:
+        handler = InferenceHandler(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            device="cpu",
+            dtype=torch.float32,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Layers not loaded"):
+            handler.forward(torch.zeros(1, 4, 8))
+
+        snapshot = handler.get_accounting_snapshot()
+        self.assertEqual(snapshot["requests_served"], 0)
+        self.assertEqual(snapshot["failed_requests"], 1)
+        self.assertEqual(snapshot["token_positions_served"], 0)
+        self.assertIsNotNone(snapshot["last_error_at"])
 
     def test_handler_forward_passes_layer_ready_attention_mask(self) -> None:
         class CaptureLayer(nn.Module):

@@ -273,6 +273,10 @@ Goal: create a path toward token-based incentives for devices that serve useful 
 
 This phase should wait until core inference, health checks, and route correctness are reliable. Incentives before correctness would reward untrusted or useless work.
 
+### 2026-07-06 Sprint 06 Decision
+
+Initial incentives are simulated accounting only. The backend records model-aware and contribution-aware serving metrics for the local node: peer identity, model, layer range, layers served, device, successful requests, failed requests, token positions served, latency totals, average latency, and last success/error timestamps. Token UI, balances, claims, and reward settlement stay disabled until route correctness, health checks, anti-abuse checks, and receipt/proof design are validated.
+
 ## Phase 11: API Access for Served Models
 
 Goal: let users request API keys for models inferenced by the distributed network.
