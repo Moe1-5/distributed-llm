@@ -59,8 +59,9 @@
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | `tasks/active.md`                                            | Active sprint routing table.                                                         |
 | `tasks/lessons.md`                                           | Assistant lessons: active and internalized.                                          |
-| `tasks/sprints/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Active sprint plan for safe node lifecycle, multi-node local serving, HuggingFace token validation, and trace analysis. |
-| `tasks/sprints/sprint-10-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
+| `tasks/sprints/sprint-10-gated-model-local-import.md`          | Active sprint plan for local gated-model import after external Hugging Face approval without token-first login flow. |
+| `tasks/sprints/sprint-11-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
+| `tasks/archive/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Completed sprint for safe node lifecycle, duplicate/multi-model local serving, HuggingFace token validation, trace analysis, and shutdown hardening. |
 | `tasks/archive/sprint-01-stabilize-prototype.md`              | Completed sprint for stabilizing distributed inference.                              |
 | `tasks/archive/sprint-02-architecture-adapter-and-parity.md` | Completed sprint for architecture-aware distributed inference and parity validation. |
 | `tasks/archive/sprint-03-routing-and-dht-hardening.md`       | Completed sprint for DHT metadata validation, model-aware routing, and RPC UID safety. |

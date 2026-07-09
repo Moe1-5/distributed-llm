@@ -41,6 +41,16 @@
 
 <!-- Add new lessons here -->
 
+### [2026-07-09] Audit completed checklist items for edge cases
+**Problem:** I marked Sprint 09 complete after tests passed, but a follow-up review found a real duplicate-replica edge case: after deleting the base replica, the next same-range replica could reuse an already-live RPC UID suffix.
+**Rule:** Before calling a sprint checklist complete, review the implementation for lifecycle edge cases such as deletion, restart, non-contiguous state, and stale registry entries, then add regression tests for any discovered gap.
+**Why:** A checked box is only useful if it reflects robust behavior, not just the first happy path that satisfied the wording.
+
+### [2026-07-09] Prefer local gated-model import over credential ownership
+**Problem:** I treated Hugging Face token validation/OAuth as the next solution for gated repos, but the user wants the simpler flow where approved users provide local model files and DistribLLM does not own their Hugging Face login or token lifecycle.
+**Rule:** For gated model access, prefer validated local model import after external Hugging Face approval before adding token paste, OAuth, SSO, automatic download, or credential storage flows.
+**Why:** Local import is simpler, avoids unnecessary credential risk, and keeps Sprint 10 focused on reliable model access instead of account integration.
+
 ---
 
 ## Internalized

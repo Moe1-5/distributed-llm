@@ -83,6 +83,7 @@ class RPCServer:
         handler:    InferenceHandler,
         dht:        hivemind.DHT,
         dht_prefix: str,
+        uid_suffix: Optional[int] = None,
     ):
         if not handler.is_loaded():
             raise RuntimeError("RPCServer requires a loaded InferenceHandler")
@@ -94,6 +95,7 @@ class RPCServer:
         self.handler    = handler
         self.dht        = dht
         self.dht_prefix = dht_prefix
+        self.uid_suffix = uid_suffix
 
         self._server:  Optional[hivemind.moe.Server] = None
         self._running  = False
@@ -105,7 +107,12 @@ class RPCServer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def build_rpc_uid(dht_prefix: str, layer_start: int, layer_end: int) -> str:
+    def build_rpc_uid(
+        dht_prefix: str,
+        layer_start: int,
+        layer_end: int,
+        uid_suffix: Optional[int] = None,
+    ) -> str:
         if not dht_prefix.strip():
             raise ValueError("dht_prefix must not be empty")
         if layer_start < 0:
@@ -114,7 +121,12 @@ class RPCServer:
             raise ValueError(
                 f"layer_end ({layer_end}) must be > layer_start ({layer_start})"
             )
-        return f"{dht_prefix}.{layer_start}.{layer_end}"
+        base_uid = f"{dht_prefix}.{layer_start}.{layer_end}"
+        if uid_suffix is None:
+            return base_uid
+        if uid_suffix < 0:
+            raise ValueError(f"uid_suffix must be >= 0, got {uid_suffix}")
+        return f"{base_uid}.{uid_suffix}"
 
     def start(self) -> None:
         with self._lock:
@@ -129,6 +141,7 @@ class RPCServer:
                 self.dht_prefix,
                 self.handler.layer_start,
                 self.handler.layer_end,
+                self.uid_suffix,
             )
             hidden_size = self._get_hidden_size()
 

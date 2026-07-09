@@ -21,11 +21,19 @@ import hivemind
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from huggingface_hub import HfApi
+from huggingface_hub.errors import (
+    GatedRepoError,
+    HFValidationError,
+    HfHubHTTPError,
+    RepositoryNotFoundError,
+)
 from hivemind.utils.logging import get_logger
 from pydantic import BaseModel, field_validator
 
 from node.gpu_monitor import GPUMonitor
 from node.node import Node
+from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, _run_with_timeout
 from client.sequential import RemoteSequential
 from client.generation import DistributedGenerator
 from api.settings import get_hf_token, save_hf_token, delete_hf_token, token_is_set
@@ -99,6 +107,220 @@ def _write_generation_trace(trace: dict) -> dict:
     }
 
 
+def _trace_generation_config_key(trace: dict) -> str:
+    return json.dumps(
+        trace.get("generation_config", {}),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _trace_route_shape(trace: dict) -> dict:
+    steps = trace.get("steps", [])
+    hidden_shapes = [
+        {
+            "step": step.get("step"),
+            "before": step.get("hidden_shape_before_route"),
+            "after": step.get("hidden_shape_after_route"),
+        }
+        for step in steps
+    ]
+    return {
+        "node_trace": trace.get("node_trace", []),
+        "hop_count": len(trace.get("node_trace", [])),
+        "hidden_shapes": hidden_shapes,
+    }
+
+
+def _trace_replacement_flags(trace: dict) -> dict:
+    prompt_steps = trace.get("prompt_tokens", [])
+    generation_steps = trace.get("steps", [])
+    top_candidate_hits = [
+        {
+            "step": step.get("step"),
+            "token_id": candidate.get("token_id"),
+            "token_text": candidate.get("token_text"),
+        }
+        for step in generation_steps
+        for candidate in step.get("top_candidates", [])
+        if candidate.get("token_text_contains_replacement_char")
+    ]
+    selected_hits = [
+        {
+            "step": step.get("step"),
+            "token_id": step.get("token_id"),
+            "token_text": step.get("token_text"),
+        }
+        for step in generation_steps
+        if step.get("token_text_contains_replacement_char")
+        or step.get("decoded_output_contains_replacement_char")
+    ]
+    prompt_hits = [
+        {
+            "token_id": token.get("token_id"),
+            "token_text": token.get("token_text"),
+        }
+        for token in prompt_steps
+        if token.get("token_text_contains_replacement_char")
+    ]
+    return {
+        "response_contains_replacement_char": bool(
+            trace.get("response_contains_replacement_char")
+        ),
+        "prompt_token_hits": prompt_hits,
+        "selected_token_hits": selected_hits,
+        "top_candidate_hits": top_candidate_hits,
+    }
+
+
+def _trace_summary(trace_document: dict, trace_path: Path) -> dict:
+    trace = trace_document.get("trace", trace_document)
+    steps = trace.get("steps", [])
+    top_candidate_ids = [
+        [candidate.get("token_id") for candidate in step.get("top_candidates", [])]
+        for step in steps
+    ]
+    outside_top_candidates = [
+        {
+            "step": step.get("step"),
+            "token_id": step.get("token_id"),
+            "token_text": step.get("token_text"),
+        }
+        for step in steps
+        if step.get("selected_in_top_candidates") is False
+    ]
+    return {
+        "trace_id": trace_document.get("trace_id"),
+        "trace_file": str(trace_path),
+        "created_at": trace_document.get("created_at"),
+        "schema_version": trace_document.get("schema_version"),
+        "model_name": trace.get("model_name"),
+        "prompt": trace.get("prompt"),
+        "generation_config": trace.get("generation_config", {}),
+        "generation_config_key": _trace_generation_config_key(trace),
+        "prompt_token_ids": trace.get("prompt_token_ids", []),
+        "selected_token_ids": [step.get("token_id") for step in steps],
+        "selected_token_texts": [step.get("token_text") for step in steps],
+        "top_candidate_ids": top_candidate_ids,
+        "response": trace.get("response", ""),
+        "step_count": len(steps),
+        "route_shape": _trace_route_shape(trace),
+        "replacement_flags": _trace_replacement_flags(trace),
+        "selected_outside_top_candidates": outside_top_candidates,
+    }
+
+
+def _compare_trace_group(group: list[dict]) -> list[dict]:
+    if len(group) < 2:
+        return []
+
+    baseline = group[0]
+    discrepancies: list[dict] = []
+    comparisons = [
+        ("prompt_token_mismatch", "prompt_token_ids"),
+        ("selected_token_mismatch", "selected_token_ids"),
+        ("top_candidate_mismatch", "top_candidate_ids"),
+        ("decoded_output_mismatch", "response"),
+        ("route_shape_mismatch", "route_shape"),
+    ]
+
+    for candidate in group[1:]:
+        differing_fields = [
+            category
+            for category, field in comparisons
+            if candidate.get(field) != baseline.get(field)
+        ]
+        if differing_fields:
+            discrepancies.append(
+                {
+                    "trace_id": candidate.get("trace_id"),
+                    "baseline_trace_id": baseline.get("trace_id"),
+                    "categories": differing_fields,
+                }
+            )
+    return discrepancies
+
+
+def _analyze_generation_traces(
+    trace_dir: Optional[Path] = None,
+    model_name: Optional[str] = None,
+) -> dict:
+    directory = trace_dir or TRACE_DIR
+    summaries: list[dict] = []
+    errors: list[dict] = []
+
+    for trace_path in sorted(directory.glob("*.json")) if directory.exists() else []:
+        try:
+            document = json.loads(trace_path.read_text(encoding="utf-8"))
+            summary = _trace_summary(document, trace_path)
+        except Exception as e:
+            errors.append({"trace_file": str(trace_path), "error": str(e)})
+            continue
+        if model_name is not None and summary.get("model_name") != model_name:
+            continue
+        summaries.append(summary)
+
+    grouped: dict[tuple[object, object, object], list[dict]] = {}
+    for summary in summaries:
+        key = (
+            summary.get("model_name"),
+            summary.get("prompt"),
+            summary.get("generation_config_key"),
+        )
+        grouped.setdefault(key, []).append(summary)
+
+    cross_run_discrepancies = [
+        discrepancy
+        for group in grouped.values()
+        for discrepancy in _compare_trace_group(group)
+    ]
+    replacement_traces = [
+        summary["trace_id"]
+        for summary in summaries
+        if summary["replacement_flags"]["response_contains_replacement_char"]
+        or summary["replacement_flags"]["prompt_token_hits"]
+        or summary["replacement_flags"]["selected_token_hits"]
+        or summary["replacement_flags"]["top_candidate_hits"]
+    ]
+    outside_top_candidate_traces = [
+        {
+            "trace_id": summary["trace_id"],
+            "steps": summary["selected_outside_top_candidates"],
+        }
+        for summary in summaries
+        if summary["selected_outside_top_candidates"]
+    ]
+
+    return {
+        "trace_dir": str(directory),
+        "model_name": model_name,
+        "trace_count": len(summaries),
+        "error_count": len(errors),
+        "errors": errors,
+        "groups": [
+            {
+                "model_name": key[0],
+                "prompt": key[1],
+                "generation_config": group[0].get("generation_config", {}),
+                "trace_ids": [summary.get("trace_id") for summary in group],
+                "trace_count": len(group),
+            }
+            for key, group in grouped.items()
+        ],
+        "summaries": summaries,
+        "discrepancy_counts": {
+            "cross_run": len(cross_run_discrepancies),
+            "replacement_char": len(replacement_traces),
+            "selected_outside_top_candidates": len(outside_top_candidate_traces),
+        },
+        "discrepancies": {
+            "cross_run": cross_run_discrepancies,
+            "replacement_char_trace_ids": replacement_traces,
+            "selected_outside_top_candidates": outside_top_candidate_traces,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
@@ -168,17 +390,6 @@ def _active_dht_prefix() -> str:
     return client_dht_prefix or DHT_PREFIX
 
 
-def _active_model_name() -> Optional[str]:
-    models = {
-        model_name
-        for model_name in (getattr(local_node, "model_name", None) for local_node in _local_node_list())
-        if model_name is not None
-    }
-    if len(models) == 1:
-        return next(iter(models))
-    return generator.model_name if generator is not None else None
-
-
 def _local_node_key(info: dict) -> str:
     node_id = info.get("node_id")
     if node_id:
@@ -200,9 +411,73 @@ def _has_overlapping_local_node(req) -> Optional[Node]:
             or local_node.dht_prefix != req.dht_prefix
         ):
             continue
+        if (
+            local_node.layer_start == req.layer_start
+            and local_node.layer_end == req.layer_end
+        ):
+            continue
         if req.layer_start < local_node.layer_end and req.layer_end > local_node.layer_start:
             return local_node
     return None
+
+
+def _next_rpc_uid_suffix(req) -> Optional[int]:
+    used_suffixes = [
+        int(getattr(local_node, "rpc_uid_suffix", 0) or 0)
+        for local_node in _local_node_list()
+        if (
+            local_node.model_name == req.model_name
+            and local_node.layer_start == req.layer_start
+            and local_node.layer_end == req.layer_end
+            and local_node.dht_prefix == req.dht_prefix
+        )
+    ]
+    if not used_suffixes:
+        return None
+    return max(used_suffixes) + 1
+
+
+def _shutdown_local_nodes(
+    timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+) -> list[dict]:
+    results: list[dict] = []
+    for local_node in list(_local_node_list()):
+        node_id = getattr(local_node, "node_id", None)
+
+        def _stop_node() -> None:
+            try:
+                local_node.stop(timeout=timeout)
+            except TypeError:
+                local_node.stop()
+
+        finished = _run_with_timeout(
+            f"local-node-stop-{node_id or 'unknown'}",
+            _stop_node,
+            timeout,
+        )
+        if finished:
+            _unregister_local_node(local_node)
+        results.append(
+            {
+                "node_id": node_id,
+                "status": "stopped" if finished else "timeout",
+            }
+        )
+    local_nodes.clear()
+    _sync_primary_node()
+    return results
+
+
+def _shutdown_client_dht(
+    timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+) -> Optional[dict]:
+    global client_dht
+    if client_dht is None:
+        return None
+    dht = client_dht
+    client_dht = None
+    finished = _run_with_timeout("client-dht-shutdown", dht.shutdown, timeout)
+    return {"status": "stopped" if finished else "timeout"}
 
 
 @asynccontextmanager
@@ -215,11 +490,13 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("Shutting down...")
     if gpu_monitor is not None: gpu_monitor.stop()
-    for local_node in _local_node_list():
-        local_node.stop()
-    local_nodes.clear()
-    _sync_primary_node()
-    if client_dht  is not None: client_dht.shutdown()
+    node_shutdown_results = _shutdown_local_nodes()
+    client_shutdown_result = _shutdown_client_dht()
+    logger.info(
+        "Shutdown cleanup status | local_nodes=%s client_dht=%s",
+        node_shutdown_results,
+        client_shutdown_result,
+    )
     logger.info("Shutdown complete.")
 
 
@@ -452,6 +729,33 @@ class TokenRequest(BaseModel):
         return v
 
 
+class TokenValidationRequest(BaseModel):
+    model_name: str
+    token: Optional[str] = None
+
+    @field_validator("model_name")
+    @classmethod
+    def model_must_be_supported(cls, v: str) -> str:
+        v = v.strip()
+        if v not in SUPPORTED_MODELS:
+            raise ValueError(
+                f"Unsupported model '{v}'. Supported: {list(SUPPORTED_MODELS.keys())}"
+            )
+        return v
+
+    @field_validator("token")
+    @classmethod
+    def token_format_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not v.startswith("hf_"):
+            raise ValueError("Token must start with 'hf_'")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Status & stats
 # ---------------------------------------------------------------------------
@@ -494,7 +798,7 @@ async def get_nodes() -> dict:
             dht=dht,
             dht_prefix=_active_dht_prefix(),
             num_layers=0,
-            model_name=_active_model_name(),
+            model_name=None,
         )
         status = seq.get_network_status()
         discovered_nodes = status["nodes"]
@@ -686,40 +990,137 @@ async def remove_token() -> dict:
     return {"status": "deleted"}
 
 
+def _validate_hf_model_access(model_name: str, token: Optional[str] = None) -> dict:
+    model_info = SUPPORTED_MODELS[model_name]
+    if not model_info["gated"]:
+        return {
+            "valid": True,
+            "model_name": model_name,
+            "gated": False,
+            "token_required": False,
+            "access_granted": True,
+            "message": "Model is open; token validation is not required.",
+        }
+
+    hf_token = token or get_hf_token()
+    if not hf_token:
+        return {
+            "valid": False,
+            "model_name": model_name,
+            "gated": True,
+            "token_required": True,
+            "access_granted": False,
+            "error": "gated_model_no_token",
+            "message": f"{model_name} requires a HuggingFace token.",
+        }
+
+    api = HfApi()
+    try:
+        api.whoami(token=hf_token, cache=False)
+        api.model_info(model_name, token=hf_token, timeout=10)
+    except GatedRepoError:
+        return {
+            "valid": False,
+            "model_name": model_name,
+            "gated": True,
+            "token_required": True,
+            "access_granted": False,
+            "error": "gated_model_access_denied",
+            "message": (
+                f"Your HuggingFace token is valid, but {model_name} is gated for this account. "
+                "Accept the model license or use a token from an approved account."
+            ),
+        }
+    except RepositoryNotFoundError:
+        return {
+            "valid": False,
+            "model_name": model_name,
+            "gated": True,
+            "token_required": True,
+            "access_granted": False,
+            "error": "hf_model_not_found_or_private",
+            "message": (
+                f"HuggingFace could not find {model_name} for this token. "
+                "Check model access and token permissions."
+            ),
+        }
+    except HFValidationError as e:
+        return {
+            "valid": False,
+            "model_name": model_name,
+            "gated": True,
+            "token_required": True,
+            "access_granted": False,
+            "error": "hf_token_invalid",
+            "message": str(e),
+        }
+    except HfHubHTTPError as e:
+        status_code = getattr(getattr(e, "response", None), "status_code", None)
+        if status_code in (401, 403):
+            return {
+                "valid": False,
+                "model_name": model_name,
+                "gated": True,
+                "token_required": True,
+                "access_granted": False,
+                "error": "hf_token_invalid_or_unauthorized",
+                "message": (
+                    "HuggingFace rejected this token for the selected model. "
+                    "Check the token value and accepted model license."
+                ),
+            }
+        return {
+            "valid": False,
+            "model_name": model_name,
+            "gated": True,
+            "token_required": True,
+            "access_granted": False,
+            "error": "hf_validation_failed",
+            "message": (
+                "Could not validate HuggingFace access before model loading. "
+                f"Hub status: {status_code or 'unknown'}."
+            ),
+        }
+    except Exception as e:
+        return {
+            "valid": False,
+            "model_name": model_name,
+            "gated": True,
+            "token_required": True,
+            "access_granted": False,
+            "error": "hf_validation_failed",
+            "message": f"Could not validate HuggingFace access before model loading: {e}",
+        }
+
+    return {
+        "valid": True,
+        "model_name": model_name,
+        "gated": True,
+        "token_required": True,
+        "access_granted": True,
+        "message": "HuggingFace token can access this model.",
+    }
+
+
+async def _validate_hf_model_access_async(
+    model_name: str,
+    token: Optional[str] = None,
+) -> dict:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _validate_hf_model_access, model_name, token)
+
+
+@app.post("/settings/token/validate")
+async def validate_token(req: TokenValidationRequest) -> dict:
+    return await _validate_hf_model_access_async(req.model_name, req.token)
+
+
 # ---------------------------------------------------------------------------
 # Node management
 # ---------------------------------------------------------------------------
 
 @app.post("/node/start")
 async def start_node(req: NodeStartRequest) -> dict:
-    for local_node in _local_node_list():
-        if (
-            local_node.model_name == req.model_name
-            and local_node.layer_start == req.layer_start
-            and local_node.layer_end == req.layer_end
-            and local_node.dht_prefix == req.dht_prefix
-            and local_node.device == req.device
-        ):
-            if local_node.is_running():
-                return {"status": "already_running", "info": local_node.get_info()}
-            try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, local_node.start)
-                return {"status": "resumed", "info": local_node.get_info()}
-            except Exception as e:
-                logger.error(f"Node resume failed: {e}", exc_info=True)
-                return {"status": "error", "error": str(e)}
-
-    existing_models = {local_node.model_name for local_node in _local_node_list()}
-    if existing_models and req.model_name not in existing_models:
-        return {
-            "status": "error",
-            "error": "multi_model_local_nodes_not_supported",
-            "message": (
-                "This backend currently serves multiple local nodes only for one model. "
-                "Delete existing local nodes before serving a different model."
-            ),
-        }
     existing_prefixes = {local_node.dht_prefix for local_node in _local_node_list()}
     if existing_prefixes and req.dht_prefix not in existing_prefixes:
         return {
@@ -733,15 +1134,6 @@ async def start_node(req: NodeStartRequest) -> dict:
 
     overlapping_node = _has_overlapping_local_node(req)
     if overlapping_node is not None:
-        if overlapping_node.layer_start == req.layer_start and overlapping_node.layer_end == req.layer_end:
-            return {
-                "status": "error",
-                "error": "duplicate_layer_replicas_not_supported",
-                "message": (
-                    "This backend does not yet support duplicate local replicas "
-                    "for the same model layer range."
-                ),
-            }
         return {
             "status": "error",
             "error": "overlapping_layer_range",
@@ -752,22 +1144,21 @@ async def start_node(req: NodeStartRequest) -> dict:
             ),
         }
 
-    # Check token for gated models
     model_info = SUPPORTED_MODELS[req.model_name]
-    hf_token   = get_hf_token()
-
-    if model_info["gated"] and not hf_token:
-        return {
-            "status": "error",
-            "error":  "gated_model_no_token",
-            "message": (
-                f"{req.model_name} is a gated model. "
-                f"Please add your HuggingFace token in Settings first."
-            ),
-        }
+    hf_token = get_hf_token()
+    if model_info["gated"]:
+        validation = await _validate_hf_model_access_async(req.model_name, hf_token)
+        if not validation["valid"]:
+            return {
+                "status": "error",
+                "error": validation.get("error", "hf_validation_failed"),
+                "message": validation["message"],
+                "validation": validation,
+            }
 
     # Use default peers if none provided
     peers = req.initial_peers or DISTRIBLLM_INITIAL_PEERS
+    rpc_uid_suffix = _next_rpc_uid_suffix(req)
 
     try:
         local_node = Node(
@@ -779,6 +1170,7 @@ async def start_node(req: NodeStartRequest) -> dict:
             device=req.device,
             hf_token=hf_token,
         )
+        local_node.rpc_uid_suffix = rpc_uid_suffix
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, local_node.start)
         if not local_node.is_running():
@@ -823,7 +1215,8 @@ async def turn_off_node(node_id: Optional[str] = None) -> dict:
     if not local_node.is_running():
         return {"status": "already_off", "info": local_node.get_info()}
     try:
-        local_node.turn_off()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, local_node.turn_off)
         return {"status": "turned_off", "info": local_node.get_info()}
     except Exception as e:
         logger.error(f"Node turn-off failed: {e}", exc_info=True)
@@ -839,7 +1232,8 @@ async def delete_node(node_id: Optional[str] = None) -> dict:
     if local_node is None:
         return {"status": "not_found"}
     try:
-        local_node.stop()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, local_node.stop)
         _unregister_local_node(local_node)
         return {"status": "deleted"}
     except Exception as e:
@@ -868,20 +1262,20 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
 
     model_info = SUPPORTED_MODELS[req.model_name]
     hf_token   = get_hf_token()
-
-    if model_info["gated"] and not hf_token:
-        return {
-            "status": "error",
-            "error":  "gated_model_no_token",
-            "message": f"{req.model_name} requires a HuggingFace token.",
-        }
+    if model_info["gated"]:
+        validation = await _validate_hf_model_access_async(req.model_name, hf_token)
+        if not validation["valid"]:
+            return {
+                "status": "error",
+                "error": validation.get("error", "hf_validation_failed"),
+                "message": validation["message"],
+                "validation": validation,
+            }
 
     peers = req.initial_peers or DISTRIBLLM_INITIAL_PEERS
 
     try:
-        if client_dht is not None:
-            client_dht.shutdown()
-            client_dht = None
+        _shutdown_client_dht()
 
         client_dht = hivemind.DHT(
             initial_peers=peers,
@@ -915,11 +1309,13 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         return {"status": "ready"}
 
     except AssertionError as e:
-        generator = None; client_dht = None
+        generator = None
+        _shutdown_client_dht()
         return {"status": "error", "error": str(e)}
     except Exception as e:
         logger.error(f"Generator start failed: {e}", exc_info=True)
-        generator = None; client_dht = None
+        generator = None
+        _shutdown_client_dht()
         return {"status": "error", "error": str(e)}
 
 
@@ -1018,6 +1414,16 @@ async def trace_generator(req: GenerationTraceRequest) -> dict:
     except Exception as e:
         logger.error(f"Generation trace failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/generator/traces/analysis")
+async def analyze_generator_traces(model_name: Optional[str] = None) -> dict:
+    if model_name is not None and model_name not in SUPPORTED_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported model '{model_name}'.",
+        )
+    return _analyze_generation_traces(model_name=model_name)
 
 
 # ---------------------------------------------------------------------------

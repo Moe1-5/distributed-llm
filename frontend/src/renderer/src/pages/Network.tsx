@@ -52,6 +52,7 @@ export default function Network(): React.JSX.Element {
   const [tokenInput, setTokenInput] = useState('')
   const [tokenSaving, setTokenSaving] = useState(false)
   const [tokenError, setTokenError] = useState<string | null>(null)
+  const [tokenModalModel, setTokenModalModel] = useState<string | null>(null)
 
   // Serve Layers form state
   const [serveModel, setServeModel] = useState('')
@@ -143,10 +144,37 @@ export default function Network(): React.JSX.Element {
     window.open('https://huggingface.co/settings/tokens', '_blank')
   }
 
-  const openTokenModal = useCallback(() => {
+  const openTokenModal = useCallback((modelId?: string) => {
+    setTokenModalModel(modelId ?? null)
     setTokenError(null)
     setTokenModalOpen(true)
   }, [])
+
+  const validateGatedAccess = useCallback(
+    async (modelId: string): Promise<boolean> => {
+      const model = models.find((m) => m.id === modelId)
+      if (!model?.gated) return true
+
+      if (!tokenAvailable) {
+        setTokenModalModel(modelId)
+        openTokenModal(modelId)
+        return false
+      }
+
+      log(`Validating HuggingFace access for ${modelId}...`)
+      const validation = await api.validateToken(modelId)
+      if (validation.valid) {
+        return true
+      }
+
+      log(validation.message, 'error')
+      setTokenModalModel(modelId)
+      setTokenError(validation.message)
+      setTokenModalOpen(true)
+      return false
+    },
+    [log, models, openTokenModal, tokenAvailable]
+  )
 
   const handleSaveToken = useCallback(async () => {
     const token = tokenInput.trim()
@@ -162,17 +190,30 @@ export default function Network(): React.JSX.Element {
     setTokenSaving(true)
     setTokenError(null)
     try {
+      if (tokenModalModel) {
+        const validation = await api.validateToken(tokenModalModel, token)
+        if (!validation.valid) {
+          setTokenError(validation.message)
+          return
+        }
+      }
       await api.saveToken(token)
       setTokenAvailable(true)
       setTokenInput('')
       setTokenModalOpen(false)
-      log('HuggingFace token saved', 'success')
+      setTokenModalModel(null)
+      log(
+        tokenModalModel
+          ? `HuggingFace token validated for ${tokenModalModel}`
+          : 'HuggingFace token saved',
+        'success'
+      )
     } catch (err) {
       setTokenError(err instanceof Error ? err.message : 'Failed to save token')
     } finally {
       setTokenSaving(false)
     }
-  }, [log, tokenInput])
+  }, [log, tokenInput, tokenModalModel])
 
   // ---------------------------------------------------------------------------
   // Start node
@@ -181,7 +222,7 @@ export default function Network(): React.JSX.Element {
   const handleStartNode = useCallback(async () => {
     if (!serveModel || nodeLoading) return
     if (serveNeedsToken) {
-      openTokenModal()
+      openTokenModal(serveModel)
       return
     }
 
@@ -189,6 +230,9 @@ export default function Network(): React.JSX.Element {
     setNodeLoading(true)
 
     try {
+      const accessOk = await validateGatedAccess(serveModel)
+      if (!accessOk) return
+
       const res = await api.startNode({
         model_name: serveModel,
         layer_start: layerStart,
@@ -200,10 +244,10 @@ export default function Network(): React.JSX.Element {
 
       if (res.status === 'error') {
         if (res.error === 'gated_model_no_token') {
-          log('Token required — opening HuggingFace...', 'error')
-          openHuggingFace()
+          log(res.message ?? 'Token required', 'error')
+          openTokenModal(serveModel)
         } else {
-          log(`Error: ${res.error}`, 'error')
+          log(`Error: ${res.message ?? res.error}`, 'error')
         }
       } else if (res.status === 'started') {
         log(`Node started successfully`, 'success')
@@ -228,7 +272,8 @@ export default function Network(): React.JSX.Element {
     layerStart,
     layerEnd,
     device,
-    openTokenModal
+    openTokenModal,
+    validateGatedAccess
   ])
 
   // ---------------------------------------------------------------------------
@@ -238,7 +283,7 @@ export default function Network(): React.JSX.Element {
   const handleStartGenerator = useCallback(async () => {
     if (!inferModel || genLoading) return
     if (inferNeedsToken) {
-      openTokenModal()
+      openTokenModal(inferModel)
       return
     }
 
@@ -246,6 +291,9 @@ export default function Network(): React.JSX.Element {
     setGenLoading(true)
 
     try {
+      const accessOk = await validateGatedAccess(inferModel)
+      if (!accessOk) return
+
       const res = await api.startGenerator({
         model_name: inferModel,
         dht_prefix: 'distribllm',
@@ -254,10 +302,10 @@ export default function Network(): React.JSX.Element {
 
       if (res.status === 'error') {
         if (res.error === 'gated_model_no_token') {
-          log('Token required — opening HuggingFace...', 'error')
-          openHuggingFace()
+          log(res.message ?? 'Token required', 'error')
+          openTokenModal(inferModel)
         } else {
-          log(`Error: ${res.error}`, 'error')
+          log(`Error: ${res.message ?? res.error}`, 'error')
         }
       } else {
         log('Generator ready — go to Inference page', 'success')
@@ -268,7 +316,7 @@ export default function Network(): React.JSX.Element {
     } finally {
       setGenLoading(false)
     }
-  }, [inferModel, genLoading, inferNeedsToken, log, openTokenModal])
+  }, [inferModel, genLoading, inferNeedsToken, log, openTokenModal, validateGatedAccess])
 
   const handleStopGenerator = useCallback(async () => {
     if (!genReady || genLoading) return
@@ -659,7 +707,7 @@ export default function Network(): React.JSX.Element {
                   }
                 `}
               >
-                {tokenSaving ? 'SAVING...' : 'SAVE TOKEN'}
+                {tokenSaving ? 'VALIDATING...' : 'SAVE TOKEN'}
               </button>
               <button
                 onClick={openHuggingFace}

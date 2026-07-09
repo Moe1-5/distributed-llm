@@ -1,6 +1,6 @@
-# Sprint 10 - Real Incentives and Settlement
+# Sprint 11 - Real Incentives and Settlement
 
-**Goal:** Turn simulated contribution accounting into real incentive/reward behavior only after inference correctness, route health, anti-abuse checks, and proof/receipt prerequisites are ready.
+**Goal:** Turn simulated contribution accounting into real incentive/reward behavior only after inference correctness, route health, anti-abuse checks, proof/receipt prerequisites, and gated-model local import reliability are ready.
 **Start:** TBD
 **End:** TBD
 
@@ -12,6 +12,8 @@ Sprint 06 intentionally added simulated contribution accounting, not real token 
 
 Real incentives should wait until useful work can be measured reliably and abuse-resistant proof exists. Rewarding compute before route correctness, health checks, and receipt validation would risk paying for stale, failed, fake, or low-quality work.
 
+Sprint 10 is now reserved for the simpler gated-model local import flow. Incentives remain important, but they should not compete with model-access reliability.
+
 ---
 
 ## Prerequisites
@@ -19,6 +21,7 @@ Real incentives should wait until useful work can be measured reliably and abuse
 - [ ] Direct HuggingFace versus distributed parity is validated for the target demo/transport model.
 - [ ] Local multi-node split inference is proven with complete compatible layer coverage.
 - [ ] Real multi-machine inference is proven across separate devices.
+- [ ] Gated-model local import is reliable enough that model access does not depend on pasted tokens.
 - [ ] Route health checks exist for selected nodes before inference starts.
 - [ ] Serving nodes produce signed request/response receipts or another verifiable proof-of-service record.
 - [ ] Accounting records include model, layer range, device/hardware class, peer identity, request success/failure, latency, token positions served, and route/session identifier.
@@ -63,3 +66,9 @@ Real incentives should wait until useful work can be measured reliably and abuse
 - What changed: created the future home for real token incentives, rewards, receipts, anti-abuse checks, and settlement mechanics. This was later moved from Sprint 08 to Sprint 10 so Sprint 08 can handle client refinements and generation diagnostics first.
 - Why: Sprint 06 only added simulated contribution accounting; the system is not ready to issue rewards until route correctness, health checks, multi-node validation, proof/receipt design, and anti-abuse controls are done.
 - Status: sprint is planned but blocked by prerequisites.
+
+### 2026-07-09 - Move incentives after gated local import
+
+- What changed: moved the real incentives and settlement plan from Sprint 10 to Sprint 11.
+- Why: Sprint 10 now focuses on gated-model local import so model access is simple and reliable before incentives are revisited.
+- Status: planned for a later sprint; not started.

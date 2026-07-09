@@ -63,6 +63,24 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not contiguous"):
             sequential._plan_route([self.make_node(0, 5), self.make_node(4, 8)])
 
+    def test_plan_route_load_balances_duplicate_layer_replicas(self) -> None:
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
+        first_replica = {
+            **self.make_node(0, 4, "peer-a"),
+            "rpc_uid": "test-prefix.0.4",
+        }
+        second_replica = {
+            **self.make_node(0, 4, "peer-b"),
+            "rpc_uid": "test-prefix.0.4.1",
+        }
+        tail = self.make_node(4, 8, "peer-tail")
+
+        first_route = sequential._plan_route([second_replica, tail, first_replica])
+        second_route = sequential._plan_route([second_replica, tail, first_replica])
+
+        self.assertEqual([node["peer_id"] for node in first_route], ["peer-a", "peer-tail"])
+        self.assertEqual([node["peer_id"] for node in second_route], ["peer-b", "peer-tail"])
+
     def test_validate_route_raises_for_incomplete_coverage(self) -> None:
         sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
         sequential._discover_nodes = lambda: [self.make_node(0, 4), self.make_node(6, 8)]
@@ -210,10 +228,18 @@ class RemoteSequentialRouteTests(unittest.TestCase):
     def test_rpc_uid_includes_layer_slice_for_uniqueness(self) -> None:
         uid_a = RPCServer.build_rpc_uid("test-prefix", layer_start=0, layer_end=4)
         uid_b = RPCServer.build_rpc_uid("test-prefix", layer_start=4, layer_end=8)
+        uid_c = RPCServer.build_rpc_uid(
+            "test-prefix",
+            layer_start=0,
+            layer_end=4,
+            uid_suffix=1,
+        )
 
         self.assertNotEqual(uid_a, uid_b)
+        self.assertNotEqual(uid_a, uid_c)
         self.assertEqual(uid_a, "test-prefix.0.4")
         self.assertEqual(uid_b, "test-prefix.4.8")
+        self.assertEqual(uid_c, "test-prefix.0.4.1")
 
     def test_rpc_stop_is_bounded_when_hivemind_shutdown_hangs(self) -> None:
         class BlockingServer:
@@ -320,6 +346,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
             def __init__(self) -> None:
                 self.values: dict[str, object] = {}
+                self.shutdown_called = False
 
             def store(self, key: str, value: object, expiration_time: float) -> None:
                 self.values[key] = value
@@ -330,6 +357,9 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
             def get_visible_maddrs(self) -> list[str]:
                 return ["/ip4/127.0.0.1/tcp/1234"]
+
+            def shutdown(self) -> None:
+                self.shutdown_called = True
 
         node = Node(
             model_name="facebook/opt-125m",
@@ -351,6 +381,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         self.assertEqual(fake_rpc.timeout, 0.01)
         self.assertFalse(fake_rpc.is_running())
+        self.assertTrue(fake_dht.shutdown_called)
         self.assertFalse(fake_handler.unloaded)
         self.assertIs(node.handler, fake_handler)
         self.assertIsNone(node.rpc)
@@ -365,6 +396,77 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(status["maddrs"], ["/ip4/127.0.0.1/tcp/1234"])
         self.assertTrue(status["layers_loaded"])
         self.assertFalse(status["rpc_running"])
+
+    def test_node_start_reuses_loaded_handler_when_resuming(self) -> None:
+        import node.node as node_module
+
+        class FakeHandler:
+            def __init__(self) -> None:
+                self.load_calls = 0
+
+            def load(self) -> None:
+                self.load_calls += 1
+
+            def is_loaded(self) -> bool:
+                return True
+
+            def get_accounting_snapshot(self) -> dict:
+                return {}
+
+        class FakeDHT:
+            peer_id = "peer-resumed"
+
+            def __init__(self, *args, **kwargs) -> None:
+                self.values: dict[str, object] = {}
+
+            def store(self, key: str, value: object, expiration_time: float) -> None:
+                self.values[key] = value
+
+            def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
+                value = self.values.get(key)
+                return DummyDHTResult(value) if value is not None else None
+
+            def get_visible_maddrs(self) -> list[str]:
+                return ["/ip4/127.0.0.1/tcp/4321"]
+
+        class FakeRPC:
+            def __init__(self, handler, dht, dht_prefix, uid_suffix=None) -> None:
+                self.handler = handler
+                self.running = False
+
+            def start(self) -> None:
+                self.running = True
+
+            def is_running(self) -> bool:
+                return self.running
+
+            def get_uid(self) -> str:
+                return "test-prefix.0.1"
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        fake_handler = FakeHandler()
+        node.handler = fake_handler
+        node._ensure_announce_thread = lambda: None
+
+        original_dht = node_module.hivemind.DHT
+        original_rpc = node_module.RPCServer
+        node_module.hivemind.DHT = FakeDHT
+        node_module.RPCServer = FakeRPC
+        try:
+            node.start()
+        finally:
+            node_module.hivemind.DHT = original_dht
+            node_module.RPCServer = original_rpc
+
+        self.assertIs(node.handler, fake_handler)
+        self.assertEqual(fake_handler.load_calls, 0)
+        self.assertTrue(node.is_running())
 
     def test_get_visible_maddrs_falls_back_when_dht_handle_is_closed(self) -> None:
         class ClosedDHT:
@@ -1017,6 +1119,162 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             self.assertEqual(trace_document["trace_id"], result["trace_id"])
             self.assertEqual(trace_document["trace"]["prompt"], "test")
 
+    def test_trace_analysis_groups_saved_artifacts_and_flags_discrepancies(self) -> None:
+        from api import server as api_server
+
+        def trace_document(
+            trace_id: str,
+            token_id: int,
+            response: str,
+            node_trace: list[str],
+            top_candidate_ids: list[int] | None = None,
+            selected_in_top_candidates: bool = True,
+            response_contains_replacement_char: bool = False,
+        ) -> dict:
+            candidate_ids = top_candidate_ids or [3, 4, 5]
+            return {
+                "schema_version": 1,
+                "trace_id": trace_id,
+                "created_at": "2026-07-09T00:00:00+00:00",
+                "trace": {
+                    "prompt": "hello",
+                    "model_name": "facebook/opt-1.3b",
+                    "generation_config": {
+                        "max_new_tokens": 1,
+                        "temperature": 0.0,
+                        "top_p": 1.0,
+                        "top_k": 5,
+                        "repetition_penalty": 1.0,
+                        "do_sample": False,
+                    },
+                    "prompt_token_ids": [10, 11],
+                    "prompt_tokens": [
+                        {
+                            "token_id": 10,
+                            "token_text": "he",
+                            "token_text_contains_replacement_char": False,
+                        },
+                        {
+                            "token_id": 11,
+                            "token_text": "llo",
+                            "token_text_contains_replacement_char": False,
+                        },
+                    ],
+                    "response": response,
+                    "response_contains_replacement_char": response_contains_replacement_char,
+                    "steps": [
+                        {
+                            "step": 0,
+                            "hidden_shape_before_route": [1, 2, 2048],
+                            "hidden_shape_after_route": [1, 2, 2048],
+                            "token_id": token_id,
+                            "token_text": response,
+                            "token_text_contains_replacement_char": (
+                                response_contains_replacement_char
+                            ),
+                            "decoded_output_so_far": response,
+                            "decoded_output_contains_replacement_char": (
+                                response_contains_replacement_char
+                            ),
+                            "selected_in_top_candidates": selected_in_top_candidates,
+                            "top_candidates": [
+                                {
+                                    "token_id": candidate_id,
+                                    "token_text": str(candidate_id),
+                                    "token_text_contains_replacement_char": False,
+                                    "logit": float(index),
+                                }
+                                for index, candidate_id in enumerate(candidate_ids)
+                            ],
+                        }
+                    ],
+                    "node_trace": node_trace,
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as trace_dir:
+            trace_path = Path(trace_dir)
+            (trace_path / "baseline.json").write_text(
+                json.dumps(
+                    trace_document("baseline", 3, "a", ["peer-a… (layers 0→24)"])
+                ),
+                encoding="utf-8",
+            )
+            (trace_path / "candidate.json").write_text(
+                json.dumps(
+                    trace_document(
+                        "candidate",
+                        8,
+                        "\ufffd",
+                        ["peer-b… (layers 0→12)", "peer-c… (layers 12→24)"],
+                        top_candidate_ids=[6, 7, 9],
+                        selected_in_top_candidates=False,
+                        response_contains_replacement_char=True,
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            analysis = api_server._analyze_generation_traces(trace_path)
+
+        self.assertEqual(analysis["trace_count"], 2)
+        self.assertEqual(analysis["error_count"], 0)
+        self.assertEqual(len(analysis["groups"]), 1)
+        self.assertEqual(analysis["discrepancy_counts"]["cross_run"], 1)
+        self.assertEqual(analysis["discrepancy_counts"]["replacement_char"], 1)
+        self.assertEqual(
+            analysis["discrepancy_counts"]["selected_outside_top_candidates"],
+            1,
+        )
+        categories = analysis["discrepancies"]["cross_run"][0]["categories"]
+        self.assertIn("selected_token_mismatch", categories)
+        self.assertIn("top_candidate_mismatch", categories)
+        self.assertIn("decoded_output_mismatch", categories)
+        self.assertIn("route_shape_mismatch", categories)
+        self.assertEqual(
+            analysis["discrepancies"]["replacement_char_trace_ids"],
+            ["candidate"],
+        )
+
+    def test_trace_analysis_endpoint_filters_by_supported_model(self) -> None:
+        from api import server as api_server
+
+        original_trace_dir = api_server.TRACE_DIR
+        with tempfile.TemporaryDirectory() as trace_dir:
+            api_server.TRACE_DIR = Path(trace_dir)
+            (api_server.TRACE_DIR / "opt.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "trace_id": "opt",
+                        "created_at": "2026-07-09T00:00:00+00:00",
+                        "trace": {
+                            "model_name": "facebook/opt-125m",
+                            "prompt": "hello",
+                            "generation_config": {},
+                            "prompt_token_ids": [],
+                            "prompt_tokens": [],
+                            "steps": [],
+                            "response": "",
+                            "response_contains_replacement_char": False,
+                            "node_trace": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            try:
+                result = asyncio.run(
+                    api_server.analyze_generator_traces(model_name="facebook/opt-1.3b")
+                )
+                with self.assertRaisesRegex(api_server.HTTPException, "Unsupported model"):
+                    asyncio.run(api_server.analyze_generator_traces(model_name="missing"))
+            finally:
+                api_server.TRACE_DIR = original_trace_dir
+
+        self.assertEqual(result["trace_count"], 0)
+        self.assertEqual(result["model_name"], "facebook/opt-1.3b")
+
     def test_generator_status_reports_not_loaded(self) -> None:
         from api import server as api_server
 
@@ -1141,6 +1399,166 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(opt["compatible_nodes"], 1)
         self.assertEqual(opt["route_trace"], ["peer-123… (layers 0→12)"])
 
+    def test_token_validation_requires_token_for_gated_model(self) -> None:
+        from api import server as api_server
+
+        request = api_server.TokenValidationRequest(
+            model_name="meta-llama/Llama-3.2-1B",
+        )
+
+        original_get_hf_token = api_server.get_hf_token
+        api_server.get_hf_token = lambda: None
+        try:
+            result = asyncio.run(api_server.validate_token(request))
+        finally:
+            api_server.get_hf_token = original_get_hf_token
+
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["error"], "gated_model_no_token")
+        self.assertFalse(result["access_granted"])
+        self.assertNotIn("hf_", json.dumps(result))
+
+    def test_token_validation_checks_hub_identity_and_model_access(self) -> None:
+        from api import server as api_server
+
+        calls: list[tuple[str, str]] = []
+
+        class FakeHfApi:
+            def whoami(self, token: str, cache: bool = False) -> dict:
+                calls.append(("whoami", token))
+                return {"name": "tester"}
+
+            def model_info(
+                self,
+                repo_id: str,
+                *,
+                token: str,
+                timeout: int,
+            ) -> dict:
+                calls.append(("model_info", f"{repo_id}:{token}:{timeout}"))
+                return {}
+
+        original_hf_api = api_server.HfApi
+        api_server.HfApi = FakeHfApi
+        try:
+            request = api_server.TokenValidationRequest(
+                model_name="meta-llama/Llama-3.2-1B",
+                token="hf_valid_token",
+            )
+            result = asyncio.run(api_server.validate_token(request))
+        finally:
+            api_server.HfApi = original_hf_api
+
+        self.assertTrue(result["valid"])
+        self.assertTrue(result["access_granted"])
+        self.assertEqual(
+            calls,
+            [
+                ("whoami", "hf_valid_token"),
+                ("model_info", "meta-llama/Llama-3.2-1B:hf_valid_token:10"),
+            ],
+        )
+        self.assertNotIn("hf_valid_token", json.dumps(result))
+
+    def test_start_node_validates_gated_model_before_loading(self) -> None:
+        from api import server as api_server
+
+        created: list[object] = []
+
+        class DummyNode:
+            def __init__(self, *args, **kwargs) -> None:
+                created.append(self)
+
+        async def deny_access(model_name: str, token: str | None = None) -> dict:
+            return {
+                "valid": False,
+                "model_name": model_name,
+                "gated": True,
+                "token_required": True,
+                "access_granted": False,
+                "error": "gated_model_access_denied",
+                "message": "license not accepted",
+            }
+
+        original_node = api_server.node
+        original_local_nodes = dict(api_server.local_nodes)
+        original_node_class = api_server.Node
+        original_get_hf_token = api_server.get_hf_token
+        original_validate = api_server._validate_hf_model_access_async
+        api_server.node = None
+        api_server.local_nodes.clear()
+        api_server.Node = DummyNode
+        api_server.get_hf_token = lambda: "hf_denied"
+        api_server._validate_hf_model_access_async = deny_access
+        try:
+            result = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="meta-llama/Llama-3.2-1B",
+                        layer_start=0,
+                        layer_end=1,
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                        device="cpu",
+                    )
+                )
+            )
+        finally:
+            api_server.Node = original_node_class
+            api_server.get_hf_token = original_get_hf_token
+            api_server._validate_hf_model_access_async = original_validate
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+            api_server.node = original_node
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "gated_model_access_denied")
+        self.assertEqual(result["message"], "license not accepted")
+        self.assertEqual(created, [])
+
+    def test_start_generator_validates_gated_model_before_loading(self) -> None:
+        from api import server as api_server
+
+        async def deny_access(model_name: str, token: str | None = None) -> dict:
+            return {
+                "valid": False,
+                "model_name": model_name,
+                "gated": True,
+                "token_required": True,
+                "access_granted": False,
+                "error": "hf_token_invalid_or_unauthorized",
+                "message": "token rejected",
+            }
+
+        original_generator = api_server.generator
+        original_client_dht = api_server.client_dht
+        original_get_hf_token = api_server.get_hf_token
+        original_validate = api_server._validate_hf_model_access_async
+        api_server.generator = None
+        api_server.client_dht = None
+        api_server.get_hf_token = lambda: "hf_bad"
+        api_server._validate_hf_model_access_async = deny_access
+        try:
+            result = asyncio.run(
+                api_server.start_generator(
+                    api_server.GeneratorStartRequest(
+                        model_name="meta-llama/Llama-3.2-1B",
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                    )
+                )
+            )
+        finally:
+            api_server.generator = original_generator
+            api_server.client_dht = original_client_dht
+            api_server.get_hf_token = original_get_hf_token
+            api_server._validate_hf_model_access_async = original_validate
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "hf_token_invalid_or_unauthorized")
+        self.assertEqual(result["message"], "token rejected")
+        self.assertIsNone(api_server.client_dht)
+
     def test_stop_generator_requests_cancellation(self) -> None:
         from api import server as api_server
 
@@ -1193,7 +1611,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertTrue(dummy.turned_off)
         self.assertIs(result["info"]["layers_loaded"], True)
 
-    def test_start_node_allows_second_non_overlapping_local_slice(self) -> None:
+    def test_start_node_allows_duplicate_and_multi_model_local_nodes(self) -> None:
         from api import server as api_server
 
         created: list[object] = []
@@ -1222,6 +1640,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 created.append(self)
 
             def start(self) -> None:
+                self.rpc_uid_suffix_at_start = getattr(self, "rpc_uid_suffix", None)
                 self.running = True
 
             def is_running(self) -> bool:
@@ -1264,8 +1683,20 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 api_server.start_node(
                     api_server.NodeStartRequest(
                         model_name="facebook/opt-125m",
-                        layer_start=6,
-                        layer_end=12,
+                        layer_start=0,
+                        layer_end=6,
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                        device="cpu",
+                    )
+                )
+            )
+            third = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="facebook/opt-1.3b",
+                        layer_start=0,
+                        layer_end=6,
                         dht_prefix="test-prefix",
                         initial_peers=[],
                         device="cpu",
@@ -1280,10 +1711,51 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         self.assertEqual(first["status"], "started")
         self.assertEqual(second["status"], "started")
+        self.assertEqual(third["status"], "started")
         self.assertEqual(first["info"]["node_id"], "node-1")
         self.assertEqual(second["info"]["node_id"], "node-2")
+        self.assertEqual(third["info"]["node_id"], "node-3")
+        self.assertIsNone(created[0].rpc_uid_suffix_at_start)
+        self.assertEqual(created[1].rpc_uid_suffix_at_start, 1)
+        self.assertIsNone(created[2].rpc_uid_suffix_at_start)
 
-    def test_start_node_rejects_overlapping_or_different_model_local_slice(self) -> None:
+    def test_duplicate_replica_suffix_does_not_reuse_live_suffix_after_delete(self) -> None:
+        from api import server as api_server
+
+        class DummyNode:
+            def __init__(self, node_id: str, rpc_uid_suffix: int | None) -> None:
+                self.node_id = node_id
+                self.model_name = "facebook/opt-125m"
+                self.layer_start = 0
+                self.layer_end = 6
+                self.dht_prefix = "test-prefix"
+                self.rpc_uid_suffix = rpc_uid_suffix
+
+        original_node = api_server.node
+        original_local_nodes = dict(api_server.local_nodes)
+        existing_replica = DummyNode("node-2", 1)
+        api_server.node = existing_replica
+        api_server.local_nodes.clear()
+        api_server.local_nodes[existing_replica.node_id] = existing_replica
+        try:
+            next_suffix = api_server._next_rpc_uid_suffix(
+                api_server.NodeStartRequest(
+                    model_name="facebook/opt-125m",
+                    layer_start=0,
+                    layer_end=6,
+                    dht_prefix="test-prefix",
+                    initial_peers=[],
+                    device="cpu",
+                )
+            )
+        finally:
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+            api_server.node = original_node
+
+        self.assertEqual(next_suffix, 2)
+
+    def test_start_node_rejects_partial_overlap_for_same_model(self) -> None:
         from api import server as api_server
 
         class DummyNode:
@@ -1319,18 +1791,6 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                     )
                 )
             )
-            different_model = asyncio.run(
-                api_server.start_node(
-                    api_server.NodeStartRequest(
-                        model_name="facebook/opt-1.3b",
-                        layer_start=6,
-                        layer_end=12,
-                        dht_prefix="test-prefix",
-                        initial_peers=[],
-                        device="cpu",
-                    )
-                )
-            )
         finally:
             api_server.local_nodes.clear()
             api_server.local_nodes.update(original_local_nodes)
@@ -1338,8 +1798,6 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         self.assertEqual(overlap["status"], "error")
         self.assertEqual(overlap["error"], "overlapping_layer_range")
-        self.assertEqual(different_model["status"], "error")
-        self.assertEqual(different_model["error"], "multi_model_local_nodes_not_supported")
 
     def test_turn_off_node_targets_one_local_node_by_id(self) -> None:
         from api import server as api_server
@@ -1437,6 +1895,86 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "deleted")
         self.assertTrue(dummy.stopped)
+
+    def test_delete_node_targets_one_registered_node_by_id(self) -> None:
+        from api import server as api_server
+
+        class DummyNode:
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.stopped = False
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        first = DummyNode("node-1")
+        second = DummyNode("node-2")
+        original_node = api_server.node
+        original_local_nodes = dict(api_server.local_nodes)
+        api_server.local_nodes.clear()
+        api_server.local_nodes[first.node_id] = first
+        api_server.local_nodes[second.node_id] = second
+        api_server.node = first
+        try:
+            result = asyncio.run(api_server.delete_node(node_id="node-1"))
+        finally:
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+            api_server.node = original_node
+
+        self.assertEqual(result["status"], "deleted")
+        self.assertTrue(first.stopped)
+        self.assertFalse(second.stopped)
+
+    def test_shutdown_local_nodes_returns_promptly_when_node_stop_hangs(self) -> None:
+        from api import server as api_server
+
+        class BlockingNode:
+            node_id = "blocking-node"
+
+            def stop(self, timeout: float = 5.0) -> None:
+                time.sleep(1.0)
+
+        original_node = api_server.node
+        original_local_nodes = dict(api_server.local_nodes)
+        blocking = BlockingNode()
+        api_server.node = blocking
+        api_server.local_nodes.clear()
+        api_server.local_nodes[blocking.node_id] = blocking
+        try:
+            started = time.perf_counter()
+            result = api_server._shutdown_local_nodes(timeout=0.01)
+            elapsed = time.perf_counter() - started
+        finally:
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+            api_server.node = original_node
+
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(result, [{"node_id": "blocking-node", "status": "timeout"}])
+        self.assertIsNone(api_server.node)
+
+    def test_shutdown_client_dht_returns_promptly_when_shutdown_hangs(self) -> None:
+        from api import server as api_server
+
+        class BlockingDHT:
+            def shutdown(self) -> None:
+                time.sleep(1.0)
+
+        original_client_dht = api_server.client_dht
+        api_server.client_dht = BlockingDHT()
+        try:
+            started = time.perf_counter()
+            result = api_server._shutdown_client_dht(timeout=0.01)
+            elapsed = time.perf_counter() - started
+            client_after_shutdown = api_server.client_dht
+        finally:
+            api_server.client_dht = original_client_dht
+
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(result, {"status": "timeout"})
+        self.assertIsNone(client_after_shutdown)
+        self.assertIs(api_server.client_dht, original_client_dht)
 
     def test_incentive_accounting_endpoint_is_simulated_only(self) -> None:
         from api import server as api_server

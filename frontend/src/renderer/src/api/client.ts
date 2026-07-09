@@ -79,6 +79,16 @@ export interface AppSettings {
   token_preview: string | null
 }
 
+export interface TokenValidationResult {
+  valid: boolean
+  model_name: string
+  gated: boolean
+  token_required: boolean
+  access_granted: boolean
+  message: string
+  error?: string
+}
+
 export interface NodeStartParams {
   model_name: string
   layer_start: number
@@ -135,6 +145,55 @@ export interface GenerationTraceResult {
   trace_id: string
   trace_file: string
   trace_created_at: string
+}
+
+export interface GenerationTraceAnalysis {
+  trace_dir: string
+  model_name: string | null
+  trace_count: number
+  error_count: number
+  errors: Array<{ trace_file: string; error: string }>
+  groups: Array<{
+    model_name: string | null
+    prompt: string | null
+    generation_config: Record<string, unknown>
+    trace_ids: Array<string | null>
+    trace_count: number
+  }>
+  summaries: Array<{
+    trace_id: string | null
+    trace_file: string
+    created_at: string | null
+    model_name: string | null
+    prompt: string | null
+    prompt_token_ids: number[]
+    selected_token_ids: number[]
+    selected_token_texts: string[]
+    response: string
+    step_count: number
+    route_shape: {
+      node_trace: string[]
+      hop_count: number
+      hidden_shapes: Array<{ step: number | null; before?: number[]; after?: number[] }>
+    }
+  }>
+  discrepancy_counts: {
+    cross_run: number
+    replacement_char: number
+    selected_outside_top_candidates: number
+  }
+  discrepancies: {
+    cross_run: Array<{
+      trace_id: string | null
+      baseline_trace_id: string | null
+      categories: string[]
+    }>
+    replacement_char_trace_ids: Array<string | null>
+    selected_outside_top_candidates: Array<{
+      trace_id: string | null
+      steps: Array<{ step: number | null; token_id: number | null; token_text: string | null }>
+    }>
+  }
 }
 
 function generationOptionsPayload(options: GenerationOptions): Record<string, unknown> {
@@ -251,11 +310,20 @@ export const api = {
       prompt,
       ...generationOptionsPayload(options)
     }),
+  analyzeGenerationTraces: (modelName?: string) =>
+    get<GenerationTraceAnalysis>(
+      `/generator/traces/analysis${modelName ? `?model_name=${encodeURIComponent(modelName)}` : ''}`
+    ),
 
   // Settings
   getSettings: () => get<AppSettings>('/settings'),
   saveToken: (token: string) =>
     post<{ status: string; token_preview?: string }>('/settings/token', { token }),
+  validateToken: (modelName: string, token?: string) =>
+    post<TokenValidationResult>('/settings/token/validate', {
+      model_name: modelName,
+      ...(token !== undefined && { token })
+    }),
   deleteToken: () => del<{ status: string }>('/settings/token')
 }
 

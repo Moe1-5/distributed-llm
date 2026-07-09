@@ -39,6 +39,7 @@ class Node:
         dtype:         torch.dtype = torch.float16,
         hf_token:      Optional[str] = None,
         node_id:       Optional[str] = None,
+        rpc_uid_suffix: Optional[int] = None,
     ):
         if not model_name.strip():
             raise ValueError("model_name must not be empty")
@@ -65,6 +66,7 @@ class Node:
         self.dtype         = dtype
         self.hf_token      = hf_token
         self.node_id       = node_id or uuid4().hex[:12]
+        self.rpc_uid_suffix = rpc_uid_suffix
 
         self.dht:     Optional[hivemind.DHT]     = None
         self.handler: Optional[InferenceHandler] = None
@@ -126,6 +128,7 @@ class Node:
                 handler=self.handler,
                 dht=self.dht,
                 dht_prefix=self.dht_prefix,
+                uid_suffix=self.rpc_uid_suffix,
             )
         self.rpc.start()
         if not self.rpc.is_running():
@@ -154,6 +157,9 @@ class Node:
         if self.rpc is not None:
             self.rpc.stop(timeout=timeout)
             self.rpc = None
+        if self.dht is not None:
+            dht = self.dht
+            _run_with_timeout("node-dht-pause-shutdown", dht.shutdown, timeout)
         self.dht = None
         logger.info(
             "Node serving turned off; loaded layers are preserved and serving handles were released."

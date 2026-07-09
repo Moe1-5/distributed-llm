@@ -5,8 +5,8 @@
 
 | Sprint | File | Goal |
 | --- | --- | --- |
-| Sprint 09 | `tasks/sprints/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Add safe node lifecycle controls, multi-node local serving, HuggingFace token validation, and trace analysis. |
-| Sprint 10 | `tasks/sprints/sprint-10-real-incentives-and-settlement.md` | Add real incentive rewards and settlement only after correctness, proof, health, and anti-abuse prerequisites are ready. |
+| Sprint 10 | `tasks/sprints/sprint-10-gated-model-local-import.md` | Use gated models through validated local model imports after the user gets Hugging Face approval, without requiring token paste/OAuth as the primary flow. |
+| Sprint 11 | `tasks/sprints/sprint-11-real-incentives-and-settlement.md` | Add real incentive rewards and settlement only after correctness, proof, health, anti-abuse, and model-access prerequisites are ready. |
 
 ## Completed Sprints
 
@@ -22,6 +22,7 @@ Completed sprint documents live in `tasks/archive/`.
 | Sprint 06 | `tasks/archive/sprint-06-routing-model-access-and-incentives.md` | Completed and archived. |
 | Sprint 07 | `tasks/archive/sprint-07-output-parity-and-quality.md` | Completed and archived. |
 | Sprint 08 | `tasks/archive/sprint-08-client-refinements-and-generation-diagnostics.md` | Completed and archived. |
+| Sprint 09 | `tasks/archive/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Completed and archived. |
 
 ---
 

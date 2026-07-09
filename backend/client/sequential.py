@@ -150,6 +150,7 @@ class RemoteSequential:
         self.dht_prefix = dht_prefix
         self.num_layers = num_layers
         self.model_name = model_name
+        self._replica_cursors: dict[tuple[int, int], int] = {}
 
     def _validate_node_metadata(self, info: dict, peer_id: str = "unknown") -> dict:
         required = {"peer_id", "layer_start", "layer_end", "model_name", "rpc_uid"}
@@ -223,13 +224,27 @@ class RemoteSequential:
 
     def _plan_route(self, nodes: list[dict]) -> list[dict]:
         """Order nodes by layer start and enforce a contiguous, non-overlapping route."""
-        ordered_nodes = sorted(
-            nodes,
-            key=lambda n: (n["layer_start"], n["layer_end"]),
-        )
-
-        if not ordered_nodes:
+        if not nodes:
             raise ValueError("No nodes available for routing")
+
+        nodes_by_span: dict[tuple[int, int], list[dict]] = {}
+        for node in nodes:
+            span = (int(node["layer_start"]), int(node["layer_end"]))
+            nodes_by_span.setdefault(span, []).append(node)
+
+        ordered_nodes: list[dict] = []
+        for span, replicas in sorted(nodes_by_span.items()):
+            ordered_replicas = sorted(
+                replicas,
+                key=lambda n: (
+                    str(n.get("peer_id", "")),
+                    str(n.get("rpc_uid", "")),
+                    str(n.get("node_id", "")),
+                ),
+            )
+            cursor = self._replica_cursors.get(span, 0) % len(ordered_replicas)
+            ordered_nodes.append(ordered_replicas[cursor])
+            self._replica_cursors[span] = (cursor + 1) % len(ordered_replicas)
 
         prev_end = 0
         for node in ordered_nodes:
