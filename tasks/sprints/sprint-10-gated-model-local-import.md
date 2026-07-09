@@ -1,7 +1,7 @@
 # Sprint 10 - Gated Model Local Import
 
 **Goal:** Replace the token-first gated-model workflow with a simple local import flow: after the user has Hugging Face approval and downloads the gated model files themselves, DistribLLM validates and uses that local model directory without storing Hugging Face login state or access tokens.
-**Start:** TBD
+**Start:** 2026-07-09
 **End:** TBD
 
 ---
@@ -33,7 +33,7 @@ This keeps Hugging Face credentials out of the app for the main flow and avoids 
 
 ## In Progress
 
-- [ ] Not started.
+- [x] Start Sprint 10 as the current active sprint.
 
 ## Todo
 
@@ -84,3 +84,9 @@ This keeps Hugging Face credentials out of the app for the main flow and avoids 
 - What changed: reformatted Sprint 10 around local gated-model import after external Hugging Face approval, with token paste and OAuth/SSO deferred out of the primary flow.
 - Why: the user wants a simple and efficient gated-model path where DistribLLM does not take the user's Hugging Face login/token when local approved model files are enough.
 - Status: Sprint 10 is planned but not started. Real incentives and settlement moved to a later sprint.
+
+### 2026-07-09 - Start Sprint 10 branch
+
+- What changed: started Sprint 10 and switched work to the `sprint-10-gated-model-local-import` branch.
+- Why: Sprint 09 is closed and archived, and the next active work is the local gated-model import flow.
+- Status: Sprint 10 is active; implementation work has not begun yet.
