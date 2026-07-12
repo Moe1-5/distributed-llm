@@ -8,7 +8,7 @@
 | Documentation landing page | `README.md` | Start-here guide, current project goal, and end vision |
 | Source file map | `REPO_MAP.md` | Responsibilities for backend, frontend, and generated artifacts |
 | Current architecture | `CURRENT_ARCHITECTURE.md` | Backend, frontend, DHT, node, RPC, generation, and limitations |
-| Runtime flows | `FLOWS.md` | Bootstrap, serving, generator, streaming, dashboard, settings, and failure flows |
+| Runtime flows | `FLOWS.md` | Bootstrap, local gated-model import, serving, generator, streaming, dashboard, settings, and failure flows |
 | Implementation roadmap | `IMPLEMENTATION.md` | Phased plan for core correctness, reliability, public-swarm operations, incentives, API access, and later training resources |
 | Petals comparison | `PETALS_COMPARISON.md` | Similarities, differences, public-swarm positioning, and what to borrow from Petals |
 | Errors and debugging | `ERRORS_AND_DEBUGGING.md` | Known errors, trace diagnostics, likely causes, and inspection points |

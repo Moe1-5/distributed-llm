@@ -25,15 +25,24 @@ Network page
   -> POST /node/start
 ```
 
+For gated models, the user first gets approval and downloads model files on Hugging Face outside DistribLLM. The Network page imports the local model directory with:
+
+```text
+POST /settings/local-models/inspect
+POST /settings/local-models
+```
+
+The backend validates `config.json`, tokenizer files, architecture, layer count, hidden size, and weight shard completeness before storing the local import metadata. The primary gated-model startup path does not require storing a Hugging Face token.
+
 Backend:
 
 ```text
 /node/start
-  -> validate model and token
+  -> validate model and local import if gated
   -> Node(...)
   -> node.start()
       -> start DHT
-      -> load requested layers
+      -> load requested layers from local files if imported
       -> start RPC server
       -> announce metadata to DHT
       -> start periodic announce loop
@@ -76,11 +85,11 @@ Backend:
 
 ```text
 /generator/start
-  -> validate model and token
+  -> validate model and local import if gated
   -> create client DHT
   -> create RemoteSequential
   -> create DistributedGenerator
-  -> load tokenizer, embeddings, final norm, lm_head
+  -> load tokenizer, embeddings, final norm, lm_head from local files if imported
   -> return ready
 ```
 
@@ -155,11 +164,15 @@ Current limitation: `/nodes` always uses `DHT_PREFIX` from constants, not a dyna
 ```text
 Settings page
   -> GET /settings
+  -> GET /settings/local-models
+  -> POST /settings/local-models/inspect
+  -> POST /settings/local-models
+  -> DELETE /settings/local-models/{model_name}
   -> POST /settings/token
   -> DELETE /settings/token
 ```
 
-The backend stores the token in `backend/.hf_token` with file permission `0600`.
+The backend stores local import metadata in `backend/.local_models.json` with file permission `0600`. The backend stores the optional diagnostic token in `backend/.hf_token` with file permission `0600`.
 
 ## 8. Failure Flow Today
 
@@ -174,4 +187,3 @@ Many failures are discovered late:
 - attention mask shape or dtype mismatch
 
 Most of these should become explicit readiness checks before enabling inference.
-

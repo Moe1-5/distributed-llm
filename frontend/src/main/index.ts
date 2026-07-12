@@ -1,4 +1,7 @@
-import { app, shell, BrowserWindow, ipcMain, session } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, session, dialog } from 'electron'
+import type { OpenDialogOptions } from 'electron'
+import { execFile } from 'child_process'
+import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -9,6 +12,31 @@ app.commandLine.appendSwitch('disable-gpu')
 app.commandLine.appendSwitch('disable-gpu-compositing')
 app.commandLine.appendSwitch('disable-software-rasterizer')
 app.commandLine.appendSwitch('no-sandbox')
+app.commandLine.appendSwitch('disable-dev-shm-usage')
+
+function isWsl(): boolean {
+  try {
+    return readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft')
+  } catch {
+    return false
+  }
+}
+
+function openWithWindowsDefaultBrowser(url: string): Promise<boolean> {
+  const cmdPath = '/mnt/c/Windows/system32/cmd.exe'
+  if (!isWsl() || !existsSync(cmdPath)) return Promise.resolve(false)
+
+  return new Promise((resolve) => {
+    execFile(cmdPath, ['/c', 'start', '', url], (error) => {
+      if (error) {
+        console.warn(`Failed to open external URL through Windows default browser ${url}:`, error)
+        resolve(false)
+      } else {
+        resolve(true)
+      }
+    })
+  })
+}
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -33,7 +61,9 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    shell.openExternal(details.url).catch((error) => {
+      console.warn(`Failed to open external URL ${details.url}:`, error)
+    })
     return { action: 'deny' }
   })
 
@@ -46,6 +76,34 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.electron')
+
+  ipcMain.handle('select-local-model-directory', async (event) => {
+    const parentWindow = BrowserWindow.fromWebContents(event.sender)
+    const options: OpenDialogOptions = {
+      title: 'Select downloaded model folder',
+      properties: ['openDirectory']
+    }
+    const result = parentWindow
+      ? await dialog.showOpenDialog(parentWindow, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled) return null
+    return result.filePaths[0] ?? null
+  })
+
+  ipcMain.handle('open-external-url', async (_event, url: string) => {
+    const parsed = new URL(url)
+    const allowedHosts = new Set(['huggingface.co', 'hf.co'])
+    if (parsed.protocol !== 'https:' || !allowedHosts.has(parsed.hostname)) {
+      throw new Error('Only Hugging Face URLs can be opened from this action.')
+    }
+    try {
+      await shell.openExternal(url)
+      return true
+    } catch (error) {
+      console.warn(`Failed to open external URL ${url}:`, error)
+      return openWithWindowsDefaultBrowser(url)
+    }
+  })
 
   // Allow all requests to localhost — needed for FastAPI backend
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {

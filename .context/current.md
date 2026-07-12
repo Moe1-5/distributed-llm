@@ -11,8 +11,8 @@
 
 ## Active Sprint
 
-**Sprint:** Sprint 10 is the lowest active sprint; Sprint 11 is planned for incentives.
-**Goal:** Replace token-first gated-model startup with validated local approved-model import.
+**Sprint:** Sprint 10 is the lowest active sprint and remains open for live gated-model validation; Sprint 11 has started for instruction-ready model expansion; Sprint 13 is planned for incentives.
+**Goal:** Sprint 10 implementation is complete but live Llama 3.2 download is blocked by pending Hugging Face approval; Sprint 11 now adds better open/chat/gated model options for inference validation.
 
 ## Tech Stack
 
@@ -39,4 +39,5 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 07 closed: single-node OPT-125M parity passed, a live full-layer OPT-1.3B smoke trace/parity probe passed for first-token correctness, exact generation controls are exposed, and generated-output parity can compare direct HuggingFace text with distributed text. Broader live OPT-1.3B and true multi-node parity are downstream live-route validation items.
 - Sprint 08 closed: it hides bootstrap internals, uses one Inference open/send/stop action, shows a P2P Monitoring map, writes `/generator/trace` JSON diagnostics, exposes trace UI, adds generator stop control, separates node turn-off/delete actions, and supports same-model non-overlapping local served nodes.
 - Sprint 09 closed: non-destructive node pause/resume/delete semantics, duplicate and multi-model local serving, HuggingFace token validation, structured trace-artifact analysis, and backend shutdown hardening are checklist-complete and archived.
-- Sprint 10 is current: replace token-first gated-model startup with local approved-model import; OAuth/SSO, automatic downloads, HTTP model uploads, and incentives are deferred.
+- Sprint 10 implementation is complete: Hugging Face device OAuth, redacted auth status, download job status/cancel, validated local import handoff, startup from validated local paths, and manual folder fallback are tested. External live validation is blocked on approved gated-model access for the selected repo; Llama 2 access is accepted while Llama 3.2 is pending.
+- Sprint 11 has started with TinyLlama chat as an open smoke-test option, Llama 2 base/chat gated options for the accepted model family, and explicit base/chat/instruct metadata in the model registry.

@@ -34,6 +34,7 @@ class DistributedGenerator:
         device:     str           = "cpu",
         dtype:      torch.dtype   = torch.float32,
         hf_token:   Optional[str] = None,
+        local_model_path: Optional[str] = None,
     ):
         if not model_name.strip():
             raise ValueError("model_name must not be empty")
@@ -45,6 +46,7 @@ class DistributedGenerator:
         self.device     = device
         self.dtype      = dtype
         self.hf_token   = hf_token
+        self.local_model_path = local_model_path
 
         self.tokenizer:    Optional[object]        = None
         self.embed_tokens: Optional[nn.Embedding]  = None
@@ -97,23 +99,27 @@ class DistributedGenerator:
     def load(self) -> None:
         logger.info(
             f"Loading local components for {self.model_name} | "
-            f"hf_token={'set' if self.hf_token else 'not set'}"
+            f"hf_token={'set' if self.hf_token else 'not set'} | "
+            f"local_model_path={'set' if self.local_model_path else 'not set'}"
         )
 
-        token_kwargs = {"token": self.hf_token} if self.hf_token else {}
+        source = self.local_model_path or self.model_name
+        token_kwargs = {"token": self.hf_token} if self.hf_token and not self.local_model_path else {}
+        local_kwargs = {"local_files_only": True} if self.local_model_path else {}
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, **token_kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(source, **token_kwargs, **local_kwargs)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         if self.tokenizer.eos_token_id is None:
             raise RuntimeError("Tokenizer has no EOS token")
 
         model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
+            source,
             torch_dtype=self.dtype,
             low_cpu_mem_usage=True,
             device_map="cpu",
             **token_kwargs,
+            **local_kwargs,
         )
         model.eval()
 

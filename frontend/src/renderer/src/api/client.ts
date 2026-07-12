@@ -28,9 +28,12 @@ export interface ModelInfo {
   num_layers: number
   hidden_size: number
   gated: boolean
+  tuning: 'base' | 'instruct' | 'chat'
   description: string
   vram_gb: number
   available: boolean
+  local_imported: boolean
+  local_import?: LocalModelImport
   runnable: boolean
   route_ready: boolean
   route_reasons: string[]
@@ -64,6 +67,7 @@ export interface NetworkStatus {
   gpu_available: boolean
   generator_ready: boolean
   token_set: boolean
+  local_models?: LocalModelImport[]
 }
 
 export interface GeneratorStatus {
@@ -77,6 +81,84 @@ export interface GeneratorStatus {
 export interface AppSettings {
   token_set: boolean
   token_preview: string | null
+  local_models: LocalModelImport[]
+  huggingface?: HuggingFaceConnection
+}
+
+export interface HuggingFaceConnection {
+  configured: boolean
+  connected: boolean
+  username: string | null
+  token_preview: string | null
+  scope: string
+  client_id_set: boolean
+}
+
+export interface HuggingFaceDeviceFlow {
+  flow_id: string
+  user_code: string
+  verification_uri: string
+  verification_uri_complete?: string | null
+  expires_in: number
+  interval: number
+  scope: string
+}
+
+export interface HuggingFaceDevicePollResult {
+  status: 'pending' | 'connected'
+  error?: string
+  message?: string
+  interval?: number
+  connection?: HuggingFaceConnection
+}
+
+export interface HuggingFaceDownloadJob {
+  job_id: string
+  model_name: string
+  revision?: string | null
+  status: 'queued' | 'downloading' | 'completed' | 'failed' | 'cancelled'
+  message?: string | null
+  error?: string | null
+  cancel_requested: boolean
+  created_at: string
+  updated_at: string
+  completed_at?: string | null
+  model?: LocalModelImport | null
+}
+
+export interface LocalModelImport {
+  model_name: string
+  gated: boolean
+  valid: boolean
+  validated_at: string
+  config: {
+    model_type?: string
+    architectures?: string[]
+    num_layers?: number
+    hidden_size?: number
+  }
+  tokenizer_files: string[]
+  weight_format?: string
+  weight_file_count: number
+  sharded: boolean
+  path?: string
+}
+
+export interface LocalModelValidationResult extends Partial<LocalModelImport> {
+  valid: boolean
+  model_name: string
+  path?: string
+  message?: string
+  error?: string
+}
+
+export interface LocalModelRemoveResult {
+  status: 'removed' | 'not_found'
+  removed: boolean
+  files_deleted: boolean
+  deleted_bytes: number
+  deleted_size: string
+  message: string
 }
 
 export interface TokenValidationResult {
@@ -230,7 +312,13 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     try {
       const payload = (await res.json()) as { detail?: unknown; error?: unknown; message?: unknown }
       const rawDetail = payload.detail ?? payload.error ?? payload.message
-      detail = typeof rawDetail === 'string' ? `: ${rawDetail}` : ''
+      if (typeof rawDetail === 'string') {
+        detail = `: ${rawDetail}`
+      } else if (rawDetail && typeof rawDetail === 'object') {
+        const nested = rawDetail as { message?: unknown; error?: unknown }
+        const message = nested.message ?? nested.error
+        detail = typeof message === 'string' ? `: ${message}` : ''
+      }
     } catch {
       detail = ''
     }
@@ -241,7 +329,23 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 
 async function del<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`DELETE ${path} failed: ${res.status}`)
+  if (!res.ok) {
+    let detail = ''
+    try {
+      const payload = (await res.json()) as { detail?: unknown; error?: unknown; message?: unknown }
+      const rawDetail = payload.detail ?? payload.error ?? payload.message
+      if (typeof rawDetail === 'string') {
+        detail = `: ${rawDetail}`
+      } else if (rawDetail && typeof rawDetail === 'object') {
+        const nested = rawDetail as { message?: unknown; error?: unknown }
+        const message = nested.message ?? nested.error
+        detail = typeof message === 'string' ? `: ${message}` : ''
+      }
+    } catch {
+      detail = ''
+    }
+    throw new Error(`DELETE ${path} failed: ${res.status}${detail}`)
+  }
   return res.json() as Promise<T>
 }
 
@@ -317,6 +421,49 @@ export const api = {
 
   // Settings
   getSettings: () => get<AppSettings>('/settings'),
+  getHuggingFaceConnection: () =>
+    get<HuggingFaceConnection>('/settings/huggingface/connection'),
+  startHuggingFaceDeviceLogin: () =>
+    post<HuggingFaceDeviceFlow>('/settings/huggingface/oauth/device'),
+  pollHuggingFaceDeviceLogin: (flowId: string) =>
+    post<HuggingFaceDevicePollResult>('/settings/huggingface/oauth/device/poll', {
+      flow_id: flowId
+    }),
+  disconnectHuggingFace: () =>
+    del<{ status: string; connection: HuggingFaceConnection }>(
+      '/settings/huggingface/connection'
+    ),
+  downloadHuggingFaceModel: (modelName: string, revision?: string) =>
+    post<{ status: string; job: HuggingFaceDownloadJob }>(
+      '/settings/huggingface/download',
+      {
+        model_name: modelName,
+        ...(revision !== undefined && { revision })
+      }
+    ),
+  getHuggingFaceDownload: (jobId: string) =>
+    get<{ job: HuggingFaceDownloadJob }>(
+      `/settings/huggingface/downloads/${encodeURIComponent(jobId)}`
+    ),
+  cancelHuggingFaceDownload: (jobId: string) =>
+    del<{ job: HuggingFaceDownloadJob }>(
+      `/settings/huggingface/downloads/${encodeURIComponent(jobId)}`
+    ),
+  getLocalModels: () => get<{ models: LocalModelImport[] }>('/settings/local-models'),
+  inspectLocalModel: (modelName: string, path: string) =>
+    post<LocalModelValidationResult>('/settings/local-models/inspect', {
+      model_name: modelName,
+      path
+    }),
+  importLocalModel: (modelName: string, path: string) =>
+    post<{ status: string; model: LocalModelImport }>('/settings/local-models', {
+      model_name: modelName,
+      path
+    }),
+  removeLocalModel: (modelName: string, deleteFiles = false) =>
+    del<LocalModelRemoveResult>(
+      `/settings/local-models/${encodeURIComponent(modelName)}?delete_files=${deleteFiles ? 'true' : 'false'}`
+    ),
   saveToken: (token: string) =>
     post<{ status: string; token_preview?: string }>('/settings/token', { token }),
   validateToken: (modelName: string, token?: string) =>

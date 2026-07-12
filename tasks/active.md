@@ -5,8 +5,9 @@
 
 | Sprint | File | Goal |
 | --- | --- | --- |
-| Sprint 10 | `tasks/sprints/sprint-10-gated-model-local-import.md` | Use gated models through validated local model imports after the user gets Hugging Face approval, without requiring token paste/OAuth as the primary flow. |
-| Sprint 11 | `tasks/sprints/sprint-11-real-incentives-and-settlement.md` | Add real incentive rewards and settlement only after correctness, proof, health, anti-abuse, and model-access prerequisites are ready. |
+| Sprint 10 | `tasks/sprints/sprint-10-gated-model-local-import.md` | Implementation complete for Hugging Face browser/device OAuth downloads into validated local imports; awaiting explicit close before archive. |
+| Sprint 11 | `tasks/sprints/sprint-11-instruction-ready-model-expansion.md` | Add more supported instruction-ready/chat-ready models without fine-tuning the baseline model into instruction behavior. |
+| Sprint 13 | `tasks/sprints/sprint-13-real-incentives-and-settlement.md` | Add real incentive rewards and settlement only after correctness, proof, health, anti-abuse, model-access, and model-quality prerequisites are ready. |
 
 ## Completed Sprints
 

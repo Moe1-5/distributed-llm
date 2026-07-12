@@ -3,10 +3,11 @@ settings.py
 Persistent backend settings stored in a local file.
 
 Currently manages:
-    - HuggingFace token (hf_xxxx) for downloading gated models
+    - HuggingFace token (hf_xxxx / hf_oauth_xxxx) for downloading gated models
 
-Token file location: {backend_root}/.hf_token
-    - Plain text, single line
+Token file location: $DISTRIBLLM_HF_TOKEN_FILE, or
+    $XDG_CONFIG_HOME/distribllm/hf_token, or ~/.config/distribllm/hf_token
+    - Plain text, single line, written by manual fallback or OAuth device login
     - Gitignored — never committed
     - Survives backend restarts
 """
@@ -15,10 +16,27 @@ import os
 from pathlib import Path
 from hivemind.utils.logging import get_logger
 
+from api.env_loader import load_project_env
+
+load_project_env()
+
 logger = get_logger(__name__)
 
-# Token file sits at the backend root (same dir as main.py)
-_TOKEN_FILE = Path(__file__).parent.parent / ".hf_token"
+_TOKEN_FILE_ENV = "DISTRIBLLM_HF_TOKEN_FILE"
+
+
+def _default_token_file() -> Path:
+    config_root = Path(
+        os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    ).expanduser()
+    return config_root / "distribllm" / "hf_token"
+
+
+def _token_file() -> Path:
+    configured = os.environ.get(_TOKEN_FILE_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return _default_token_file()
 
 
 def get_hf_token() -> str | None:
@@ -26,21 +44,22 @@ def get_hf_token() -> str | None:
     Read the stored HuggingFace token from disk.
     Returns None if not set.
     """
+    token_file = _token_file()
     try:
-        if not _TOKEN_FILE.exists():
+        if not token_file.exists():
             return None
-        token = _TOKEN_FILE.read_text().strip()
+        token = token_file.read_text().strip()
         if not token:
             return None
         assert token.startswith("hf_"), (
             f"Token file exists but value does not start with 'hf_' — "
-            f"may be corrupted. Delete {_TOKEN_FILE} and re-enter your token."
+            f"may be corrupted. Delete {token_file} and re-enter your token."
         )
         return token
     except AssertionError:
         raise
     except Exception as e:
-        logger.warning(f"Failed to read HF token from {_TOKEN_FILE}: {e}")
+        logger.warning(f"Failed to read HF token from {token_file}: {e}")
         return None
 
 
@@ -55,16 +74,20 @@ def save_hf_token(token: str) -> None:
         f"Invalid token format — HuggingFace tokens start with 'hf_', got: '{token[:8]}...'"
     )
 
-    _TOKEN_FILE.write_text(token)
+    token_file = _token_file()
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(token_file.parent, 0o700)
+    token_file.write_text(token)
     # Restrict file permissions — token is sensitive
-    os.chmod(_TOKEN_FILE, 0o600)
-    logger.info(f"HF token saved to {_TOKEN_FILE}")
+    os.chmod(token_file, 0o600)
+    logger.info(f"HF token saved to {token_file}")
 
 
 def delete_hf_token() -> None:
     """Remove the stored token."""
-    if _TOKEN_FILE.exists():
-        _TOKEN_FILE.unlink()
+    token_file = _token_file()
+    if token_file.exists():
+        token_file.unlink()
         logger.info("HF token deleted.")
 
 

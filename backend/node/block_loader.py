@@ -5,7 +5,7 @@ range of transformer layers into memory.
 
 Supports:
     - Open models  (no token needed)
-    - Gated models (pass hf_token="hf_...")
+    - Gated models from a validated local directory
     - Llama, Mistral, Gemma, Qwen, Falcon, OPT, GPT-2 architectures
 """
 
@@ -24,6 +24,7 @@ def load_layers(
     device:      str = "cuda",
     dtype:       torch.dtype = torch.float16,
     hf_token:    str | None = None,
+    local_model_path: str | None = None,
 ) -> nn.ModuleList:
     """
     Load transformer layers [layer_start, layer_end) from a HuggingFace model.
@@ -34,7 +35,8 @@ def load_layers(
         layer_end:   Last layer index (exclusive)
         device:      "cuda" or "cpu"
         dtype:       torch.float16 for GPU, torch.float32 for CPU
-        hf_token:    HuggingFace token for gated models (e.g. Llama)
+        hf_token:    Optional HuggingFace token fallback
+        local_model_path: Validated local model directory for offline loading
 
     Returns:
         nn.ModuleList of transformer decoder layers ready for inference
@@ -44,10 +46,12 @@ def load_layers(
     assert layer_end > layer_start,   f"layer_end ({layer_end}) must be > layer_start ({layer_start})"
     assert device in ("cuda", "cpu"), f"device must be 'cuda' or 'cpu', got '{device}'"
 
-    token_kwargs = {"token": hf_token} if hf_token else {}
+    source = local_model_path or model_name
+    token_kwargs = {"token": hf_token} if hf_token and not local_model_path else {}
+    local_kwargs = {"local_files_only": True} if local_model_path else {}
 
-    logger.info(f"Fetching config for {model_name}...")
-    config = AutoConfig.from_pretrained(model_name, **token_kwargs)
+    logger.info(f"Fetching config for {model_name} from {source}...")
+    config = AutoConfig.from_pretrained(source, **token_kwargs, **local_kwargs)
 
     num_layers = _get_num_layers(config)
     assert layer_end <= num_layers, (
@@ -60,12 +64,13 @@ def load_layers(
     )
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_name,
+        source,
         config=config,
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
         device_map="cpu",
         **token_kwargs,
+        **local_kwargs,
     )
 
     all_layers = _get_layers(model)

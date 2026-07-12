@@ -26,6 +26,7 @@ class InferenceHandler:
         device:      str = "cuda",
         dtype:       torch.dtype = torch.float16,
         hf_token:    Optional[str] = None,
+        local_model_path: Optional[str] = None,
     ):
         if not model_name.strip():
             raise ValueError("model_name must not be empty")
@@ -42,6 +43,7 @@ class InferenceHandler:
         self.device      = device
         self.dtype       = dtype
         self.hf_token    = hf_token
+        self.local_model_path = local_model_path
 
         self.layers: Optional[nn.ModuleList] = None
         self._rotary_embedding: Optional[nn.Module] = None
@@ -71,6 +73,7 @@ class InferenceHandler:
             device=self.device,
             dtype=self.dtype,
             hf_token=self.hf_token,
+            local_model_path=self.local_model_path,
         )
         if self.layers is None:
             raise RuntimeError("load_layers returned None")

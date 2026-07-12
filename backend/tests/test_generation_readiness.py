@@ -1,10 +1,12 @@
 import asyncio
 import json
+import os
 import sys
 import time
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -18,6 +20,32 @@ from models.architecture_adapter import get_architecture_adapter
 from node.handler import InferenceHandler
 from node.node import Node
 from node.rpc_server import RPCServer
+from api.local_models import (
+    LocalModelValidationError,
+    import_local_model,
+    inspect_local_model,
+    get_local_model_path,
+    list_local_models,
+    remove_local_model,
+    validate_registered_local_model,
+    validate_local_model_directory,
+)
+from api import hf_oauth
+from api import settings as hf_settings
+from constants import DEFAULT_DISTRIBLLM_INITIAL_PEERS, SUPPORTED_MODELS, get_initial_peers
+
+
+class InitialPeersTests(unittest.TestCase):
+    def test_reads_comma_and_newline_separated_peers_from_environment(self):
+        with patch.dict(
+            os.environ,
+            {"DISTRIBLLM_INITIAL_PEERS": "peer-a, peer-b\npeer-c"},
+        ):
+            self.assertEqual(get_initial_peers(), ["peer-a", "peer-b", "peer-c"])
+
+    def test_empty_environment_value_uses_default_peers(self):
+        with patch.dict(os.environ, {"DISTRIBLLM_INITIAL_PEERS": ""}):
+            self.assertEqual(get_initial_peers(), DEFAULT_DISTRIBLLM_INITIAL_PEERS)
 
 
 class DummyDHT:
@@ -36,6 +64,736 @@ class MappingDHT:
     def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
         value = self.values.get(key)
         return DummyDHTResult(value) if value is not None else None
+
+
+def write_local_model_fixture(
+    directory: Path,
+    *,
+    model_type: str = "llama",
+    num_layers: int = 16,
+    hidden_size: int = 2048,
+    tokenizer: bool = True,
+    weights: bool = True,
+    sharded: bool = False,
+    missing_shard: bool = False,
+) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": model_type,
+                "architectures": ["LlamaForCausalLM"],
+                "num_hidden_layers": num_layers,
+                "hidden_size": hidden_size,
+            }
+        ),
+        encoding="utf-8",
+    )
+    if tokenizer:
+        (directory / "tokenizer.json").write_text("{}", encoding="utf-8")
+    if not weights:
+        return
+    if sharded:
+        (directory / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"model.layers.0.weight": "model-00001.safetensors"}}),
+            encoding="utf-8",
+        )
+        if not missing_shard:
+            (directory / "model-00001.safetensors").write_bytes(b"stub")
+    else:
+        (directory / "model.safetensors").write_bytes(b"stub")
+
+
+class LocalModelImportTests(unittest.TestCase):
+    def test_valid_local_model_directory_is_accepted_without_loading_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "llama"
+            write_local_model_fixture(model_dir)
+
+            result = validate_local_model_directory("meta-llama/Llama-3.2-1B", str(model_dir))
+
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["model_name"], "meta-llama/Llama-3.2-1B")
+            self.assertEqual(result["config"]["num_layers"], 16)
+            self.assertEqual(result["config"]["hidden_size"], 2048)
+            self.assertEqual(result["weight_file_count"], 1)
+
+    def test_llama_style_sprint_11_models_accept_matching_local_snapshots(self) -> None:
+        cases = [
+            ("TinyLlama/TinyLlama-1.1B-Chat-v1.0", 22, 2048),
+            ("meta-llama/Llama-2-7b-chat-hf", 32, 4096),
+            ("meta-llama/Llama-2-13b-chat-hf", 40, 5120),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            for model_name, num_layers, hidden_size in cases:
+                with self.subTest(model_name=model_name):
+                    model_dir = Path(tmp) / model_name.replace("/", "__")
+                    write_local_model_fixture(
+                        model_dir,
+                        num_layers=num_layers,
+                        hidden_size=hidden_size,
+                    )
+
+                    result = validate_local_model_directory(model_name, str(model_dir))
+
+                    self.assertTrue(result["valid"])
+                    self.assertEqual(result["config"]["model_type"], "llama")
+                    self.assertEqual(result["config"]["num_layers"], num_layers)
+                    self.assertEqual(result["config"]["hidden_size"], hidden_size)
+
+    def test_local_model_validation_rejects_wrong_model_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "wrong"
+            write_local_model_fixture(model_dir, num_layers=28)
+
+            with self.assertRaisesRegex(LocalModelValidationError, "16 layers"):
+                validate_local_model_directory("meta-llama/Llama-3.2-1B", str(model_dir))
+
+    def test_local_model_validation_rejects_missing_tokenizer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "no-tokenizer"
+            write_local_model_fixture(model_dir, tokenizer=False)
+
+            with self.assertRaisesRegex(LocalModelValidationError, "tokenizer"):
+                validate_local_model_directory("meta-llama/Llama-3.2-1B", str(model_dir))
+
+    def test_local_model_validation_rejects_incomplete_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "incomplete"
+            write_local_model_fixture(model_dir, sharded=True, missing_shard=True)
+
+            with self.assertRaisesRegex(LocalModelValidationError, "missing shard"):
+                validate_local_model_directory("meta-llama/Llama-3.2-1B", str(model_dir))
+
+    def test_local_model_validation_rejects_huggingface_url_as_path(self) -> None:
+        for path in (
+            "https://huggingface.co/meta-llama/Llama-3.2-1B",
+            "http://huggingface.co/meta-llama/Llama-3.2-1B",
+            "huggingface.co/meta-llama/Llama-3.2-1B",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(LocalModelValidationError, "not a Hugging Face URL"):
+                    validate_local_model_directory("meta-llama/Llama-3.2-1B", path)
+
+    def test_local_model_import_and_list_omit_raw_path(self) -> None:
+        from api import local_models
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "registry.json"
+            model_dir = Path(tmp) / "llama"
+            write_local_model_fixture(model_dir)
+            original_registry = local_models._REGISTRY_FILE
+            local_models._REGISTRY_FILE = registry_path
+            try:
+                imported = import_local_model("meta-llama/Llama-3.2-1B", str(model_dir))
+                listed = list_local_models()
+            finally:
+                local_models._REGISTRY_FILE = original_registry
+
+        self.assertNotIn("path", imported)
+        self.assertNotIn("path", listed[0])
+
+    def test_remove_local_model_can_delete_managed_huggingface_snapshot(self) -> None:
+        from api import local_models
+
+        class FakeRevision:
+            commit_hash = "abc123"
+            snapshot_path = None
+
+        class FakeRepo:
+            repo_type = "model"
+            repo_id = "meta-llama/Llama-3.2-1B"
+
+            def __init__(self, snapshot_path: Path) -> None:
+                revision = FakeRevision()
+                revision.snapshot_path = snapshot_path
+                self.revisions = {revision}
+
+        class FakeStrategy:
+            expected_freed_size = 1234
+            expected_freed_size_str = "1.2 KB"
+
+            def execute(self) -> None:
+                deleted.append("executed")
+
+        class FakeCacheInfo:
+            def __init__(self, snapshot_path: Path) -> None:
+                self.repos = {FakeRepo(snapshot_path)}
+
+            def delete_revisions(self, commit_hash: str) -> FakeStrategy:
+                deleted.append(commit_hash)
+                return FakeStrategy()
+
+        deleted: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "registry.json"
+            model_dir = Path(tmp) / "llama"
+            write_local_model_fixture(model_dir)
+            original_registry = local_models._REGISTRY_FILE
+            original_scan_cache_dir = local_models.scan_cache_dir
+            local_models._REGISTRY_FILE = registry_path
+            local_models.scan_cache_dir = lambda: FakeCacheInfo(model_dir.resolve())
+            try:
+                import_local_model("meta-llama/Llama-3.2-1B", str(model_dir))
+                result = remove_local_model("meta-llama/Llama-3.2-1B", delete_files=True)
+                listed = list_local_models()
+            finally:
+                local_models._REGISTRY_FILE = original_registry
+                local_models.scan_cache_dir = original_scan_cache_dir
+
+        self.assertTrue(result["removed"])
+        self.assertTrue(result["files_deleted"])
+        self.assertEqual(result["deleted_bytes"], 1234)
+        self.assertEqual(deleted, ["abc123", "executed"])
+        self.assertEqual(listed, [])
+
+    def test_remove_local_model_does_not_delete_arbitrary_manual_folder(self) -> None:
+        from api import local_models
+
+        class FakeCacheInfo:
+            repos = set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "registry.json"
+            model_dir = Path(tmp) / "llama"
+            write_local_model_fixture(model_dir)
+            original_registry = local_models._REGISTRY_FILE
+            original_scan_cache_dir = local_models.scan_cache_dir
+            local_models._REGISTRY_FILE = registry_path
+            local_models.scan_cache_dir = lambda: FakeCacheInfo()
+            try:
+                import_local_model("meta-llama/Llama-3.2-1B", str(model_dir))
+                result = remove_local_model("meta-llama/Llama-3.2-1B", delete_files=True)
+            finally:
+                local_models._REGISTRY_FILE = original_registry
+                local_models.scan_cache_dir = original_scan_cache_dir
+
+            self.assertTrue((model_dir / "config.json").exists())
+
+        self.assertTrue(result["removed"])
+        self.assertFalse(result["files_deleted"])
+        self.assertIn("not a managed Hugging Face cache snapshot", result["message"])
+
+    def test_local_model_inspect_omits_raw_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "llama"
+            write_local_model_fixture(model_dir)
+
+            inspected = inspect_local_model("meta-llama/Llama-3.2-1B", str(model_dir))
+
+        self.assertTrue(inspected["valid"])
+        self.assertNotIn("path", inspected)
+        self.assertEqual(inspected["message"], "Local model directory is valid for offline loading.")
+
+    def test_local_model_settings_endpoints_do_not_leak_path_by_default(self) -> None:
+        from api import local_models
+        from api import server as api_server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "registry.json"
+            model_dir = Path(tmp) / "llama"
+            write_local_model_fixture(model_dir)
+            original_registry = local_models._REGISTRY_FILE
+            local_models._REGISTRY_FILE = registry_path
+            try:
+                inspected = asyncio.run(
+                    api_server.inspect_local_model_directory(
+                        api_server.LocalModelRequest(
+                            model_name="meta-llama/Llama-3.2-1B",
+                            path=str(model_dir),
+                        )
+                    )
+                )
+                imported = asyncio.run(
+                    api_server.add_local_model(
+                        api_server.LocalModelRequest(
+                            model_name="meta-llama/Llama-3.2-1B",
+                            path=str(model_dir),
+                        )
+                    )
+                )
+                listed = asyncio.run(api_server.get_local_models())
+                specific = asyncio.run(api_server.get_local_model("meta-llama/Llama-3.2-1B"))
+            finally:
+                local_models._REGISTRY_FILE = original_registry
+
+        self.assertNotIn("path", inspected)
+        self.assertNotIn("path", imported["model"])
+        self.assertNotIn("path", listed["models"][0])
+        self.assertEqual(specific["model"]["path"], str(model_dir.resolve()))
+
+    def test_registered_local_model_path_is_revalidated_before_use(self) -> None:
+        from api import local_models
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "registry.json"
+            model_dir = Path(tmp) / "llama"
+            write_local_model_fixture(model_dir)
+            original_registry = local_models._REGISTRY_FILE
+            local_models._REGISTRY_FILE = registry_path
+            try:
+                import_local_model("meta-llama/Llama-3.2-1B", str(model_dir))
+                self.assertEqual(
+                    get_local_model_path("meta-llama/Llama-3.2-1B"),
+                    str(model_dir.resolve()),
+                )
+                (model_dir / "tokenizer.json").unlink()
+                with self.assertRaisesRegex(LocalModelValidationError, "tokenizer"):
+                    validate_registered_local_model("meta-llama/Llama-3.2-1B")
+                with self.assertRaisesRegex(LocalModelValidationError, "tokenizer"):
+                    get_local_model_path("meta-llama/Llama-3.2-1B")
+            finally:
+                local_models._REGISTRY_FILE = original_registry
+
+    def test_gated_node_start_uses_imported_local_path_without_token(self) -> None:
+        from api import server as api_server
+
+        captured: dict[str, object] = {}
+
+        class FakeNode:
+            def __init__(self, **kwargs) -> None:
+                captured.update(kwargs)
+                self.node_id = "fake-node"
+                self.dht_prefix = kwargs["dht_prefix"]
+                self.model_name = kwargs["model_name"]
+                self.layer_start = kwargs["layer_start"]
+                self.layer_end = kwargs["layer_end"]
+
+            def start(self) -> None:
+                captured["started"] = True
+
+            def is_running(self) -> bool:
+                return True
+
+            def get_info(self) -> dict:
+                return {
+                    "node_id": self.node_id,
+                    "peer_id": "peer",
+                    "model_name": self.model_name,
+                    "layer_start": self.layer_start,
+                    "layer_end": self.layer_end,
+                    "device": "cpu",
+                    "running": True,
+                    "maddrs": [],
+                    "layers_loaded": True,
+                    "rpc_running": True,
+                }
+
+        original_node_cls = api_server.Node
+        original_get_path = api_server.get_local_model_path
+        original_get_token = api_server.get_hf_token
+        original_local_nodes = dict(api_server.local_nodes)
+        original_node = api_server.node
+        api_server.Node = FakeNode
+        api_server.get_local_model_path = lambda model_name: "/local/llama"
+        api_server.get_hf_token = lambda: "hf_should_not_be_used"
+        api_server.local_nodes.clear()
+        api_server.node = None
+        try:
+            result = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="meta-llama/Llama-3.2-1B",
+                        layer_start=0,
+                        layer_end=1,
+                        device="cpu",
+                    )
+                )
+            )
+        finally:
+            api_server.Node = original_node_cls
+            api_server.get_local_model_path = original_get_path
+            api_server.get_hf_token = original_get_token
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+            api_server.node = original_node
+
+        self.assertEqual(result["status"], "started")
+        self.assertEqual(captured["local_model_path"], "/local/llama")
+        self.assertIsNone(captured["hf_token"])
+
+    def test_gated_node_start_reports_invalid_registered_local_import(self) -> None:
+        from api import server as api_server
+
+        original_get_path = api_server.get_local_model_path
+        api_server.get_local_model_path = lambda model_name: (_ for _ in ()).throw(
+            LocalModelValidationError(
+                "missing_tokenizer_files",
+                "Local model directory must include tokenizer.json.",
+            )
+        )
+        try:
+            result = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="meta-llama/Llama-3.2-1B",
+                        layer_start=0,
+                        layer_end=1,
+                        device="cpu",
+                    )
+                )
+            )
+        finally:
+            api_server.get_local_model_path = original_get_path
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "local_model_import_invalid")
+        self.assertEqual(result["validation"]["error"], "missing_tokenizer_files")
+
+    def test_gated_generator_start_uses_imported_local_path_without_token(self) -> None:
+        from api import server as api_server
+
+        captured: dict[str, object] = {}
+
+        class FakeDHT:
+            peer_id = "fake-client-peer"
+
+            def __init__(self, *args, **kwargs) -> None:
+                captured["dht_kwargs"] = kwargs
+
+            def shutdown(self) -> None:
+                captured["dht_shutdown"] = True
+
+        class FakeSequential:
+            def __init__(self, **kwargs) -> None:
+                captured["sequential_kwargs"] = kwargs
+
+        class FakeGenerator:
+            def __init__(self, **kwargs) -> None:
+                captured.update(kwargs)
+                self.loaded = False
+                self.model_name = kwargs["model_name"]
+                self.sequential = kwargs["sequential"]
+
+            def load(self) -> None:
+                self.loaded = True
+
+            def is_loaded(self) -> bool:
+                return self.loaded
+
+        original_generator_cls = api_server.DistributedGenerator
+        original_dht_cls = api_server.hivemind.DHT
+        original_sequential_cls = api_server.RemoteSequential
+        original_get_path = api_server.get_local_model_path
+        original_get_token = api_server.get_hf_token
+        original_generator = api_server.generator
+        original_client_dht = api_server.client_dht
+        api_server.DistributedGenerator = FakeGenerator
+        api_server.hivemind.DHT = FakeDHT
+        api_server.RemoteSequential = FakeSequential
+        api_server.get_local_model_path = lambda model_name: "/local/llama"
+        api_server.get_hf_token = lambda: "hf_should_not_be_used"
+        api_server.generator = None
+        api_server.client_dht = None
+        try:
+            result = asyncio.run(
+                api_server.start_generator(
+                    api_server.GeneratorStartRequest(
+                        model_name="meta-llama/Llama-3.2-1B",
+                    )
+                )
+            )
+        finally:
+            api_server.DistributedGenerator = original_generator_cls
+            api_server.hivemind.DHT = original_dht_cls
+            api_server.RemoteSequential = original_sequential_cls
+            api_server.get_local_model_path = original_get_path
+            api_server.get_hf_token = original_get_token
+            api_server.generator = original_generator
+            if api_server.client_dht is not None and api_server.client_dht is not original_client_dht:
+                api_server.client_dht = None
+            api_server.client_dht = original_client_dht
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(captured["local_model_path"], "/local/llama")
+        self.assertIsNone(captured["hf_token"])
+
+    def test_gated_generator_start_reports_invalid_registered_local_import(self) -> None:
+        from api import server as api_server
+
+        original_get_path = api_server.get_local_model_path
+        original_generator = api_server.generator
+        original_client_dht = api_server.client_dht
+        api_server.generator = None
+        api_server.client_dht = None
+        api_server.get_local_model_path = lambda model_name: (_ for _ in ()).throw(
+            LocalModelValidationError(
+                "path_not_found",
+                "Local model path does not exist: /missing/model",
+            )
+        )
+        try:
+            result = asyncio.run(
+                api_server.start_generator(
+                    api_server.GeneratorStartRequest(
+                        model_name="meta-llama/Llama-3.2-1B",
+                    )
+                )
+            )
+        finally:
+            api_server.get_local_model_path = original_get_path
+            api_server.generator = original_generator
+            api_server.client_dht = original_client_dht
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "local_model_import_invalid")
+        self.assertEqual(result["validation"]["error"], "path_not_found")
+        self.assertIsNone(api_server.client_dht)
+
+
+class HuggingFaceOAuthTests(unittest.TestCase):
+    def setUp(self) -> None:
+        hf_oauth._device_flows.clear()
+        hf_oauth._download_jobs.clear()
+
+    def tearDown(self) -> None:
+        hf_oauth._device_flows.clear()
+        hf_oauth._download_jobs.clear()
+
+    def test_device_flow_start_returns_user_code_without_device_code(self) -> None:
+        original_client_id = hf_oauth._oauth_client_id
+        original_post_form = hf_oauth._post_form
+        calls: list[tuple[str, dict[str, str]]] = []
+
+        def fake_post_form(url: str, data: dict[str, str]) -> dict:
+            calls.append((url, data))
+            return {
+                "device_code": "device-secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri": "https://huggingface.co/oauth/device",
+                "verification_uri_complete": "https://huggingface.co/oauth/device?user_code=ABCD-EFGH",
+                "expires_in": 600,
+                "interval": 5,
+            }
+
+        hf_oauth._oauth_client_id = lambda: "client-id"
+        hf_oauth._post_form = fake_post_form
+        try:
+            result = hf_oauth.start_huggingface_device_flow()
+        finally:
+            hf_oauth._oauth_client_id = original_client_id
+            hf_oauth._post_form = original_post_form
+
+        self.assertEqual(result["user_code"], "ABCD-EFGH")
+        self.assertEqual(result["verification_uri"], "https://huggingface.co/oauth/device")
+        self.assertIn("flow_id", result)
+        self.assertNotIn("device_code", result)
+        self.assertEqual(calls[0][1]["scope"], hf_oauth.HF_OAUTH_SCOPE)
+
+    def test_device_flow_poll_saves_token_without_returning_it(self) -> None:
+        original_post_form = hf_oauth._post_form
+        original_save_token = hf_oauth.save_hf_token
+        original_public_connection = hf_oauth._public_connection
+        saved_tokens: list[str] = []
+
+        flow = hf_oauth.DeviceFlow(
+            flow_id="flow-1",
+            device_code="device-secret",
+            user_code="ABCD-EFGH",
+            verification_uri="https://huggingface.co/oauth/device",
+            verification_uri_complete=None,
+            expires_at=time.time() + 300,
+            interval=5,
+            client_id="client-id",
+            scope=hf_oauth.HF_OAUTH_SCOPE,
+        )
+        hf_oauth._device_flows[flow.flow_id] = flow
+
+        def fake_post_form(url: str, data: dict[str, str]) -> dict:
+            return {"access_token": "hf_oauth_secret", "token_type": "bearer"}
+
+        hf_oauth._post_form = fake_post_form
+        hf_oauth.save_hf_token = saved_tokens.append
+        hf_oauth._public_connection = lambda token: {
+            "configured": True,
+            "connected": True,
+            "username": "tester",
+            "token_preview": f"{token[:8]}...",
+            "scope": hf_oauth.HF_OAUTH_SCOPE,
+            "client_id_set": True,
+        }
+        try:
+            result = hf_oauth.poll_huggingface_device_flow("flow-1")
+        finally:
+            hf_oauth._post_form = original_post_form
+            hf_oauth.save_hf_token = original_save_token
+            hf_oauth._public_connection = original_public_connection
+
+        self.assertEqual(result["status"], "connected")
+        self.assertEqual(saved_tokens, ["hf_oauth_secret"])
+        self.assertNotIn("hf_oauth_secret", json.dumps(result))
+        self.assertNotIn("flow-1", hf_oauth._device_flows)
+
+    def test_huggingface_download_uses_saved_token_then_imports_snapshot(self) -> None:
+        original_get_token = hf_oauth.get_hf_token
+        original_snapshot_download = hf_oauth.snapshot_download
+        original_import_local_model = hf_oauth.import_local_model
+        calls: list[tuple[str, str | None, str | None]] = []
+
+        def fake_snapshot_download(
+            *,
+            repo_id: str,
+            revision: str | None,
+            token: str | None,
+            repo_type: str,
+        ) -> str:
+            self.assertEqual(repo_type, "model")
+            calls.append((repo_id, revision, token))
+            return "/tmp/hf-snapshot"
+
+        hf_oauth.get_hf_token = lambda: "hf_oauth_secret"
+        hf_oauth.snapshot_download = fake_snapshot_download
+        hf_oauth.import_local_model = lambda model_name, path: {
+            "model_name": model_name,
+            "valid": True,
+            "gated": True,
+            "weight_file_count": 1,
+            "sharded": False,
+        }
+        try:
+            result = hf_oauth.download_huggingface_model("meta-llama/Llama-3.2-1B")
+        finally:
+            hf_oauth.get_hf_token = original_get_token
+            hf_oauth.snapshot_download = original_snapshot_download
+            hf_oauth.import_local_model = original_import_local_model
+
+        self.assertEqual(result["status"], "downloaded")
+        self.assertEqual(calls, [("meta-llama/Llama-3.2-1B", None, "hf_oauth_secret")])
+        self.assertNotIn("hf_oauth_secret", json.dumps(result))
+
+    def test_huggingface_download_requires_connection_for_gated_model(self) -> None:
+        original_get_token = hf_oauth.get_hf_token
+        hf_oauth.get_hf_token = lambda: None
+        try:
+            with self.assertRaises(hf_oauth.HuggingFaceOAuthError) as raised:
+                hf_oauth.download_huggingface_model("meta-llama/Llama-3.2-1B")
+        finally:
+            hf_oauth.get_hf_token = original_get_token
+
+        self.assertEqual(raised.exception.code, "hf_not_connected")
+        self.assertEqual(raised.exception.status_code, 401)
+
+    def test_huggingface_download_maps_gated_access_denied(self) -> None:
+        original_get_token = hf_oauth.get_hf_token
+        original_snapshot_download = hf_oauth.snapshot_download
+
+        class DummyResponse:
+            status_code = 403
+            headers: dict[str, str] = {}
+            request = None
+
+        def fake_snapshot_download(**kwargs) -> str:
+            raise hf_oauth.GatedRepoError("not approved", response=DummyResponse())
+
+        hf_oauth.get_hf_token = lambda: "hf_oauth_secret"
+        hf_oauth.snapshot_download = fake_snapshot_download
+        try:
+            with self.assertRaises(hf_oauth.HuggingFaceOAuthError) as raised:
+                hf_oauth.download_huggingface_model("meta-llama/Llama-3.2-1B")
+        finally:
+            hf_oauth.get_hf_token = original_get_token
+            hf_oauth.snapshot_download = original_snapshot_download
+
+        self.assertEqual(raised.exception.code, "gated_model_access_denied")
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertNotIn("hf_oauth_secret", raised.exception.message)
+
+    def test_disconnect_deletes_token_and_clears_device_flows(self) -> None:
+        original_delete_token = hf_oauth.delete_hf_token
+        deleted: list[bool] = []
+        hf_oauth._device_flows["flow-1"] = hf_oauth.DeviceFlow(
+            flow_id="flow-1",
+            device_code="device-secret",
+            user_code="ABCD-EFGH",
+            verification_uri="https://huggingface.co/oauth/device",
+            verification_uri_complete=None,
+            expires_at=time.time() + 300,
+            interval=5,
+            client_id="client-id",
+            scope=hf_oauth.HF_OAUTH_SCOPE,
+        )
+        hf_oauth.delete_hf_token = lambda: deleted.append(True)
+        try:
+            result = hf_oauth.disconnect_huggingface()
+        finally:
+            hf_oauth.delete_hf_token = original_delete_token
+
+        self.assertEqual(result["status"], "disconnected")
+        self.assertEqual(deleted, [True])
+        self.assertEqual(hf_oauth._device_flows, {})
+
+    def test_download_job_reports_status_without_token_leak(self) -> None:
+        original_get_token = hf_oauth.get_hf_token
+        original_download = hf_oauth.download_huggingface_model
+
+        hf_oauth.get_hf_token = lambda: "hf_oauth_secret"
+        hf_oauth.download_huggingface_model = lambda model_name, revision=None: {
+            "status": "downloaded",
+            "model": {
+                "model_name": model_name,
+                "valid": True,
+                "gated": True,
+                "weight_file_count": 1,
+                "sharded": False,
+            },
+            "message": f"Downloaded and imported {model_name}.",
+        }
+        try:
+            started = hf_oauth.start_huggingface_model_download(
+                "meta-llama/Llama-3.2-1B"
+            )
+            job_id = started["job"]["job_id"]
+            deadline = time.time() + 2
+            status = hf_oauth.get_huggingface_download_job(job_id)
+            while status["job"]["status"] not in {"completed", "failed"} and time.time() < deadline:
+                time.sleep(0.01)
+                status = hf_oauth.get_huggingface_download_job(job_id)
+        finally:
+            hf_oauth.get_hf_token = original_get_token
+            hf_oauth.download_huggingface_model = original_download
+
+        self.assertEqual(status["job"]["status"], "completed")
+        self.assertEqual(status["job"]["model"]["model_name"], "meta-llama/Llama-3.2-1B")
+        self.assertNotIn("hf_oauth_secret", json.dumps(status))
+
+    def test_cancel_download_job_sets_cancel_request(self) -> None:
+        job_id = "job-1"
+        now = "2026-07-10T00:00:00+00:00"
+        hf_oauth._download_jobs[job_id] = {
+            "job_id": job_id,
+            "model_name": "meta-llama/Llama-3.2-1B",
+            "revision": None,
+            "status": "downloading",
+            "message": "Downloading from Hugging Face.",
+            "error": None,
+            "cancel_requested": False,
+            "created_at": now,
+            "updated_at": now,
+            "completed_at": None,
+            "model": None,
+        }
+
+        result = hf_oauth.cancel_huggingface_download_job(job_id)
+
+        self.assertTrue(result["job"]["cancel_requested"])
+        self.assertEqual(result["job"]["status"], "downloading")
+
+    def test_token_storage_uses_config_path_or_env_override(self) -> None:
+        original_env = hf_settings.os.environ.get(hf_settings._TOKEN_FILE_ENV)
+        with tempfile.TemporaryDirectory() as tmp:
+            token_path = Path(tmp) / "secure" / "hf_token"
+            hf_settings.os.environ[hf_settings._TOKEN_FILE_ENV] = str(token_path)
+            try:
+                hf_settings.save_hf_token("hf_oauth_secret")
+                self.assertEqual(hf_settings.get_hf_token(), "hf_oauth_secret")
+                self.assertEqual(token_path.read_text(encoding="utf-8"), "hf_oauth_secret")
+                hf_settings.delete_hf_token()
+                self.assertFalse(token_path.exists())
+            finally:
+                if original_env is None:
+                    hf_settings.os.environ.pop(hf_settings._TOKEN_FILE_ENV, None)
+                else:
+                    hf_settings.os.environ[hf_settings._TOKEN_FILE_ENV] = original_env
 
 
 class RemoteSequentialRouteTests(unittest.TestCase):
@@ -1333,6 +2091,56 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(opt["missing_layers"], list(range(12)))
         self.assertEqual(opt["route_reasons"], ["No DHT connection yet."])
 
+    def test_supported_models_include_sprint_11_tuning_metadata(self) -> None:
+        expected = {
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0": ("chat", False, 22, 2048),
+            "meta-llama/Llama-2-7b-hf": ("base", True, 32, 4096),
+            "meta-llama/Llama-2-7b-chat-hf": ("chat", True, 32, 4096),
+            "meta-llama/Llama-2-13b-chat-hf": ("chat", True, 40, 5120),
+        }
+
+        for model_id, (tuning, gated, num_layers, hidden_size) in expected.items():
+            with self.subTest(model_id=model_id):
+                metadata = SUPPORTED_MODELS[model_id]
+                self.assertEqual(metadata["tuning"], tuning)
+                self.assertEqual(metadata["gated"], gated)
+                self.assertEqual(metadata["num_layers"], num_layers)
+                self.assertEqual(metadata["hidden_size"], hidden_size)
+
+        for model_id, metadata in SUPPORTED_MODELS.items():
+            with self.subTest(model_id=model_id):
+                self.assertIn(metadata["tuning"], {"base", "chat", "instruct"})
+                self.assertGreater(metadata["num_layers"], 0)
+                self.assertGreater(metadata["hidden_size"], 0)
+
+    def test_models_endpoint_exposes_tuning_label(self) -> None:
+        from api import server as api_server
+
+        original_node = api_server.node
+        original_client_dht = api_server.client_dht
+        api_server.node = None
+        api_server.client_dht = None
+        try:
+            result = asyncio.run(api_server.get_models())
+        finally:
+            api_server.node = original_node
+            api_server.client_dht = original_client_dht
+
+        tiny_llama = next(
+            model
+            for model in result["models"]
+            if model["id"] == "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        )
+        llama2_chat = next(
+            model
+            for model in result["models"]
+            if model["id"] == "meta-llama/Llama-2-7b-chat-hf"
+        )
+        self.assertEqual(tiny_llama["tuning"], "chat")
+        self.assertFalse(tiny_llama["gated"])
+        self.assertEqual(llama2_chat["tuning"], "chat")
+        self.assertTrue(llama2_chat["gated"])
+
     def test_models_report_runnable_for_complete_compatible_route(self) -> None:
         from api import server as api_server
 
@@ -1460,7 +2268,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         )
         self.assertNotIn("hf_valid_token", json.dumps(result))
 
-    def test_start_node_validates_gated_model_before_loading(self) -> None:
+    def test_start_node_requires_local_import_for_gated_model_before_loading(self) -> None:
         from api import server as api_server
 
         created: list[object] = []
@@ -1469,27 +2277,16 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             def __init__(self, *args, **kwargs) -> None:
                 created.append(self)
 
-        async def deny_access(model_name: str, token: str | None = None) -> dict:
-            return {
-                "valid": False,
-                "model_name": model_name,
-                "gated": True,
-                "token_required": True,
-                "access_granted": False,
-                "error": "gated_model_access_denied",
-                "message": "license not accepted",
-            }
-
         original_node = api_server.node
         original_local_nodes = dict(api_server.local_nodes)
         original_node_class = api_server.Node
         original_get_hf_token = api_server.get_hf_token
-        original_validate = api_server._validate_hf_model_access_async
+        original_get_local_model_path = api_server.get_local_model_path
         api_server.node = None
         api_server.local_nodes.clear()
         api_server.Node = DummyNode
         api_server.get_hf_token = lambda: "hf_denied"
-        api_server._validate_hf_model_access_async = deny_access
+        api_server.get_local_model_path = lambda model_name: None
         try:
             result = asyncio.run(
                 api_server.start_node(
@@ -1506,38 +2303,27 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         finally:
             api_server.Node = original_node_class
             api_server.get_hf_token = original_get_hf_token
-            api_server._validate_hf_model_access_async = original_validate
+            api_server.get_local_model_path = original_get_local_model_path
             api_server.local_nodes.clear()
             api_server.local_nodes.update(original_local_nodes)
             api_server.node = original_node
 
         self.assertEqual(result["status"], "error")
-        self.assertEqual(result["error"], "gated_model_access_denied")
-        self.assertEqual(result["message"], "license not accepted")
+        self.assertEqual(result["error"], "local_model_import_required")
+        self.assertIn("import the local model directory", result["message"])
         self.assertEqual(created, [])
 
-    def test_start_generator_validates_gated_model_before_loading(self) -> None:
+    def test_start_generator_requires_local_import_for_gated_model_before_loading(self) -> None:
         from api import server as api_server
-
-        async def deny_access(model_name: str, token: str | None = None) -> dict:
-            return {
-                "valid": False,
-                "model_name": model_name,
-                "gated": True,
-                "token_required": True,
-                "access_granted": False,
-                "error": "hf_token_invalid_or_unauthorized",
-                "message": "token rejected",
-            }
 
         original_generator = api_server.generator
         original_client_dht = api_server.client_dht
         original_get_hf_token = api_server.get_hf_token
-        original_validate = api_server._validate_hf_model_access_async
+        original_get_local_model_path = api_server.get_local_model_path
         api_server.generator = None
         api_server.client_dht = None
         api_server.get_hf_token = lambda: "hf_bad"
-        api_server._validate_hf_model_access_async = deny_access
+        api_server.get_local_model_path = lambda model_name: None
         try:
             result = asyncio.run(
                 api_server.start_generator(
@@ -1552,11 +2338,105 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             api_server.generator = original_generator
             api_server.client_dht = original_client_dht
             api_server.get_hf_token = original_get_hf_token
-            api_server._validate_hf_model_access_async = original_validate
+            api_server.get_local_model_path = original_get_local_model_path
 
         self.assertEqual(result["status"], "error")
-        self.assertEqual(result["error"], "hf_token_invalid_or_unauthorized")
-        self.assertEqual(result["message"], "token rejected")
+        self.assertEqual(result["error"], "local_model_import_required")
+        self.assertIn("import the local model directory", result["message"])
+        self.assertIsNone(api_server.client_dht)
+
+    def test_start_node_maps_cuda_oom_to_actionable_error(self) -> None:
+        from api import server as api_server
+
+        class FailingNode:
+            def __init__(self, **kwargs) -> None:
+                self.model_name = kwargs["model_name"]
+                self.layer_start = kwargs["layer_start"]
+                self.layer_end = kwargs["layer_end"]
+
+            def start(self) -> None:
+                raise RuntimeError("CUDA error: out of memory cudaErrorMemoryAllocation")
+
+        original_node_class = api_server.Node
+        original_local_nodes = dict(api_server.local_nodes)
+        api_server.Node = FailingNode
+        api_server.local_nodes.clear()
+        try:
+            result = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                        layer_start=0,
+                        layer_end=4,
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                        device="cuda",
+                    )
+                )
+            )
+        finally:
+            api_server.Node = original_node_class
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "cuda_out_of_memory")
+        self.assertIn("Reduce the served layer range", result["message"])
+        self.assertIn("layers 0-4", result["message"])
+
+    def test_start_generator_maps_cuda_oom_to_actionable_error(self) -> None:
+        from api import server as api_server
+
+        class FakeDHT:
+            peer_id = "fake-client-peer"
+
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def shutdown(self) -> None:
+                pass
+
+        class FakeSequential:
+            def __init__(self, **kwargs) -> None:
+                pass
+
+        class FailingGenerator:
+            def __init__(self, **kwargs) -> None:
+                self.model_name = kwargs["model_name"]
+
+            def load(self) -> None:
+                raise RuntimeError("CUDA error: out of memory")
+
+        original_generator_cls = api_server.DistributedGenerator
+        original_dht_cls = api_server.hivemind.DHT
+        original_sequential_cls = api_server.RemoteSequential
+        original_generator = api_server.generator
+        original_client_dht = api_server.client_dht
+        api_server.DistributedGenerator = FailingGenerator
+        api_server.hivemind.DHT = FakeDHT
+        api_server.RemoteSequential = FakeSequential
+        api_server.generator = None
+        api_server.client_dht = None
+        try:
+            result = asyncio.run(
+                api_server.start_generator(
+                    api_server.GeneratorStartRequest(
+                        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                    )
+                )
+            )
+        finally:
+            api_server.DistributedGenerator = original_generator_cls
+            api_server.hivemind.DHT = original_dht_cls
+            api_server.RemoteSequential = original_sequential_cls
+            api_server.generator = original_generator
+            api_server.client_dht = original_client_dht
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "cuda_out_of_memory")
+        self.assertIn("Reduce the served layer range", result["message"])
         self.assertIsNone(api_server.client_dht)
 
     def test_stop_generator_requests_cancellation(self) -> None:
@@ -1626,6 +2506,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 initial_peers: list[str],
                 device: str,
                 hf_token: str | None,
+                local_model_path: str | None = None,
             ) -> None:
                 self.node_id = f"node-{len(created) + 1}"
                 self.model_name = model_name
@@ -1635,6 +2516,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 self.initial_peers = initial_peers
                 self.device = device
                 self.hf_token = hf_token
+                self.local_model_path = local_model_path
                 self.dht = object()
                 self.running = False
                 created.append(self)

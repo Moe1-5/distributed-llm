@@ -27,7 +27,10 @@
 | Architectural decision history            | `docs/decisions.md`                       |
 | Sprint-log hook scripts                   | `scripts/sprint-log/`                     |
 | Backend API                               | `backend/api/server.py`                   |
+| Backend env loading                      | `backend/api/env_loader.py`              |
+| Backend Hugging Face OAuth/download       | `backend/api/hf_oauth.py`                 |
 | Backend settings/token storage            | `backend/api/settings.py`                 |
+| Backend local model import registry       | `backend/api/local_models.py`             |
 | Backend constants/model registry          | `backend/constants.py`                    |
 | Node serving lifecycle                    | `backend/node/node.py`                    |
 | Remote layer routing                      | `backend/client/sequential.py`            |
@@ -59,8 +62,9 @@
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | `tasks/active.md`                                            | Active sprint routing table.                                                         |
 | `tasks/lessons.md`                                           | Assistant lessons: active and internalized.                                          |
-| `tasks/sprints/sprint-10-gated-model-local-import.md`          | Active sprint plan for local gated-model import after external Hugging Face approval without token-first login flow. |
-| `tasks/sprints/sprint-11-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
+| `tasks/sprints/sprint-10-gated-model-local-import.md`          | Active sprint plan for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
+| `tasks/sprints/sprint-11-instruction-ready-model-expansion.md` | Active future sprint plan for adding instruction-ready/chat-ready supported models without fine-tuning a baseline model. |
+| `tasks/sprints/sprint-13-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
 | `tasks/archive/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Completed sprint for safe node lifecycle, duplicate/multi-model local serving, HuggingFace token validation, trace analysis, and shutdown hardening. |
 | `tasks/archive/sprint-01-stabilize-prototype.md`              | Completed sprint for stabilizing distributed inference.                              |
 | `tasks/archive/sprint-02-architecture-adapter-and-parity.md` | Completed sprint for architecture-aware distributed inference and parity validation. |
@@ -97,7 +101,7 @@
 | Path                     | What's inside                                                                        |
 | ------------------------ | ------------------------------------------------------------------------------------ |
 | `backend/main.py`        | Uvicorn entry point.                                                                 |
-| `backend/api/`           | FastAPI app and settings/token endpoints.                                            |
+| `backend/api/`           | FastAPI app, root `.env` loading, settings/token endpoints, Hugging Face OAuth/download helpers, and local model import registry. |
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
 | `backend/node/`          | Serving node, layer loading, Hivemind RPC, and GPU monitoring.                       |
 | `backend/models/`        | Model-specific adapter placeholders and architecture-specific preprocessing helpers. |

@@ -3,8 +3,7 @@
  * Application settings page.
  *
  * Currently manages:
- *   - HuggingFace token (hf_xxxx) for downloading gated models
- *     Token is saved to disk on the backend and persists across restarts.
+ *   - Optional HuggingFace token diagnostics/fallback settings.
  */
 
 import React, { useState, useEffect, useCallback } from 'react'
@@ -127,12 +126,12 @@ export default function Settings(): React.JSX.Element {
           <div className="flex items-start justify-between gap-4">
             <div>
               <h2 className="font-mono text-[13px] font-semibold text-text-primary">
-                HuggingFace Token
+                HuggingFace Token Diagnostics
               </h2>
               <p className="mt-1 text-[12px] leading-relaxed text-text-secondary">
-                Required to download gated models like Llama, Mistral, and Gemma. Generate your
-                token at <span className="font-mono text-cyan">huggingface.co/settings/tokens</span>{' '}
-                with <span className="font-mono text-cyan">read</span> scope.
+                Optional fallback for checking gated model access. The primary gated-model flow is
+                to connect Hugging Face from Network so DistribLLM can download approved models
+                locally without token paste.
               </p>
             </div>
 
@@ -224,7 +223,7 @@ export default function Settings(): React.JSX.Element {
               <div>
                 <p className="font-mono text-[11px] text-text-secondary">Remove stored token</p>
                 <p className="mt-0.5 font-mono text-[10px] text-text-dim">
-                  You will need to re-enter your token to download gated models
+                  Existing local imports keep working after this token is removed
                 </p>
               </div>
               <button
@@ -243,18 +242,18 @@ export default function Settings(): React.JSX.Element {
           )}
         </section>
 
-        {/* How to get a token */}
+        {/* Local gated model flow */}
         <section className="flex flex-col gap-3 rounded-xl border border-border bg-bg-elevated p-6">
           <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
-            How to get a HuggingFace token
+            Gated model local import
           </h2>
           <ol className="flex flex-col gap-2">
             {[
               'Create a free account at huggingface.co',
-              'Go to huggingface.co/settings/tokens',
-              "Click 'New token', select 'Read' scope",
-              'Copy the token (starts with hf_) and paste it above',
-              'For Llama models: also visit the model page and accept the license'
+              'Open the gated model page and accept the model license',
+              'Open Network and connect Hugging Face without pasting a token',
+              'Download and validate the approved model from Network',
+              'Start serving layers or the generator after the import validates'
             ].map((step, i) => (
               <li key={i} className="flex items-start gap-3">
                 <span className="flex-shrink-0 font-mono text-[10px] text-cyan mt-0.5">

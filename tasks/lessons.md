@@ -41,6 +41,11 @@
 
 <!-- Add new lessons here -->
 
+### [2026-07-10] Distinguish pasted tokens from OAuth-held tokens
+**Problem:** I planned Sprint 10 as manual local import only, but the user wanted a seamless Hugging Face login button where DistribLLM can download approved gated models without the user pasting a token.
+**Rule:** For gated model UX, distinguish "do not make the user paste a token or password" from "the app will never hold auth material"; if DistribLLM downloads gated files itself, plan for browser/device OAuth, least-privilege scopes, secure local storage, logout, and a no-auth local import fallback.
+**Why:** A seamless account connection can be both easier and safer than token paste, but it must still be honest about the scoped access token required for gated downloads.
+
 ### [2026-07-09] Audit completed checklist items for edge cases
 **Problem:** I marked Sprint 09 complete after tests passed, but a follow-up review found a real duplicate-replica edge case: after deleting the base replica, the next same-range replica could reuse an already-live RPC UID suffix.
 **Rule:** Before calling a sprint checklist complete, review the implementation for lifecycle edge cases such as deletion, restart, non-contiguous state, and stale registry entries, then add regression tests for any discovered gap.

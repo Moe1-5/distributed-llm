@@ -38,6 +38,7 @@ class Node:
         device:        str = "cuda",
         dtype:         torch.dtype = torch.float16,
         hf_token:      Optional[str] = None,
+        local_model_path: Optional[str] = None,
         node_id:       Optional[str] = None,
         rpc_uid_suffix: Optional[int] = None,
     ):
@@ -65,6 +66,7 @@ class Node:
         self.device        = device
         self.dtype         = dtype
         self.hf_token      = hf_token
+        self.local_model_path = local_model_path
         self.node_id       = node_id or uuid4().hex[:12]
         self.rpc_uid_suffix = rpc_uid_suffix
 
@@ -114,6 +116,7 @@ class Node:
                 device=self.device,
                 dtype=self.dtype,
                 hf_token=self.hf_token,
+                local_model_path=self.local_model_path,
             )
             self.handler.load()
         else:

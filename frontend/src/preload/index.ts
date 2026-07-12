@@ -1,8 +1,13 @@
-import { contextBridge } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 // Custom APIs for renderer
-const api = {}
+const api = {
+  selectLocalModelDirectory: (): Promise<string | null> =>
+    ipcRenderer.invoke('select-local-model-directory') as Promise<string | null>,
+  openExternalUrl: (url: string): Promise<boolean> =>
+    ipcRenderer.invoke('open-external-url', url) as Promise<boolean>
+}
 
 // Use `contextBridge` APIs to expose Electron APIs to
 // renderer only if context isolation is enabled, otherwise

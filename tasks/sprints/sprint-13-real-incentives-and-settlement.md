@@ -1,4 +1,4 @@
-# Sprint 11 - Real Incentives and Settlement
+# Sprint 13 - Real Incentives and Settlement
 
 **Goal:** Turn simulated contribution accounting into real incentive/reward behavior only after inference correctness, route health, anti-abuse checks, proof/receipt prerequisites, and gated-model local import reliability are ready.
 **Start:** TBD
@@ -12,7 +12,7 @@ Sprint 06 intentionally added simulated contribution accounting, not real token 
 
 Real incentives should wait until useful work can be measured reliably and abuse-resistant proof exists. Rewarding compute before route correctness, health checks, and receipt validation would risk paying for stale, failed, fake, or low-quality work.
 
-Sprint 10 is now reserved for the simpler gated-model local import flow. Incentives remain important, but they should not compete with model-access reliability.
+Sprint 10 is now reserved for the simpler gated-model local import flow, and Sprint 11 is reserved for adding better instruction-ready model options. Incentives remain important, but they should not compete with model-access reliability or model-quality work.
 
 ---
 
@@ -71,4 +71,10 @@ Sprint 10 is now reserved for the simpler gated-model local import flow. Incenti
 
 - What changed: moved the real incentives and settlement plan from Sprint 10 to Sprint 11.
 - Why: Sprint 10 now focuses on gated-model local import so model access is simple and reliable before incentives are revisited.
+- Status: planned for a later sprint; not started.
+
+### 2026-07-09 - Move incentives to Sprint 13
+
+- What changed: renumbered the real incentives and settlement plan from Sprint 11 to Sprint 13.
+- Why: the next future sprint slot is needed for model expansion before incentives, so rewards stay behind model access and model-quality work.
 - Status: planned for a later sprint; not started.

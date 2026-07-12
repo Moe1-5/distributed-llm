@@ -31,13 +31,36 @@ from huggingface_hub.errors import (
 from hivemind.utils.logging import get_logger
 from pydantic import BaseModel, field_validator
 
+from api.env_loader import load_project_env
 from node.gpu_monitor import GPUMonitor
 from node.node import Node
 from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, _run_with_timeout
 from client.sequential import RemoteSequential
 from client.generation import DistributedGenerator
+from api.local_models import (
+    LocalModelDeletionError,
+    LocalModelValidationError,
+    get_local_model_import,
+    get_local_model_path,
+    import_local_model,
+    inspect_local_model,
+    list_local_models,
+    remove_local_model,
+)
+from api.hf_oauth import (
+    HuggingFaceOAuthError,
+    cancel_huggingface_download_job,
+    disconnect_huggingface,
+    get_huggingface_connection,
+    get_huggingface_download_job,
+    poll_huggingface_device_flow,
+    start_huggingface_model_download,
+    start_huggingface_device_flow,
+)
 from api.settings import get_hf_token, save_hf_token, delete_hf_token, token_is_set
-from constants import SUPPORTED_MODELS, DISTRIBLLM_INITIAL_PEERS, DHT_PREFIX
+from constants import SUPPORTED_MODELS, DHT_PREFIX, get_initial_peers
+
+load_project_env()
 
 logger = get_logger(__name__)
 DEFAULT_TRACE_DIR = Path(__file__).resolve().parents[1] / "traces"
@@ -74,6 +97,33 @@ def _format_route_trace(route: list[dict]) -> list[str]:
         f"{item['peer_id'][:8]}… (layers {item['layer_start']}→{item['layer_end']})"
         for item in route
     ]
+
+
+def _is_cuda_out_of_memory(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "cuda" in message
+        and (
+            "out of memory" in message
+            or "cudaerrormemoryallocation" in message
+            or "cublas_status_alloc_failed" in message
+        )
+    )
+
+
+def _cuda_memory_error_response(model_name: str, *, layer_start: int | None = None, layer_end: int | None = None) -> dict:
+    layer_hint = ""
+    if layer_start is not None and layer_end is not None:
+        layer_hint = f" Current request was layers {layer_start}-{layer_end}."
+    return {
+        "status": "error",
+        "error": "cuda_out_of_memory",
+        "message": (
+            f"CUDA ran out of memory while loading {model_name}.{layer_hint} "
+            "Reduce the served layer range, stop/delete other local nodes or the generator, "
+            "switch this node to CPU, or try a smaller model."
+        ),
+    }
 
 
 def _safe_filename_part(value: str) -> str:
@@ -756,6 +806,64 @@ class TokenValidationRequest(BaseModel):
         return v
 
 
+class LocalModelRequest(BaseModel):
+    model_name: str
+    path: str
+
+    @field_validator("model_name")
+    @classmethod
+    def model_must_be_supported(cls, v: str) -> str:
+        v = v.strip()
+        if v not in SUPPORTED_MODELS:
+            raise ValueError(
+                f"Unsupported model '{v}'. Supported: {list(SUPPORTED_MODELS.keys())}"
+            )
+        return v
+
+    @field_validator("path")
+    @classmethod
+    def path_not_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("path must not be empty")
+        return v
+
+
+class HuggingFaceDevicePollRequest(BaseModel):
+    flow_id: str
+
+    @field_validator("flow_id")
+    @classmethod
+    def flow_id_not_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("flow_id must not be empty")
+        return v
+
+
+class HuggingFaceDownloadRequest(BaseModel):
+    model_name: str
+    revision: Optional[str] = None
+
+    @field_validator("model_name")
+    @classmethod
+    def model_must_be_supported(cls, v: str) -> str:
+        v = v.strip()
+        if v not in SUPPORTED_MODELS:
+            raise ValueError(
+                f"Unsupported model '{v}'. Supported: {list(SUPPORTED_MODELS.keys())}"
+            )
+        return v
+
+    @field_validator("revision")
+    @classmethod
+    def revision_not_empty(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
 # ---------------------------------------------------------------------------
 # Status & stats
 # ---------------------------------------------------------------------------
@@ -772,6 +880,7 @@ async def get_status() -> dict:
         "gpu_available":   torch.cuda.is_available(),
         "generator_ready": generator.is_loaded() if generator else False,
         "token_set":       token_is_set(),
+        "local_models":    list_local_models(),
     }
 
 
@@ -821,6 +930,11 @@ async def get_models() -> dict:
     frontend can show the HuggingFace redirect prompt.
     """
     token_available = token_is_set()
+    local_imports = {
+        record["model_name"]: record
+        for record in list_local_models()
+        if record.get("model_name")
+    }
     dht = _active_local_dht() or client_dht
     active_prefix = _active_dht_prefix()
     models = []
@@ -836,10 +950,13 @@ async def get_models() -> dict:
             "num_layers":   info["num_layers"],
             "hidden_size":  info["hidden_size"],
             "gated":        info["gated"],
+            "tuning":       info.get("tuning", "base"),
             "description":  info["description"],
             "vram_gb":      info["vram_gb"],
             # Can this model be used right now?
-            "available":    not info["gated"] or token_available,
+            "available":    not info["gated"] or model_id in local_imports,
+            "local_imported": model_id in local_imports,
+            "local_import": local_imports.get(model_id),
             "runnable":     route_status["runnable"],
             "route_ready":  route_status["route_ready"],
             "route_reasons": route_status["reasons"],
@@ -852,7 +969,7 @@ async def get_models() -> dict:
     return {
         "models":          models,
         "token_available": token_available,
-        "default_peers":   DISTRIBLLM_INITIAL_PEERS,
+        "default_peers":   get_initial_peers(),
     }
 
 
@@ -970,6 +1087,63 @@ async def get_settings() -> dict:
     return {
         "token_set":     token is not None,
         "token_preview": f"{token[:8]}..." if token else None,
+        "local_models":  list_local_models(),
+        "huggingface":   get_huggingface_connection(),
+    }
+
+
+@app.get("/settings/local-models")
+async def get_local_models() -> dict:
+    return {"models": list_local_models()}
+
+
+@app.post("/settings/local-models/inspect")
+async def inspect_local_model_directory(req: LocalModelRequest) -> dict:
+    try:
+        return inspect_local_model(req.model_name, req.path)
+    except LocalModelValidationError as e:
+        return {
+            "valid": False,
+            "model_name": req.model_name,
+            "error": e.code,
+            "message": e.message,
+        }
+
+
+@app.post("/settings/local-models")
+async def add_local_model(req: LocalModelRequest) -> dict:
+    try:
+        return {
+            "status": "imported",
+            "model": import_local_model(req.model_name, req.path),
+        }
+    except LocalModelValidationError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": e.code, "message": e.message},
+        )
+
+
+@app.get("/settings/local-models/{model_name:path}")
+async def get_local_model(model_name: str) -> dict:
+    record = get_local_model_import(model_name, include_path=True)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Local model import not found.")
+    return {"model": record}
+
+
+@app.delete("/settings/local-models/{model_name:path}")
+async def delete_local_model(model_name: str, delete_files: bool = False) -> dict:
+    try:
+        result = remove_local_model(model_name, delete_files=delete_files)
+    except LocalModelDeletionError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": e.code, "message": e.message},
+        )
+    return {
+        "status": "removed" if result["removed"] else "not_found",
+        **result,
     }
 
 
@@ -988,6 +1162,63 @@ async def set_token(req: TokenRequest) -> dict:
 async def remove_token() -> dict:
     delete_hf_token()
     return {"status": "deleted"}
+
+
+def _raise_hf_oauth_error(exc: HuggingFaceOAuthError) -> None:
+    raise HTTPException(
+        status_code=exc.status_code,
+        detail={"error": exc.code, "message": exc.message},
+    )
+
+
+@app.get("/settings/huggingface/connection")
+async def get_hf_connection() -> dict:
+    return get_huggingface_connection()
+
+
+@app.post("/settings/huggingface/oauth/device")
+async def start_hf_device_oauth() -> dict:
+    try:
+        return start_huggingface_device_flow()
+    except HuggingFaceOAuthError as exc:
+        _raise_hf_oauth_error(exc)
+
+
+@app.post("/settings/huggingface/oauth/device/poll")
+async def poll_hf_device_oauth(req: HuggingFaceDevicePollRequest) -> dict:
+    try:
+        return poll_huggingface_device_flow(req.flow_id)
+    except HuggingFaceOAuthError as exc:
+        _raise_hf_oauth_error(exc)
+
+
+@app.delete("/settings/huggingface/connection")
+async def disconnect_hf_connection() -> dict:
+    return disconnect_huggingface()
+
+
+@app.post("/settings/huggingface/download")
+async def download_hf_model(req: HuggingFaceDownloadRequest) -> dict:
+    try:
+        return start_huggingface_model_download(req.model_name, req.revision)
+    except HuggingFaceOAuthError as exc:
+        _raise_hf_oauth_error(exc)
+
+
+@app.get("/settings/huggingface/downloads/{job_id}")
+async def get_hf_download(job_id: str) -> dict:
+    try:
+        return get_huggingface_download_job(job_id)
+    except HuggingFaceOAuthError as exc:
+        _raise_hf_oauth_error(exc)
+
+
+@app.delete("/settings/huggingface/downloads/{job_id}")
+async def cancel_hf_download(job_id: str) -> dict:
+    try:
+        return cancel_huggingface_download_job(job_id)
+    except HuggingFaceOAuthError as exc:
+        _raise_hf_oauth_error(exc)
 
 
 def _validate_hf_model_access(model_name: str, token: Optional[str] = None) -> dict:
@@ -1145,19 +1376,33 @@ async def start_node(req: NodeStartRequest) -> dict:
         }
 
     model_info = SUPPORTED_MODELS[req.model_name]
+    try:
+        local_model_path = get_local_model_path(req.model_name)
+    except LocalModelValidationError as e:
+        return {
+            "status": "error",
+            "error": "local_model_import_invalid",
+            "message": e.message,
+            "validation": {
+                "valid": False,
+                "model_name": req.model_name,
+                "error": e.code,
+                "message": e.message,
+            },
+        }
     hf_token = get_hf_token()
-    if model_info["gated"]:
-        validation = await _validate_hf_model_access_async(req.model_name, hf_token)
-        if not validation["valid"]:
-            return {
-                "status": "error",
-                "error": validation.get("error", "hf_validation_failed"),
-                "message": validation["message"],
-                "validation": validation,
-            }
+    if model_info["gated"] and local_model_path is None:
+        return {
+            "status": "error",
+            "error": "local_model_import_required",
+            "message": (
+                f"{req.model_name} is gated. Download the approved model from Hugging Face "
+                "outside DistribLLM, then import the local model directory before starting."
+            ),
+        }
 
     # Use default peers if none provided
-    peers = req.initial_peers or DISTRIBLLM_INITIAL_PEERS
+    peers = req.initial_peers or get_initial_peers()
     rpc_uid_suffix = _next_rpc_uid_suffix(req)
 
     try:
@@ -1168,7 +1413,8 @@ async def start_node(req: NodeStartRequest) -> dict:
             dht_prefix=req.dht_prefix,
             initial_peers=peers,
             device=req.device,
-            hf_token=hf_token,
+            hf_token=None if local_model_path else hf_token,
+            local_model_path=local_model_path,
         )
         local_node.rpc_uid_suffix = rpc_uid_suffix
         loop = asyncio.get_running_loop()
@@ -1182,6 +1428,12 @@ async def start_node(req: NodeStartRequest) -> dict:
         return {"status": "error", "error": str(e)}
     except Exception as e:
         logger.error(f"Node start failed: {e}", exc_info=True)
+        if _is_cuda_out_of_memory(e):
+            return _cuda_memory_error_response(
+                req.model_name,
+                layer_start=req.layer_start,
+                layer_end=req.layer_end,
+            )
         return {"status": "error", "error": str(e)}
 
 
@@ -1201,6 +1453,12 @@ async def turn_on_node(node_id: Optional[str] = None) -> dict:
         return {"status": "turned_on", "info": local_node.get_info()}
     except Exception as e:
         logger.error(f"Node turn-on failed: {e}", exc_info=True)
+        if _is_cuda_out_of_memory(e):
+            return _cuda_memory_error_response(
+                local_node.model_name,
+                layer_start=local_node.layer_start,
+                layer_end=local_node.layer_end,
+            )
         return {"status": "error", "error": str(e)}
 
 
@@ -1261,18 +1519,32 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
     global generator, client_dht, client_dht_prefix
 
     model_info = SUPPORTED_MODELS[req.model_name]
+    try:
+        local_model_path = get_local_model_path(req.model_name)
+    except LocalModelValidationError as e:
+        return {
+            "status": "error",
+            "error": "local_model_import_invalid",
+            "message": e.message,
+            "validation": {
+                "valid": False,
+                "model_name": req.model_name,
+                "error": e.code,
+                "message": e.message,
+            },
+        }
     hf_token   = get_hf_token()
-    if model_info["gated"]:
-        validation = await _validate_hf_model_access_async(req.model_name, hf_token)
-        if not validation["valid"]:
-            return {
-                "status": "error",
-                "error": validation.get("error", "hf_validation_failed"),
-                "message": validation["message"],
-                "validation": validation,
-            }
+    if model_info["gated"] and local_model_path is None:
+        return {
+            "status": "error",
+            "error": "local_model_import_required",
+            "message": (
+                f"{req.model_name} is gated. Download the approved model from Hugging Face "
+                "outside DistribLLM, then import the local model directory before starting."
+            ),
+        }
 
-    peers = req.initial_peers or DISTRIBLLM_INITIAL_PEERS
+    peers = req.initial_peers or get_initial_peers()
 
     try:
         _shutdown_client_dht()
@@ -1296,7 +1568,8 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         generator = DistributedGenerator(
             model_name=req.model_name,
             sequential=sequential,
-            hf_token=hf_token,
+            hf_token=None if local_model_path else hf_token,
+            local_model_path=local_model_path,
             device="cuda"if torch.cuda.is_available() else "cpu",
             dtype= torch.float16 if torch.cuda.is_available() else torch.float32,
         )
@@ -1316,6 +1589,8 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         logger.error(f"Generator start failed: {e}", exc_info=True)
         generator = None
         _shutdown_client_dht()
+        if _is_cuda_out_of_memory(e):
+            return _cuda_memory_error_response(req.model_name)
         return {"status": "error", "error": str(e)}
 
 
