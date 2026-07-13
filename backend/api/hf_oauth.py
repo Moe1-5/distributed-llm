@@ -326,7 +326,7 @@ def _weight_ignore_patterns(
     )
     has_safetensors = any(str(filename).endswith(".safetensors") for filename in files)
     alternate_formats = ["*.h5", "*.msgpack", "*.onnx", "*.tflite"]
-    return ["*.bin", *alternate_formats] if has_safetensors else alternate_formats
+    return ["*.bin", "pytorch_model.bin.index.json", *alternate_formats] if has_safetensors else alternate_formats
 
 
 def download_huggingface_model(model_name: str, revision: str | None = None) -> dict[str, Any]:

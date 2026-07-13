@@ -165,6 +165,28 @@ class LocalModelImportTests(unittest.TestCase):
             with self.assertRaisesRegex(LocalModelValidationError, "missing shard"):
                 validate_local_model_directory("meta-llama/Llama-3.2-1B", str(model_dir))
 
+    def test_local_model_validation_accepts_complete_safetensors_with_stale_bin_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "mixed-formats"
+            write_local_model_fixture(model_dir, sharded=True)
+            (model_dir / "pytorch_model.bin.index.json").write_text(
+                json.dumps(
+                    {
+                        "weight_map": {
+                            "model.layers.0.self_attn.q_proj.weight": "pytorch_model-00001-of-00002.bin",
+                            "model.layers.31.mlp.down_proj.weight": "pytorch_model-00002-of-00002.bin",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = validate_local_model_directory("meta-llama/Llama-3.2-1B", str(model_dir))
+
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["weight_format"], "safetensors")
+            self.assertEqual(result["weight_files"], ["model-00001.safetensors"])
+
     def test_local_model_validation_rejects_huggingface_url_as_path(self) -> None:
         for path in (
             "https://huggingface.co/meta-llama/Llama-3.2-1B",
@@ -720,6 +742,7 @@ class HuggingFaceOAuthTests(unittest.TestCase):
         self.assertEqual(result["status"], "downloaded")
         self.assertEqual(calls[0][:3], ("meta-llama/Llama-3.2-1B", None, "hf_oauth_secret"))
         self.assertIn("*.bin", calls[0][3])
+        self.assertIn("pytorch_model.bin.index.json", calls[0][3])
         self.assertNotIn("hf_oauth_secret", json.dumps(result))
 
     def test_huggingface_download_requires_connection_for_gated_model(self) -> None:

@@ -115,3 +115,9 @@ Live TinyLlama testing exposed an expired OAuth token being attached to a public
 - What changed: created the dedicated `sprint-12-auth-lifecycle-startup-cleanup` branch from the Colab/Llama 2 integration baseline and prepared the authentication, cache cleanup, startup cleanup, local expert routing, tests, sprint records, and refreshed documentation as one reviewed change set.
 - Why: Sprint 12 work needed an isolated remote branch without local environment credentials or generated model/archive artifacts.
 - Status: all 100 backend tests pass and frontend node/web typechecks pass; `.env` files and the untracked project ZIP are excluded from the commit.
+
+### 2026-07-13 - Accept safetensors downloads with stale bin indexes
+
+- What changed: local model validation now accepts any complete weight format and prefers complete safetensors over incomplete PyTorch bin metadata, while Hugging Face downloads skip `pytorch_model.bin.index.json` when `.bin` weights are ignored.
+- Why: downloading `meta-llama/Llama-2-7b-chat-hf` with safetensors present skipped duplicate `.bin` shards but kept the old bin index, causing a false incomplete-shard import failure after the download.
+- Status: targeted regression tests pass and the full `tests/test_generation_readiness.py` suite passes with 101 tests.

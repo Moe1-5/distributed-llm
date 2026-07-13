@@ -222,21 +222,28 @@ def _validate_weight_files(model_dir: Path) -> dict[str, Any]:
     )
     bin_shards, missing_bins = _index_shards(model_dir, "pytorch_model.bin.index.json")
 
+    if safetensor_shards and not missing_safetensors:
+        return {
+            "weight_format": "safetensors",
+            "weight_files": safetensor_shards,
+            "weight_file_count": len(safetensor_shards),
+            "sharded": True,
+        }
+
+    if bin_shards and not missing_bins:
+        return {
+            "weight_format": "bin",
+            "weight_files": bin_shards,
+            "weight_file_count": len(bin_shards),
+            "sharded": True,
+        }
+
     if missing_safetensors or missing_bins:
         missing = [*missing_safetensors, *missing_bins]
         raise LocalModelValidationError(
             "incomplete_weight_shards",
             f"Weight index references missing shard file(s): {', '.join(missing)}.",
         )
-
-    indexed_shards = safetensor_shards or bin_shards
-    if indexed_shards:
-        return {
-            "weight_format": "safetensors" if safetensor_shards else "bin",
-            "weight_files": indexed_shards,
-            "weight_file_count": len(indexed_shards),
-            "sharded": True,
-        }
 
     weight_files = sorted(
         [
