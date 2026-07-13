@@ -1,162 +1,112 @@
 # Current Architecture
 
-## High-Level Shape
+## System Shape
 
-DistribLLM is currently a single backend service plus an Electron frontend.
+DistribLLM is an Electron desktop client backed by a local FastAPI process. The backend can host one or more non-overlapping layer slices for the same model and DHT prefix, run one generator, expose monitoring/status APIs, and manage local Hugging Face authentication and model imports.
 
-The backend can act as:
+The target network is a project-owned public/discoverable swarm. External devices join through DistribLLM bootstrap peers, but `use_ipfs=False` keeps the system isolated from public Petals/IPFS infrastructure.
 
-1. a serving node that hosts a slice of model layers
-2. a client/generator that routes inference through discovered nodes
-3. a dashboard API for node and hardware status
+## Runtime Roles
 
-Those roles are all hosted inside one FastAPI process today. This makes local testing simple, but it also creates global state limitations.
+- Bootstrap node: stable discovery entry point only; never serves transformer layers.
+- Serving node: owns a contiguous model layer range and exposes it through Hivemind RPC.
+- Generator client: keeps tokenizer, embeddings, final normalization, and LM head locally, then routes hidden states through serving nodes.
+- Electron/FastAPI client: controls local serving, generator startup, inference, monitoring, settings, OAuth, and managed model downloads.
+- Headless worker: `backend/colab_worker.py` runs a serving node on Colab or another GPU host without Electron.
 
-## Network Goal
+## Frontend
 
-The target network is a project-owned public/discoverable swarm, not a local-only private network and not the public Petals/IPFS network. Devices should eventually be able to join from outside and contribute inference resources, but they should join this project's bootstrap nodes, DHT prefixes, metadata contracts, model registry, and routing rules.
+The renderer has five pages:
 
-The current `use_ipfs=False` setting prevents accidental connection to unrelated public infrastructure. It does not mean the long-term network must stay local-only.
+- Nodes: local hardware state and discovered/local nodes.
+- Network: serve layers, manage local replicas, connect Hugging Face, download/import gated models, and start the generator.
+- Inference: prompt streaming, readiness, route trace, and cancellation.
+- Monitoring: route coverage, peers, and accounting/health information.
+- Settings: backend and Hugging Face connection/local-model state.
 
-## Main Components
+Bootstrap configuration is intentionally hidden from normal product workflow. The backend URL defaults to `http://127.0.0.1:8000`; Vite overrides use `VITE_API_BASE_URL` and `VITE_WS_BASE_URL`.
 
-### Electron Frontend
+## Backend State
 
-The frontend provides four pages:
-
-- Dashboard: backend status, hardware stats, discovered nodes
-- Network: start a node, stop a node, start generator, view bootstrap instructions
-- Inference: WebSocket token streaming chat
-- Settings: HuggingFace token storage
-
-The frontend talks to the backend through `frontend/src/renderer/src/api/client.ts`.
-
-The backend URL defaults to `http://127.0.0.1:8000` and can be overridden with `VITE_API_BASE_URL`. The WebSocket URL defaults from the HTTP URL and can be overridden with `VITE_WS_BASE_URL`.
-
-### FastAPI Backend
-
-The main API is in `backend/api/server.py`.
-
-It owns these global variables:
+`backend/api/server.py` currently owns process-level state:
 
 ```python
-gpu_monitor: Optional[GPUMonitor] = None
-node: Optional[Node] = None
-generator: Optional[DistributedGenerator] = None
-client_dht: Optional[hivemind.DHT] = None
+gpu_monitor: Optional[GPUMonitor]
+local_nodes: dict[str, Node]
+generator: Optional[DistributedGenerator]
+client_dht: Optional[hivemind.DHT]
+client_dht_prefix: str
 ```
 
-This means:
+One backend can serve multiple non-overlapping slices, but all local slices must use one model-compatible DHT prefix. Only one generator is active per backend process. True multi-machine testing uses separate backend/worker processes.
 
-- only one serving node can run per backend process
-- only one generator can be active per backend process
-- there is no per-session or per-model job isolation
-- stopping one generator or node means mutating global state
+## Bootstrap Configuration
 
-### Bootstrap Node
+`backend/bootstrap.py` binds a stable identity and prints loopback/public multiaddresses. Remote clients must use the public address. Runtime peers come from the comma- or newline-separated `DISTRIBLLM_INITIAL_PEERS` environment value, with development defaults in `backend/constants.py`.
 
-`backend/bootstrap.py` starts a DHT entry point with a stable identity. It is not a model-serving node. Its job is to let peers find each other.
+The stable `bootstrap.id` is a private identity file. It must not be committed or shared. A VPS bootstrap should run under a persistent process manager and expose its TCP port through both host and provider firewalls.
 
-Current default peers are stored in `backend/constants.py`.
+## Model Registry and Access
 
-### Serving Node
+`backend/constants.py` is the supported-model registry. Each model declares layer count, hidden size, gated status, tuning type, VRAM estimate, description, and generation defaults.
 
-`Node.start()` does four steps:
+Current model classes include:
 
-1. start a Hivemind DHT client
-2. load a range of transformer layers
-3. expose those layers through Hivemind RPC
-4. announce metadata to the DHT
+- OPT base models for small transport/parity tests.
+- TinyLlama chat for open instruction-ready smoke testing.
+- Llama 2 base/chat variants for approved gated testing.
+- Llama 3.2 and Mistral gated entries where account approval still applies.
 
-DHT metadata includes:
+Public models load explicitly with `token=False`; stored OAuth state cannot break anonymous access. Gated downloads use Hugging Face browser/device OAuth, then validate and register the downloaded snapshot. Runtime serving uses the validated local path with `local_files_only=True` and no token. Manual folder import remains the privacy-first fallback.
 
-```python
-{
-    "peer_id": "...",
-    "model_name": "...",
-    "layer_start": 0,
-    "layer_end": 24,
-    "device": "cuda",
-    "layers_loaded": True,
-    "rpc_running": True,
-    "rpc_uid": "...",
-    "timestamp": ...
-}
-```
+OAuth credentials are stored outside the repository by default under the user configuration directory. Raw tokens are not returned to the frontend, logs, traces, or normal API responses.
 
-### Remote Sequential Client
+## Serving Lifecycle
 
-`RemoteSequential` discovers nodes by reading:
+`Node.start()` performs:
 
-- `{dht_prefix}.members`
-- `{dht_prefix}.node_info.{peer_id}`
+1. Connect to the bootstrap/DHT.
+2. Load the selected model and retain the requested layer range.
+3. Start a Hivemind RPC expert.
+4. Announce validated metadata and periodically refresh it.
 
-Then it:
+Nodes support pause, resume, and delete/unload as distinct operations. Failed startup calls cleanup so partial DHT, RPC, handler, and CUDA state are released.
 
-1. checks that every layer index is covered
-2. sorts discovered nodes by `layer_start`
-3. sends hidden states through every node
+Current layer-loading limitation: Transformers constructs the complete model in CPU memory before DistribLLM retains the assigned layers. Layer slicing reduces final device memory, but not peak download/CPU-loading memory.
 
-Current limitation: it checks coverage but does not choose a clean route. Overlapping node ranges can be called twice.
+## Routing and Generation
 
-### Generator
+`RemoteSequential` validates DHT metadata, filters by model, builds a contiguous non-overlapping route, rejects gaps/incompatible ranges, and calls selected RPC experts in layer order.
 
-`DistributedGenerator` loads:
+When serving and generating on the same machine, generator startup directly seeds matching local node multiaddresses alongside configured bootstrap peers. Readiness resolves every selected expert and probes RPC metadata so DHT coverage alone cannot produce a false-ready state.
 
-- tokenizer
-- token embeddings
-- final norm
-- LM head
+`DistributedGenerator` loads local model components and performs autoregressive generation through that route. It supports exact generation controls, stop requests, route readiness, next-token parity probes, generated-output comparisons, and JSON trace artifacts.
 
-Then each token step does:
-
-1. embed full `generated_ids`
-2. create attention mask and position ids
-3. call remote sequential layers
-4. apply final norm and LM head locally
-5. sample next token
-6. append token and repeat
-
-Current limitation: this split is architecture-sensitive. For OPT, token embeddings alone are not enough because the real decoder adds learned positional embeddings and prepares internal masks.
-
-## Current Data Plane
-
-The data plane is:
+The current data plane is:
 
 ```text
-generated token ids
-  -> local token embeddings
-  -> remote node layers
-  -> local final norm
-  -> local lm_head
-  -> sampled token
+token ids
+  -> local embeddings / architecture preparation
+  -> remote contiguous transformer-layer route
+  -> local final normalization and LM head
+  -> token selection
 ```
 
-The model weights are split by layer range, but there is no KV cache, session routing, or route reuse yet.
+There is no distributed KV cache, stable session routing, failover, or concurrent generator registry yet. Each token can still process the full sequence, so performance is prototype-grade.
 
-## Current Control Plane
+## Current Validation State
 
-The control plane is:
+- Backend regression suite: 96 tests plus 19 subtests passing as of 2026-07-13.
+- Frontend TypeScript typecheck and Python compilation pass.
+- Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
+- Hugging Face device OAuth and real gated Llama 2 download have been exercised.
+- TinyLlama live retry remains pending after Sprint 12 isolated public loading from expired OAuth state.
+- A complete laptop plus VPS/Colab Llama 2 route and generated response remain unproven.
 
-```text
-frontend
-  -> FastAPI endpoint
-  -> Hivemind DHT
-  -> node metadata
-  -> Hivemind RPC expert UID
-```
+## Known Operational Limits
 
-DHT is used for node discovery. RPC is used for tensor forwarding.
-
-## Current Trust Assumptions
-
-The code currently trusts:
-
-- DHT members list is fresh
-- DHT node metadata is valid
-- all discovered nodes are compatible with the requested model
-- layer ranges do not overlap
-- `rpc_uid` resolves to the expected serving node
-- calling raw layer modules reproduces the original model forward path
-
-Those assumptions are the main source of current bugs.
+- Colab sessions are temporary, may lack GPU/high RAM, and may block inbound peer RPC behind NAT.
+- VPS workers need enough RAM for full-model construction and reachable worker RPC ports or relay support.
+- Python 3.12 is the supported runtime; Hivemind/Pydantic compatibility is unreliable on Python 3.14.
+- Bootstrap reachability proves discovery transport only, not model-worker RPC reachability.
+- Real incentives, API keys, failover, anti-abuse proofs, and distributed training remain future work.

@@ -7,6 +7,7 @@
 | --- | --- | --- |
 | Sprint 10 | `tasks/sprints/sprint-10-gated-model-local-import.md` | Implementation complete for Hugging Face browser/device OAuth downloads into validated local imports; awaiting explicit close before archive. |
 | Sprint 11 | `tasks/sprints/sprint-11-instruction-ready-model-expansion.md` | Add more supported instruction-ready/chat-ready models without fine-tuning the baseline model into instruction behavior. |
+| Sprint 12 | `tasks/sprints/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Prevent stale OAuth state from breaking public models and clean up every failed model startup. |
 | Sprint 13 | `tasks/sprints/sprint-13-real-incentives-and-settlement.md` | Add real incentive rewards and settlement only after correctness, proof, health, anti-abuse, model-access, and model-quality prerequisites are ready. |
 
 ## Completed Sprints

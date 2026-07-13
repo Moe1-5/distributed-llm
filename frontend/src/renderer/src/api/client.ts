@@ -155,6 +155,7 @@ export interface LocalModelValidationResult extends Partial<LocalModelImport> {
 export interface LocalModelRemoveResult {
   status: 'removed' | 'not_found'
   removed: boolean
+  registry_removed: boolean
   files_deleted: boolean
   deleted_bytes: number
   deleted_size: string

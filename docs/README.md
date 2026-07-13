@@ -22,11 +22,19 @@ One machine can serve a slice of transformer layers over Hivemind RPC, while ano
 
 This is similar in spirit to Petals, but currently much simpler:
 
-- one backend process owns global node and generator state
-- nodes announce layer ranges manually into the DHT
-- the client chains all discovered nodes in layer order
-- model-specific forward logic is not yet faithfully reproduced
-- route selection, health checks, cancellation, and session/cache management are still missing
+- one backend process owns a local node registry and one generator
+- nodes announce validated model/layer/RPC metadata into a project DHT
+- the client builds a contiguous compatible route and exposes readiness before inference
+- OPT and Llama-family architecture behavior is explicit, with parity tooling for validation
+- cancellation, trace diagnostics, OAuth gated downloads, and local imports exist
+- health scoring, failover, session/KV-cache routing, and production public-swarm operations are still missing
+
+## Current Work
+
+- Sprint 10: gated Hugging Face OAuth download/import implementation is complete; live end-to-end gated inference remains open.
+- Sprint 11: TinyLlama chat and Llama 2 model expansion is implemented; live instruction-ready distributed inference remains open.
+- Sprint 12: public model loading is isolated from stale OAuth state and failed startup cleanup is implemented; live TinyLlama retry remains open.
+- Sprint 13: real incentives and settlement remain deferred until correctness and anti-abuse prerequisites are proven.
 
 ## End Vision
 

@@ -67,7 +67,7 @@ The goal is not to fine-tune the current baseline model. The goal is to support 
 - [ ] New model metadata includes layer count, hidden size, gated status, VRAM estimate, and generation defaults.
 - [ ] Local import validation works for any gated model added in this sprint.
 - [ ] Backend tests cover the new model registry and validation contract.
-- [ ] Documentation explains that Sprint 11 adds already instruction-tuned models rather than fine-tuning a baseline model.
+- [x] Documentation explains that Sprint 11 adds already instruction-tuned models rather than fine-tuning a baseline model.
 
 ---
 

@@ -2,6 +2,17 @@
 
 This plan turns the current prototype into a reliable Petals-inspired distributed inference system for this project's own public/discoverable swarm. The network should be open enough for external devices to join and contribute resources, but isolated from public Petals/IPFS infrastructure by project-owned bootstrap nodes, DHT namespaces, metadata contracts, model registry, and routing rules.
 
+## Current Position - 2026-07-13
+
+Phases 0 through 3 have substantial implemented foundations: structured readiness, contiguous route planning, cancellation, OPT/Llama-family adapter behavior, parity/trace tooling, multi-node local registries, monitoring, Hugging Face OAuth downloads, validated gated local imports, and instruction-ready model metadata. These areas still require broader live multi-machine validation; their presence in earlier roadmap phases no longer means they are wholly unimplemented.
+
+Current active validation work:
+
+- Sprint 10: complete live gated-model startup/generation/offline reuse evidence.
+- Sprint 11: complete TinyLlama/Llama 2 instruction-ready inference evidence.
+- Sprint 12: live-check anonymous public loading and failed-start cleanup after the expired-token fix.
+- Sprint 13: real incentives and settlement remain deferred.
+
 ## Phase 0: Stabilize the Current Prototype
 
 Goal: make current failures clear, prevent known bad inference paths, and avoid late user-facing errors.
@@ -42,7 +53,7 @@ Goal: remote layer execution should run each layer exactly once in order.
 
 ### Current Problem
 
-`RemoteSequential` sorts every discovered node by `layer_start` and calls all of them. Coverage checks only prove that every layer is covered at least once. Overlaps can run layers twice.
+Historical problem: `RemoteSequential` sorted every discovered node and could execute overlaps. The current route planner validates metadata and selects a contiguous, non-overlapping model-compatible route. Remaining work is live failover/health-based selection across competing providers.
 
 ### Target Design
 
@@ -189,7 +200,7 @@ Options:
    - `generators: dict[session_id, DistributedGenerator]`
    - better for multiple models or concurrent users
 
-The current frontend and backend are closer to option 1.
+The backend now has a local node registry for non-overlapping same-prefix replicas, while generator state remains process-global. Separate processes are still the normal model for independent remote participants.
 
 ### 2026-07-06 Sprint 06 Decision
 
@@ -227,7 +238,7 @@ Suggested main navigation after this correction:
 2. Network: serve layer slices and connect a generator/client to the swarm.
 3. Inference: prompt streaming, route trace, and active generation cancel.
 4. Monitoring: graph/status view for peer health, layer coverage, route state, and latency.
-5. Settings: tokens and local configuration.
+5. Settings: Hugging Face connection, imported models, and local configuration.
 
 Implementation should follow validation: first prove the backend can report trustworthy route/readiness state, then bind the UI controls to that state.
 
@@ -275,7 +286,7 @@ This phase should wait until core inference, health checks, and route correctnes
 
 ### 2026-07-06 Sprint 06 Decision
 
-Initial incentives are simulated accounting only. The backend records model-aware and contribution-aware serving metrics for the local node: peer identity, model, layer range, layers served, device, successful requests, failed requests, token positions served, latency totals, average latency, and last success/error timestamps. Token UI, balances, claims, and reward settlement stay disabled until route correctness, health checks, anti-abuse checks, and receipt/proof design are validated. Real incentives are deferred to Sprint 10.
+Initial incentives are simulated accounting only. The backend records model-aware and contribution-aware serving metrics for local nodes: peer identity, model, layer range, layers served, device, successful requests, failed requests, token positions served, latency totals, average latency, and last success/error timestamps. Token UI, balances, claims, and reward settlement stay disabled until route correctness, health checks, anti-abuse checks, and receipt/proof design are validated. Real incentives are deferred to Sprint 13.
 
 ## Phase 11: API Access for Served Models
 
@@ -306,22 +317,17 @@ This is intentionally last because training is harder than inference. It require
 
 ## Priority Order
 
-1. Route validation and model filtering.
-2. OPT architecture adapter or temporarily disable OPT inference until adapter exists.
-3. Readiness endpoint and UI gating.
-4. Cancellation.
-5. WebSocket state correctness.
-6. Local parity tests.
-7. Decide local multi-node serving model: backend node registry or one process per node.
-8. Move bootstrap setup out of client navigation.
-9. Add node stop placement on the main node surface.
-10. Add monitoring page shell backed by real route/readiness data.
-11. Health probes.
-12. Session/KV cache.
-13. Public swarm operations and fault tolerance.
-14. API-key access for inferenced models.
-15. Incentives and contributor accounting.
-16. Distributed training/fine-tuning resource requests.
+1. Complete live TinyLlama and gated Llama 2 startup/inference validation.
+2. Prove a real multi-machine contiguous route through a public VPS bootstrap.
+3. Add reliable worker RPC reachability through fixed ports, relay, or an overlay network.
+4. Reduce peak full-model CPU memory during layer-slice loading.
+5. Expand architecture parity evidence for every user-facing model.
+6. Add health probes, scoring, and route failover.
+7. Add stable session routing and distributed KV cache.
+8. Harden public swarm operations, protocol/version compatibility, and bootstrap rotation.
+9. Add API-key access for inferenced models.
+10. Implement Sprint 13 receipts, anti-abuse checks, incentives, and settlement.
+11. Consider distributed training/fine-tuning resource requests last.
 
 ## Definition of Done for Correct Inference
 

@@ -10,7 +10,18 @@ Future agents should update this document after each meaningful validation pass 
 
 ## Current Testing Phase Gate
 
-The current project priority is to prove the core distributed LLM inference path before adding advanced features.
+The current project priority is to finish live instruction-ready and gated-model multi-machine inference validation before adding advanced features.
+
+### Current Status - 2026-07-13
+
+- Backend regression suite: 96 tests plus 19 subtests passing.
+- Python compilation and frontend typecheck pass.
+- Local OPT-125M and OPT-1.3B single-route smoke/parity evidence exists.
+- Hugging Face browser/device OAuth and a real approved Llama 2 download have succeeded.
+- Public loading now explicitly ignores stale OAuth state; live TinyLlama retry remains pending.
+- A public VPS bootstrap has been reachable from Windows on TCP port 7001.
+- Complete laptop plus VPS/Colab worker RPC and generated Llama 2 response remain unproven.
+- Colab CPU-only/low-RAM sessions and NAT are known blockers, not successful GPU-worker evidence.
 
 Recommended order:
 
@@ -22,7 +33,9 @@ Recommended order:
 5. Local multi-node layer-split inference test
 6. Real multi-machine distributed network test
 7. Stable real bootstrap node deployment
-8. Only then: fault tolerance, monitor, API keys, incentives, and training resources
+8. Gated OAuth/download/offline startup validation
+9. Instruction-ready TinyLlama/Llama 2 parity and quality evidence
+10. Only then: fault tolerance, API keys, Sprint 13 incentives, and training resources
 ```
 
 ### Phase A: Backend Regression Tests
@@ -31,7 +44,7 @@ Recommended order:
 - [x] Run optimized Python validation with `uv run python -O -m pytest tests/test_generation_readiness.py`.
 - [x] Run backend compile check with `uv run python -m compileall api client node models -q`.
 
-Last known status: passed on 2026-07-06 during Sprint 04 startup validation. `uv run pytest` passed with 24 tests, optimized Python pytest passed with 24 tests, and backend compileall passed. Frontend `npm run typecheck` also passed.
+Last known status: passed on 2026-07-13 during Sprint 12 validation. The focused backend suite passed 96 tests and 19 subtests; backend compileall and frontend `npm run typecheck` passed. The older 24-test Sprint 04 result remains historical evidence, not the current suite size.
 
 ### Phase B: Local One-Machine Smoke Test
 
@@ -146,6 +159,37 @@ Checklist:
 - [ ] Inference returns through the distributed route.
 - [ ] Failures caused by firewall, NAT, stale peer IDs, or unreachable ports are documented.
 
+2026-07-12/13 update: the VPS bootstrap at a public address passed an external TCP connectivity check after opening port 7001. Laptop and Colab attempts exposed duplicate/stuck bootstrap process risk, Python 3.14 incompatibility on the VPS, Colab CPU-only runtime selection, insufficient 12.7 GB RAM for Llama 2 full-model construction, and possible Colab NAT restrictions. No successful remote worker RPC/inference route has been recorded yet.
+
+### Phase E.1: Hugging Face OAuth and Gated Local Model Validation
+
+- [x] Browser/device OAuth completes without token paste.
+- [x] Auth state is redacted from frontend/API/log output.
+- [x] Unapproved gated repositories return an actionable access message.
+- [x] An approved Llama 2 snapshot can be downloaded.
+- [x] Downloaded snapshots are validated and registered.
+- [x] Gated runtime code uses validated local files without a token.
+- [ ] Live gated serving node starts successfully.
+- [ ] Live gated generator starts successfully.
+- [ ] Inference completes through the gated route.
+- [ ] Disconnect then offline startup succeeds from the validated snapshot.
+
+### Phase E.2: Instruction-Ready Model Validation
+
+- [x] TinyLlama chat and Llama 2 chat entries have explicit tuning/shape/generation metadata.
+- [x] Registry and local-import contracts have regression coverage.
+- [x] Public model loading is explicitly anonymous and independent from OAuth state.
+- [ ] TinyLlama live node/generator/inference smoke test passes.
+- [ ] Llama 2 chat distributed route produces a response.
+- [ ] Direct versus distributed parity/quality notes are recorded before user-facing support is claimed.
+
+### Phase E.3: Failed Startup Cleanup Validation
+
+- [x] Failed node startup invokes cleanup for partial DHT/RPC/handler state in regression tests.
+- [x] Failed generator startup unloads partial model state and shuts down client DHT in regression tests.
+- [x] Expired authenticated operations map to `huggingface_reconnect_required`.
+- [ ] Live repeated failed-start test confirms no orphaned `p2pd` processes remain.
+
 ### Phase F: Public-Swarm Readiness Gate
 
 Do not start token incentives, API-key product flows, or distributed training features until these are true:
@@ -185,7 +229,7 @@ These checks come from the 2026-07-05 Electron screen review and should be verif
 | Runnable model semantics | Deferred; runnable should mean registry support plus complete compatible coverage. | Sprint 06 |
 | Incentive accounting semantics | Deferred; accounting should be model-aware and contribution-aware. | Sprint 06 |
 
-Advanced features remain deferred until the follow-on phase gates are satisfied: output parity in Sprint 07, client workflow clarity in Sprint 05, and multi-node/runnable-model semantics in Sprint 06.
+The earlier Sprint 05 through Sprint 09 implementation owners are closed. Remaining advanced features are deferred until Sprints 10 through 12 finish their live gates and Sprint 13 prerequisites are met.
 
 2026-07-06 Sprint 06 update: runnable model semantics are implemented as registry support plus complete compatible route coverage reported by `/models`. Incentive semantics are simulated accounting only: contribution records are model-aware and layer-aware, but token UI and reward settlement remain disabled until correctness, health, and anti-abuse checks are proven.
 

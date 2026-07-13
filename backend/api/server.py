@@ -126,6 +126,44 @@ def _cuda_memory_error_response(model_name: str, *, layer_start: int | None = No
     }
 
 
+def _is_huggingface_auth_expired(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "oauth token has expired" in message
+        or "exp claim timestamp check failed" in message
+        or ("401 unauthorized" in message and "huggingface.co" in message)
+    )
+
+
+def _huggingface_reconnect_response(model_name: str) -> dict:
+    return {
+        "status": "error",
+        "error": "huggingface_reconnect_required",
+        "message": (
+            f"Hugging Face authorization expired while accessing {model_name}. "
+            "Reconnect Hugging Face, then try again."
+        ),
+    }
+
+
+def _cleanup_failed_node(candidate: object | None) -> None:
+    if candidate is None or not hasattr(candidate, "stop"):
+        return
+    try:
+        candidate.stop()
+    except Exception as exc:
+        logger.warning("Failed to clean up partially started node: %s", exc)
+
+
+def _cleanup_failed_generator(candidate: object | None) -> None:
+    if candidate is not None and hasattr(candidate, "unload"):
+        try:
+            candidate.unload()
+        except Exception as exc:
+            logger.warning("Failed to clean up partially loaded generator: %s", exc)
+    torch.cuda.empty_cache()
+
+
 def _safe_filename_part(value: str) -> str:
     safe = "".join(char if char.isalnum() else "-" for char in value.lower())
     safe = "-".join(part for part in safe.split("-") if part)
@@ -485,6 +523,23 @@ def _next_rpc_uid_suffix(req) -> Optional[int]:
     if not used_suffixes:
         return None
     return max(used_suffixes) + 1
+
+
+def _generator_initial_peers(
+    configured_peers: list[str],
+    model_name: str,
+    dht_prefix: str,
+) -> list[str]:
+    peers = list(configured_peers)
+    for local_node in _local_node_list():
+        if (
+            local_node.model_name != model_name
+            or local_node.dht_prefix != dht_prefix
+            or not local_node.is_running()
+        ):
+            continue
+        peers.extend(local_node.get_visible_maddrs())
+    return list(dict.fromkeys(peer for peer in peers if peer))
 
 
 def _shutdown_local_nodes(
@@ -1390,7 +1445,6 @@ async def start_node(req: NodeStartRequest) -> dict:
                 "message": e.message,
             },
         }
-    hf_token = get_hf_token()
     if model_info["gated"] and local_model_path is None:
         return {
             "status": "error",
@@ -1404,6 +1458,7 @@ async def start_node(req: NodeStartRequest) -> dict:
     # Use default peers if none provided
     peers = req.initial_peers or get_initial_peers()
     rpc_uid_suffix = _next_rpc_uid_suffix(req)
+    local_node = None
 
     try:
         local_node = Node(
@@ -1413,7 +1468,7 @@ async def start_node(req: NodeStartRequest) -> dict:
             dht_prefix=req.dht_prefix,
             initial_peers=peers,
             device=req.device,
-            hf_token=None if local_model_path else hf_token,
+            hf_token=None,
             local_model_path=local_model_path,
         )
         local_node.rpc_uid_suffix = rpc_uid_suffix
@@ -1425,15 +1480,19 @@ async def start_node(req: NodeStartRequest) -> dict:
         return {"status": "started", "info": local_node.get_info()}
 
     except AssertionError as e:
+        _cleanup_failed_node(local_node)
         return {"status": "error", "error": str(e)}
     except Exception as e:
         logger.error(f"Node start failed: {e}", exc_info=True)
+        _cleanup_failed_node(local_node)
         if _is_cuda_out_of_memory(e):
             return _cuda_memory_error_response(
                 req.model_name,
                 layer_start=req.layer_start,
                 layer_end=req.layer_end,
             )
+        if _is_huggingface_auth_expired(e):
+            return _huggingface_reconnect_response(req.model_name)
         return {"status": "error", "error": str(e)}
 
 
@@ -1533,7 +1592,6 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
                 "message": e.message,
             },
         }
-    hf_token   = get_hf_token()
     if model_info["gated"] and local_model_path is None:
         return {
             "status": "error",
@@ -1544,7 +1602,11 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
             ),
         }
 
-    peers = req.initial_peers or get_initial_peers()
+    peers = _generator_initial_peers(
+        req.initial_peers or get_initial_peers(),
+        req.model_name,
+        req.dht_prefix,
+    )
 
     try:
         _shutdown_client_dht()
@@ -1568,7 +1630,7 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         generator = DistributedGenerator(
             model_name=req.model_name,
             sequential=sequential,
-            hf_token=None if local_model_path else hf_token,
+            hf_token=None,
             local_model_path=local_model_path,
             device="cuda"if torch.cuda.is_available() else "cpu",
             dtype= torch.float16 if torch.cuda.is_available() else torch.float32,
@@ -1582,15 +1644,19 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         return {"status": "ready"}
 
     except AssertionError as e:
+        _cleanup_failed_generator(generator)
         generator = None
         _shutdown_client_dht()
         return {"status": "error", "error": str(e)}
     except Exception as e:
         logger.error(f"Generator start failed: {e}", exc_info=True)
+        _cleanup_failed_generator(generator)
         generator = None
         _shutdown_client_dht()
         if _is_cuda_out_of_memory(e):
             return _cuda_memory_error_response(req.model_name)
+        if _is_huggingface_auth_expired(e):
+            return _huggingface_reconnect_response(req.model_name)
         return {"status": "error", "error": str(e)}
 
 
@@ -1610,7 +1676,7 @@ async def get_generator_status() -> dict:
     route_ready = False
 
     try:
-        route = generator.sequential.validate_route()
+        route = generator.sequential.validate_reachable_route()
         route_ready = True
         node_trace = _format_route_trace(route)
     except Exception as e:

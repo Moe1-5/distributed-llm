@@ -313,6 +313,22 @@ def disconnect_huggingface() -> dict[str, Any]:
     return {"status": "disconnected", "connection": _public_connection(None)}
 
 
+def _weight_ignore_patterns(
+    model_name: str,
+    revision: str | None,
+    token: str | None,
+) -> list[str]:
+    files = HfApi().list_repo_files(
+        repo_id=model_name,
+        revision=revision,
+        repo_type="model",
+        token=token,
+    )
+    has_safetensors = any(str(filename).endswith(".safetensors") for filename in files)
+    alternate_formats = ["*.h5", "*.msgpack", "*.onnx", "*.tflite"]
+    return ["*.bin", *alternate_formats] if has_safetensors else alternate_formats
+
+
 def download_huggingface_model(model_name: str, revision: str | None = None) -> dict[str, Any]:
     model_name = model_name.strip()
     if model_name not in SUPPORTED_MODELS:
@@ -331,11 +347,13 @@ def download_huggingface_model(model_name: str, revision: str | None = None) -> 
         )
 
     try:
+        ignore_patterns = _weight_ignore_patterns(model_name, revision, token)
         snapshot_path = snapshot_download(
             repo_id=model_name,
             revision=revision,
             token=token,
             repo_type="model",
+            ignore_patterns=ignore_patterns,
         )
         imported = import_local_model(model_name, snapshot_path)
     except GatedRepoError as exc:

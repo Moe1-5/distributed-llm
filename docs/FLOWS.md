@@ -1,189 +1,146 @@
 # Runtime Flows
 
-## 1. Bootstrap Flow
+## 1. Bootstrap Operations
 
 ```text
-user starts backend/bootstrap.py
-  -> Hivemind DHT starts with stable identity_path
-  -> bootstrap multiaddress is printed
-  -> address is copied into backend/constants.py
-  -> serving nodes and clients use it as initial_peers
+operator starts backend/bootstrap.py with persistent bootstrap.id
+  -> bootstrap listens on configured TCP port
+  -> loopback and public multiaddresses are printed
+  -> public address is placed in DISTRIBLLM_INITIAL_PEERS
+  -> serving nodes and generators use it for discovery
 ```
 
-The bootstrap node is only a discovery entry point. It does not serve model layers.
+The bootstrap is infrastructure, not a model-serving node or normal client tab. Preserve `bootstrap.id`; replacing it changes the peer ID. Processes on the VPS may use its loopback address, while laptops, Colab, and other machines must use the public address.
 
-## 2. Start Serving Node Flow
-
-Frontend:
+## 2. Public Model Serving
 
 ```text
-Network page
-  -> Serve Layers tab
-  -> select model
-  -> choose layer_start/layer_end
-  -> choose device
+Network -> Serve Layers
+  -> select an open model, layer range, and device
   -> POST /node/start
+  -> backend explicitly disables Hugging Face credentials
+  -> Node starts DHT
+  -> Transformers downloads/loads the model anonymously
+  -> selected layers are retained on CPU or CUDA
+  -> RPC server starts and metadata is announced
 ```
 
-For gated models, the user first gets approval and downloads model files on Hugging Face outside DistribLLM. The Network page imports the local model directory with:
+Public loading uses `token=False`, so expired OAuth or Hugging Face CLI credentials cannot turn a public request into a 401 failure.
+
+## 3. Gated Model Connection and Download
 
 ```text
-POST /settings/local-models/inspect
-POST /settings/local-models
+user accepts model terms / receives access on Hugging Face
+  -> Connect Hugging Face
+  -> POST /settings/huggingface/oauth/device
+  -> browser opens https://hf.co/oauth/device
+  -> user signs in and authorizes the displayed code
+  -> frontend polls /settings/huggingface/oauth/device/poll
+  -> scoped OAuth token is stored in user config storage
+  -> Download Approved Model starts a background snapshot job
+  -> frontend polls job status and may request cancellation
+  -> completed snapshot is validated and registered locally
 ```
 
-The backend validates `config.json`, tokenizer files, architecture, layer count, hidden size, and weight shard completeness before storing the local import metadata. The primary gated-model startup path does not require storing a Hugging Face token.
+DistribLLM never receives the Hugging Face password and never asks the user to paste a personal access token. OAuth still gives the app a scoped local access token for downloads. Disconnect deletes that stored auth state.
 
-Backend:
+If browser opening fails in WSL/headless environments, the UI shows the verification URL and code for manual opening. The Electron main process permits only Hugging Face hosts for this action.
 
-```text
-/node/start
-  -> validate model and local import if gated
-  -> Node(...)
-  -> node.start()
-      -> start DHT
-      -> load requested layers from local files if imported
-      -> start RPC server
-      -> announce metadata to DHT
-      -> start periodic announce loop
-```
-
-DHT writes:
+## 4. Local Import Fallback
 
 ```text
-{prefix}.node_info.{peer_id}
-{prefix}.members
-```
-
-## 3. Stop Serving Node Flow
-
-```text
-Network page
-  -> STOP NODE
-  -> POST /node/stop
-  -> node.stop()
-      -> stop RPC server
-      -> unload layers
-      -> shutdown DHT
-```
-
-Current limitation: the node does not remove itself from `{prefix}.members`. The metadata has an expiry, but the members list can keep stale peer ids.
-
-## 4. Start Generator Flow
-
-Frontend:
-
-```text
-Network page
-  -> Run Inference tab
-  -> select model
-  -> set bootstrap peers
-  -> POST /generator/start
-```
-
-Backend:
-
-```text
-/generator/start
-  -> validate model and local import if gated
-  -> create client DHT
-  -> create RemoteSequential
-  -> create DistributedGenerator
-  -> load tokenizer, embeddings, final norm, lm_head from local files if imported
-  -> return ready
-```
-
-Current limitation: generator startup does not verify that the DHT has a usable route for the selected model. The first real inference request may be where route failures appear.
-
-## 5. WebSocket Inference Flow
-
-Frontend:
-
-```text
-Inference page
-  -> user sends text
-  -> create WebSocket if needed
-  -> send JSON message to /stream
-```
-
-Backend:
-
-```text
-/stream receives message
-  -> validate message and generation params
-  -> if generator loaded:
-       async for chunk in generator.generate_stream(...)
-           send token/error/done chunk to frontend
-     else:
-       send mock response
-```
-
-Generator:
-
-```text
-tokenize prompt
-for each new token:
-  embed generated ids
-  create attention mask and position ids
-  RemoteSequential.forward(...)
-    -> discover nodes
-    -> check coverage
-    -> sort by layer_start
-    -> call each remote node
-  apply final norm
-  apply lm_head
-  sample next token
-  yield decoded token
-```
-
-Remote node:
-
-```text
-Hivemind RPC receives hidden states
-  -> _HandlerModule.forward(...)
-  -> InferenceHandler.forward(...)
-  -> move tensors to node device/dtype
-  -> run local layer range
-  -> return hidden states to client
-```
-
-## 6. Dashboard Polling Flow
-
-Dashboard polls:
-
-- `/stats` every 2 seconds
-- `/nodes` every 5 seconds
-- `/status` every 5 seconds
-
-`/nodes` uses the active local node DHT if available, otherwise the generator DHT.
-
-Current limitation: `/nodes` always uses `DHT_PREFIX` from constants, not a dynamic prefix selected in the UI.
-
-## 7. Settings Flow
-
-```text
-Settings page
-  -> GET /settings
-  -> GET /settings/local-models
+user downloads approved model outside DistribLLM
+  -> Browse selects a local directory
   -> POST /settings/local-models/inspect
+  -> validate config, architecture, dimensions, tokenizer, and weight shards
   -> POST /settings/local-models
-  -> DELETE /settings/local-models/{model_name}
-  -> POST /settings/token
-  -> DELETE /settings/token
+  -> sanitized registry metadata is stored
 ```
 
-The backend stores local import metadata in `backend/.local_models.json` with file permission `0600`. The backend stores the optional diagnostic token in `backend/.hf_token` with file permission `0600`.
+Normal list/inspect responses avoid echoing raw filesystem paths. Startup revalidates registered snapshots so moved, missing, or incomplete folders fail before expensive loading.
 
-## 8. Failure Flow Today
+## 5. Gated Runtime Startup
 
-Many failures are discovered late:
+```text
+/node/start or /generator/start
+  -> require a validated local import for gated model
+  -> use local snapshot path
+  -> local_files_only=True
+  -> no OAuth token is passed to Transformers
+```
 
-- no DHT peers
-- no nodes announced
-- incomplete layer coverage
-- bad `rpc_uid`
-- remote node offline
-- model architecture mismatch
-- attention mask shape or dtype mismatch
+This allows offline startup after a successful download/import. OAuth expiry affects future downloads, not an already validated local runtime.
 
-Most of these should become explicit readiness checks before enabling inference.
+## 6. Node Lifecycle
+
+```text
+start
+  -> DHT -> layer load -> RPC -> announce
+
+turn off
+  -> stop announcing/RPC/DHT serving handles
+  -> preserve loaded layers
+
+turn on
+  -> reconnect DHT/RPC and reannounce preserved layers
+
+delete
+  -> stop RPC/DHT -> unload layers -> remove local replica
+```
+
+Multiple local nodes may serve non-overlapping ranges under one prefix. Overlapping local ranges and mixed local prefixes are rejected. Failed startup cleans partial resources before returning an actionable error.
+
+## 7. Generator and Route Readiness
+
+```text
+Network -> Run Inference
+  -> POST /generator/start
+  -> create client DHT
+  -> load tokenizer/embeddings/norm/LM head
+  -> GET /generator/status
+  -> discover compatible nodes
+  -> validate a complete contiguous non-overlapping route
+  -> resolve every selected expert and probe RPC metadata
+  -> enable inference only when ready
+```
+
+The model registry distinguishes supported models from currently runnable models. Runnable requires complete compatible DHT coverage.
+
+## 8. Streaming Inference
+
+```text
+Inference page opens /stream WebSocket
+  -> validates generator and route readiness
+  -> tokenizes prompt
+  -> prepares architecture-specific inputs
+  -> sends hidden states through selected RPC route
+  -> applies local output components
+  -> samples/decodes next token
+  -> streams token chunks and route trace
+```
+
+The user can request cancellation between token steps. Diagnostic endpoints can compare next-token logits/generated output with direct Hugging Face execution and write redacted JSON traces.
+
+## 9. Remote Worker Flow
+
+`backend/colab_worker.py` runs a headless serving node:
+
+```text
+clone testing branch on remote machine
+  -> install locked backend environment
+  -> optional browser OAuth for gated model
+  -> connect to public bootstrap address
+  -> load assigned layer range
+  -> start RPC and announce
+  -> keep process/cell alive
+```
+
+Every worker currently downloads/builds the complete model before retaining its range. Colab therefore needs both GPU availability and sufficient system RAM. Joining the DHT does not guarantee inbound RPC reachability through Colab NAT.
+
+## 10. Monitoring and Cleanup
+
+- `/status`, `/stats`, `/nodes`, `/models`, and `/generator/status` drive UI readiness and monitoring.
+- `/incentives/accounting` reports simulated contribution metrics only.
+- Managed Hugging Face snapshots can be removed with file deletion; arbitrary manual folders are unregistered but not recursively deleted.
+- Backend shutdown uses bounded cleanup for local nodes and the generator DHT.
+- Trace files live under `backend/traces/` or `DISTRIBLLM_TRACE_DIR` and remain gitignored.

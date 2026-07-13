@@ -104,7 +104,11 @@ class DistributedGenerator:
         )
 
         source = self.local_model_path or self.model_name
-        token_kwargs = {"token": self.hf_token} if self.hf_token and not self.local_model_path else {}
+        token_kwargs = (
+            {"token": self.hf_token}
+            if self.hf_token and not self.local_model_path
+            else ({"token": False} if not self.local_model_path else {})
+        )
         local_kwargs = {"local_files_only": True} if self.local_model_path else {}
 
         self.tokenizer = AutoTokenizer.from_pretrained(source, **token_kwargs, **local_kwargs)
@@ -177,6 +181,19 @@ class DistributedGenerator:
                     f"Generator hidden size mismatch for {self.model_name}: "
                     f"registry={expected_hidden_size}, embeddings={actual_hidden_size}"
                 )
+
+    def unload(self) -> None:
+        """Release local model components after failed startup or explicit teardown."""
+        self._loaded = False
+        self._stop_requested = True
+        self.tokenizer = None
+        self.embed_tokens = None
+        self.position_embeddings = None
+        self.norm = None
+        self.lm_head = None
+        self.architecture_adapter = None
+        self._loaded_model = None
+        torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
     # Generation

@@ -14,7 +14,7 @@
 | Model runtime | PyTorch + HuggingFace Transformers | Local model components, layer loading, tokenization, and generation |
 | Backend dependencies | uv | Locked Python dependency management |
 | Frontend dependencies | npm | Electron/Vite script ecosystem |
-| Testing | Not fully configured | Needs backend unit tests, split-path parity tests, and focused frontend checks |
+| Testing | Pytest + TypeScript typecheck + parity/trace tooling | Regression coverage, runtime contracts, and staged live distributed validation |
 | CI/CD | Not active | Future lint, typecheck, backend tests, and frontend build pipeline |
 
 ## Folder Structure
@@ -36,12 +36,13 @@ scripts/      workflow automation and hooks
 
 ## Key Patterns
 
-- State management: frontend uses local React state; backend currently uses process-level globals for one node and one generator.
+- State management: frontend uses local React state; backend uses a process-level local node registry plus one generator/client DHT.
 - Data fetching: frontend centralizes HTTP/WebSocket calls in `frontend/src/renderer/src/api/client.ts`.
 - Error handling: runtime errors should be explicit and user-facing where possible; inference readiness should move failures earlier.
 - Validation: API boundaries, DHT metadata, route plans, model names, layer ranges, and WebSocket payloads require validation.
-- Model support: architecture-specific forward behavior should live under `backend/models/` rather than being implicit in generation code.
-- Distributed routing: clients should execute a contiguous non-overlapping route, not every discovered node.
+- Model support: architecture-specific behavior is selected through `backend/models/architecture_adapter.py`; each user-facing model still needs parity evidence.
+- Distributed routing: clients validate metadata and execute a contiguous non-overlapping compatible route.
+- Model access: public models load anonymously; gated models use browser OAuth for managed download followed by validated offline local runtime.
 
 ## External Services
 

@@ -1,229 +1,225 @@
 # Errors and Debugging
 
-## Error: WebSocket not connected
+Start with the first meaningful exception. Later Transformers/Hivemind wrapper messages often obscure the root cause.
 
-### Symptom
+## Backend or WebSocket Unreachable
 
-The inference tab shows:
-
-```text
-Error: WebSocket not connected
-```
-
-### Likely Cause
-
-`Chat.tsx` calls `ensureConnected()`, and `createStreamSocket(...)` returns immediately after constructing the WebSocket. The socket may still be in `CONNECTING` state. If the UI sends immediately before `onopen`, `api/client.ts` sees `ws.readyState !== WebSocket.OPEN` and emits `WebSocket not connected`.
-
-### Where to Inspect
-
-- `frontend/src/renderer/src/pages/Chat.tsx`
-- `frontend/src/renderer/src/api/client.ts`
-
-### Fix Direction
-
-Make `createStreamSocket` expose an `onopen`/ready promise or queue the first message until the socket opens.
-
-## Error: Attention mask dtype mismatch
-
-### Symptom
+Symptoms:
 
 ```text
-Expected attn_mask dtype to be bool or float or to match query dtype,
-but got attn_mask.dtype: long int and query.dtype: c10::Half instead.
+Backend not reachable
+WebSocket not connected
+curl: failed to connect to 127.0.0.1:8000
 ```
 
-### Root Cause
+Checks:
 
-The previous code created the attention mask with `torch.arange(...)`, producing a `torch.long` tensor. The remote node converted hidden states to fp16, but the mask remained long.
+1. Start `backend/main.py` in the same host/network namespace as Electron.
+2. Confirm `http://127.0.0.1:8000/status` responds.
+3. Verify `VITE_API_BASE_URL` and `VITE_WS_BASE_URL` if the backend is remote or uses another port.
+4. Restart Electron/Vite after changing frontend environment variables.
 
-### Current Fix
+The stream client waits for real WebSocket lifecycle events and inference remains gated by generator/route readiness.
 
-`backend/client/generation.py` now creates:
+## Bootstrap Peer Unreachable
 
-```python
-attention_mask = torch.ones(
-    generated_ids.shape,
-    device=self.device,
-    dtype=torch.bool,
-)
-```
-
-Position ids remain `torch.long`.
-
-## Bad Output From facebook/opt-1.3b
-
-### Symptom
-
-The model produces repetitive broken text:
+Symptoms:
 
 ```text
-by ... course ... when ... punctuation fragments ...
+failed to connect to bootstrap peers
+Daemon failed to start in 15.0 seconds
 ```
 
-### Likely Cause
+The first message means TCP/libp2p bootstrap connection failed. A generic readiness timeout can also mean duplicate/stuck `p2pd` processes or runtime incompatibility.
 
-The distributed split is not equivalent to OPT's normal forward pass. OPT needs decoder-specific preprocessing such as learned positional embeddings and model-specific mask handling. The current path only uses token embeddings before remote layers.
+Checks on the VPS:
 
-### Where to Inspect
+```bash
+pgrep -af "bootstrap.py|p2pd"
+sudo ss -ltnp | grep 7001
+sudo ufw status
+```
 
-- `backend/client/generation.py`
-- `backend/node/block_loader.py`
-- `backend/node/handler.py`
+Checks from a remote client:
 
-### Fix Direction
+```powershell
+Test-NetConnection <public-ip> -Port 7001
+```
 
-Create an OPT adapter that mirrors HuggingFace OPT decoder behavior before and after remote layers.
+Use the public multiaddress for remote machines and the loopback address only for processes on the VPS itself. Configure peers in root `.env`:
 
-## Error: No nodes found on the DHT
+```env
+DISTRIBLLM_INITIAL_PEERS=/ip4/<public-ip>/tcp/7001/p2p/<peer-id>
+```
 
-### Symptom
+Preserve `bootstrap.id`. Run exactly one persistent bootstrap instance. Use Python 3.12; Hivemind/Pydantic is not reliable on Python 3.14.
+
+TCP reachability proves only bootstrap transport. A worker RPC may still require another reachable port, relay support, or an overlay network.
+
+## Public Model Returns 401 or “Invalid Model Identifier”
+
+Observed root cause:
 
 ```text
-No nodes found on the DHT. Make sure at least one node is running.
+OAuth token has expired: "exp" claim timestamp check failed
+401 Unauthorized
+... is not a valid model identifier
 ```
 
-### Possible Causes
+TinyLlama is public. Before Sprint 12, the backend passed a stored expired OAuth token to public requests, and Transformers mislabeled the resulting 401 as a missing repository.
 
-- no serving node is running
-- client and server use different `dht_prefix`
-- bootstrap peer is unreachable
-- node announce failed
-- members list is stale or missing
-- node metadata expired
+Current behavior:
 
-### Where to Inspect
+- public model loading explicitly uses `token=False`
+- stored OAuth state is not read for public node/generator startup
+- failed startup cleans partial runtime resources
 
-- `backend/node/node.py`, `_announce`
-- `backend/client/sequential.py`, `_discover_nodes`
-- backend logs from `/node/start`
+Restart the backend after updating. If a public model still returns 401, confirm the running process is using the Sprint 12 code and inspect whether another wrapper overrides `token=False`.
 
-## Error: Incomplete layer coverage
+## Hugging Face Reconnect Required
 
-### Symptom
+Structured error:
 
 ```text
-Incomplete layer coverage - missing: [...]
+huggingface_reconnect_required
 ```
 
-### Root Cause
+The OAuth token used for an authenticated operation expired or was rejected. Reconnect Hugging Face in the Network UI and repeat the download. Existing validated local snapshots continue to load offline without OAuth.
 
-Discovered nodes do not cover every layer from `0` to `num_layers - 1`.
+## OAuth Client Not Configured
 
-### Fix Direction
-
-Start nodes that collectively cover the whole model. Longer term, route validation should show this before inference begins.
-
-## Error: Node failed after 3 attempts
-
-### Symptom
+Symptom:
 
 ```text
-Node 12D3KooW failed after 3 attempts. Last error: ...
+OAuth client ID is not configured
 ```
 
-### Possible Causes
+Set the public OAuth application client ID in the gitignored root `.env`:
 
-- RPC server stopped
-- `rpc_uid` is stale
-- remote layer call raised a model error
-- tensor shape/dtype mismatch
-- peer is unreachable
-- Hivemind expert lookup resolved but call failed
+```env
+DISTRIBLLM_HF_OAUTH_CLIENT_ID=<client-id>
+```
 
-### Where to Inspect
+Restart the backend. The client ID may be copied into a Colab secret, but access tokens must never be committed or placed in notebooks/source.
 
-- node backend logs
-- `backend/client/sequential.py`, `_call_node` and `_rpc_forward`
-- `backend/node/handler.py`, `forward`
+## OAuth Browser Does Not Open
 
-## Error: Generator not ready
+Hugging Face device OAuth uses `https://hf.co/oauth/device`. Electron permits `hf.co` and `huggingface.co` only for the external authorization action.
 
-### Symptom
+WSL/headless Linux may have no browser for `xdg-open`. The app attempts a Windows browser fallback and always shows the URL/code for manual authorization. Chrome does not need to be open beforehand.
 
-HTTP `/chat` returns `503`.
+## Gated Repository Access Denied
 
-### Root Cause
-
-`generator` global is `None` or `generator.is_loaded()` is false.
-
-### Fix Direction
-
-Start generator from the Network page before using the inference tab. Longer term, frontend should use a readiness endpoint and block sending until ready.
-
-## Frontend Cannot Reach Backend
-
-### Symptom
-
-Dashboard says backend not reachable, or all API calls fail.
-
-### Likely Cause
-
-The renderer is using a backend URL that does not match the running FastAPI server, or the Electron content security policy blocks the configured URL.
-
-The current defaults are `http://127.0.0.1:8000` and `ws://127.0.0.1:8000`. Vite env overrides must use `VITE_API_BASE_URL` and `VITE_WS_BASE_URL`.
-
-If the backend is running on another host or port, requests fail.
-
-### Fix Direction
-
-Set the frontend Vite env values to the running backend and restart the Electron/Vite dev server so the env is reloaded.
-
-## Error: DHT bootstrap peers cannot be reached
-
-### Symptom
-
-The backend can start its API layer, but `/node/start` and `/generator/start` fail before a node or generator becomes ready. The reported error is:
+Symptom:
 
 ```text
-Daemon failed to start: ... failed to connect to bootstrap peers
+The connected Hugging Face account is not approved for <model>
 ```
 
-### What was observed
+OAuth succeeded, but account access did not. Check the Hugging Face gated-repository status:
 
-- `/status` returned successfully.
-- `/node/start` and `/generator/start` both failed with the same DHT bootstrap error.
-- This prevented the distributed generation path from being exercised end to end.
+- Pending: wait for approval.
+- Accepted: ensure the exact repository belongs to the accepted gating group.
+- Terms changed: revisit the model page and accept them.
 
-### Where to inspect
+Llama 2 access does not imply Llama 3.2 access. DistribLLM cannot request or accept model terms for the user.
 
-- `backend/bootstrap.py`
-- `backend/constants.py`
-- `backend/api/server.py`
-- `backend/node/node.py`
+## Gated Local Import Required or Invalid
 
-### Likely causes
+Gated runtime startup requires a validated local snapshot. Common failures include missing tokenizer files, incomplete shards, wrong architecture/dimensions, moved folders, and a URL pasted where a local path is required.
 
-- The bootstrap node is not running.
-- The configured bootstrap address does not match the actual bootstrap node.
-- The host/port or network path is blocked.
-- The identity or peer metadata is stale or mismatched.
+Use the in-app OAuth download or Browse a complete local folder. Startup revalidates the registry before model construction and uses `local_files_only=True`.
 
-## Generation Trace Files
+## CUDA Is Unavailable
 
-### Use Case
+Symptoms:
 
-When generated text looks broken, repetitive, or contains replacement characters, call `/generator/trace` instead of relying only on `/chat` or the frontend stream. The endpoint records prompt token IDs, selected generated token IDs, decoded token text, decoded output so far, top candidates, tensor shapes, route trace, and replacement-character flags.
+```text
+CUDA requested but not available - falling back to CPU
+torch.cuda.is_available() == False
+```
 
-### Output Location
+Checks:
 
-Trace calls write JSON files to `backend/traces/` by default. Override the directory with `DISTRIBLLM_TRACE_DIR` when you want trace artifacts elsewhere. The directory is gitignored because traces are runtime debugging output.
+```bash
+nvidia-smi
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+```
 
-### How to Interpret
+In Colab, select a GPU runtime before installing/loading. Changing runtime resets `/content`; use a mounted Drive `HF_HOME` to persist model cache. Verify CUDA inside the project `.venv`, not only in the notebook kernel.
 
-- If the selected `token_id` is already odd but the decoded `token_text` is faithful, inspect sampling controls and top candidates.
-- If `token_text_contains_replacement_char` or `decoded_output_contains_replacement_char` becomes true, inspect tokenizer decoding and token boundary handling.
-- If `/generator/trace` looks clean but the frontend stream looks corrupted, inspect WebSocket chunk rendering and frontend concatenation.
-- If `/generator/parity/next-token` matches direct HuggingFace but `/chat` gives poor sampled text, treat the issue as sampling or base-model behavior until a broader parity failure is found.
+## CUDA Out of Memory
 
-## Debugging Checklist
+Structured error:
 
-1. Is the bootstrap node running?
-2. Does `backend/constants.py` contain the correct bootstrap peer?
-3. Is at least one serving node running?
-4. Does `/nodes` show the node?
-5. Does the node metadata model match the generator model?
-6. Does the route cover all layers exactly once?
-7. Does every route node have `rpc_uid`?
-8. Does generator readiness pass before inference?
-9. Does the model have a correct architecture adapter?
-10. Can a local split parity test reproduce HuggingFace logits?
+```text
+cuda_out_of_memory
+```
+
+Reduce the served layer range, delete/unload other nodes or generator state, use CPU, or select a smaller model. Layer slicing reduces final device memory but the current loader still constructs the complete model on CPU first.
+
+## CPU RAM Exhaustion During Model Loading
+
+Llama 2 7B downloads about 13.5 GB of fp16 weights. The current loader needs enough CPU RAM to construct the complete model before retaining a slice. A 12.7 GB Colab runtime is insufficient even if the assigned GPU layers would fit.
+
+Use a high-RAM runtime/VPS, choose a smaller model, or implement selective shard/layer loading in a future sprint.
+
+## No Nodes or Incomplete Route
+
+Symptoms:
+
+```text
+No nodes found on the DHT
+Incomplete layer coverage
+Route is not contiguous
+```
+
+Check:
+
+1. All participants use the same `DISTRIBLLM_DHT_PREFIX`.
+2. Node and generator model IDs match exactly.
+3. Layer ranges form a complete route from zero to model depth.
+4. Nodes have fresh metadata, `rpc_uid`, loaded layers, and running RPC.
+5. Remote worker addresses are reachable, not merely visible in DHT.
+
+The `/models` and `/generator/status` responses include route reasons, coverage, and trace information. Registry support alone does not mean a model is runnable.
+
+## RPC Node Fails After Retries
+
+Possible causes:
+
+- worker RPC port is blocked by firewall/NAT
+- stale DHT metadata or RPC UID
+- remote node stopped after announcing
+- tensor shape/dtype or architecture mismatch
+- Colab joined discovery outbound but cannot accept inbound RPC
+
+Inspect node logs, route trace, `backend/client/sequential.py`, `backend/node/handler.py`, and worker-visible multiaddresses. VPS workers may need fixed-port/relay support beyond the bootstrap port.
+
+## Poor or Repetitive Output
+
+Base completion models such as OPT are transport/parity targets, not reliable chat models. First compare direct Hugging Face and distributed behavior:
+
+- `/generator/parity/next-token`
+- `/generator/parity/generate`
+- `/generator/trace`
+- `/generator/traces/analysis`
+
+If deterministic next-token parity passes, classify weak prose as model/sampling behavior before assuming route corruption. Prefer TinyLlama chat or Llama 2 chat for instruction-ready validation.
+
+## Trace Files
+
+Trace JSON defaults to `backend/traces/`; override with `DISTRIBLLM_TRACE_DIR`. Traces are gitignored. Review token IDs, top candidates, decoded output, tensor shapes, replacement-character flags, and route trace. Never add raw tokens, local paths, or secrets to trace artifacts.
+
+## Fast Checklist
+
+1. Backend `/status` responds.
+2. Correct public bootstrap peer appears in `/models.default_peers`.
+3. Bootstrap TCP port is externally reachable.
+4. Public models are loading anonymously; gated models have validated local imports.
+5. Requested device exists and has enough VRAM.
+6. Host has enough CPU RAM for full-model construction.
+7. `/nodes` shows fresh compatible nodes and RPC UIDs.
+8. `/generator/status` reports complete contiguous coverage.
+9. Worker RPC addresses are reachable across firewall/NAT.
+10. Use parity/trace tools before diagnosing output quality.

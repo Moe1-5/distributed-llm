@@ -1,5 +1,7 @@
 # Code Issues
 
+> Historical running test log. Findings record what was true when observed and are not rewritten when later sprints fix them. Use `docs/CURRENT_ARCHITECTURE.md`, `docs/FLOWS.md`, and `docs/ERRORS_AND_DEBUGGING.md` for current behavior.
+
 ## 2026-07-06 Sprint 04 local smoke test findings
 
 **Scope tested:** local bootstrap node, backend API, `/status`, `/models`, one CPU serving node for `facebook/opt-125m` layers `0-12`, `/nodes`, generator startup, `/generator/status`, `/chat`, and a local multi-node split attempt.
@@ -528,9 +530,94 @@ Daemon failed to start: ... failed to connect to bootstrap peers
 **Likely causes:**
 
 - The bootstrap node is not running or is not reachable from the client.
-- The peer address in `backend/constants.py` is stale, incorrect, or mismatched with the running bootstrap node.
+- The runtime peer address from `DISTRIBLLM_INITIAL_PEERS` is stale, incorrect, or mismatched with the running bootstrap node; development fallback peers remain in `backend/constants.py`.
 - Network or firewall restrictions are blocking the DHT connection.
 
 **Verification evidence:**
 
 - Reproduced by invoking the startup endpoints through the FastAPI test client; both returned the same bootstrap-peer connection failure.
+
+**2026-07-13 smoke-test recurrence:** a fresh full TinyLlama smoke pass stopped at `/node/start` with the same `failed to connect to bootstrap peers` error for the configured public VPS address. No node or client DHT remained registered after cleanup. This blocked model loading, route validation, and prompt generation for that pass; it does not invalidate the separate successful verification of the local expert-routing fix in issue 11.
+
+## 11. Route readiness passes but RPC peer routing is not found
+
+**Initial harness observation:**
+
+- TinyLlama layers `0-22` loaded successfully on CUDA.
+- The RPC expert started and announced as `distribllm.0.22` through the public VPS bootstrap.
+- The generator loaded its local components successfully.
+- The first deterministic prompt failed after three retries before producing any token.
+
+```text
+failed to dial: dial to self attempted
+Node ... failed after 3 attempts
+```
+
+The first ad hoc test reused the serving node's DHT object and produced `dial to self attempted`. That harness did not match the application lifecycle and was corrected.
+
+**Corrected application-topology observation:**
+
+- `/node/start` semantics created a full TinyLlama `0-22` CUDA serving node with its own peer identity.
+- `/generator/start` semantics created a separate `client_dht` identity and loaded the generator.
+- `/generator/status` returned `ready=true`, `route_ready=true`, and route `0-22`.
+- The first prompt failed before producing a token after three RPC retries:
+
+```text
+routing: not found
+Node ... failed after 3 attempts
+```
+
+**Current interpretation:**
+
+Application-level DHT metadata discovery and route validation can see the serving node, but Hivemind expert lookup cannot resolve or route to its P2P peer. The serving node advertises WSL loopback/private addresses while both peers enter through the public VPS bootstrap. Bootstrap discovery success does not currently guarantee an RPC-dialable path.
+
+**Cleanup observation:**
+
+Node/RPC shutdown completed, but Hivemind destructors later reported no current event loop and a pending control-client task. This should be checked after the generator and serving node run in separate processes.
+
+**Status:** confirmed transport/readiness defect. Same-machine serving and generation remain intended and previously worked with local bootstrap, but the VPS-backed route currently reports ready before proving expert peer reachability. No prompt response was produced, cleanup returned stopped for both DHT roles, and no fix was attempted during the smoke-test pass.
+
+**2026-07-13 fix and verification:** generator startup now adds matching local node multiaddresses as direct initial peers, and readiness probes expert RPC metadata. The corrected live test passed routing for three prompts through TinyLlama layers `0-22`; this transport issue is fixed for same-machine serving/generation with a VPS bootstrap.
+
+## 12. TinyLlama chat route returns an empty response for raw prompts
+
+**Observed after RPC routing was fixed:**
+
+- Full TinyLlama `0-22` route was ready and expert RPC probes passed.
+- Three deterministic prompts completed through the route without transport errors.
+- Every `/chat` result contained an empty response and zero visible tokens.
+
+```text
+response: ""
+tokens_generated: 0
+```
+
+**Likely cause:**
+
+`/chat` passes the raw user string directly to `DistributedGenerator.generate_stream`. TinyLlama Chat expects its tokenizer chat template with user/assistant role markers and a generation prompt. Greedy decoding selected an immediate special/end token, which is omitted by `skip_special_tokens=True`, leaving no visible text.
+
+**Fix direction:**
+
+Format prompts according to registry tuning metadata. Chat/instruct models should use `tokenizer.apply_chat_template(..., add_generation_prompt=True)` when supported, while base models must preserve raw completion prompts. Add tests that prevent double-formatting and verify a visible TinyLlama response.
+
+**Status:** confirmed prompt-formatting/product behavior issue. It was discovered after the routing fix and was not changed during the same smoke-test pass.
+
+**2026-07-13 retest status:** a planned chat-template probe could not reach prompt generation because the public VPS bootstrap connection failed during node startup. The prompt-formatting issue therefore remains open and was not reclassified by this pass.
+
+**2026-07-13 successful template probe:** after the VPS bootstrap became reachable, a full TinyLlama `0-22` CUDA node, separate generator, reachable-route probe, and three manually chat-templated prompts all completed. The answers were non-empty and semantically correct, confirming that the model and distributed route work when the template is supplied. Production `/chat` still passes raw input and therefore still needs model-aware template application.
+
+## 13. Streaming token decoding removes spaces from generated text
+
+**Observed during the successful TinyLlama template smoke test:**
+
+- Capital prompt: `ThecapitalofFranceisParis.`
+- Arithmetic prompt: `2+2=4`
+- Distributed-computing prompt: words were concatenated throughout the sentence.
+
+All three responses were semantically correct and traversed the complete remote `0-22` route, but normal spaces between words were missing.
+
+**Likely cause:** `backend/client/generation.py` decodes each generated token independently and immediately yields that fragment. Tokenizers such as TinyLlama's encode word boundaries in token context, so independent decoding can lose spacing that would be preserved when decoding the complete generated token sequence.
+
+**Fix direction:** preserve generated token identifiers and derive each stream delta from context-aware decoding, or use the tokenizer's supported streaming decoder. Add a regression test proving that streamed fragments concatenate to the same visible text as decoding the full generated sequence once.
+
+**Status:** confirmed output-formatting defect. It was recorded but not fixed during the smoke-test pass.

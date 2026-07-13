@@ -220,8 +220,8 @@ class LocalModelImportTests(unittest.TestCase):
             def __init__(self, snapshot_path: Path) -> None:
                 self.repos = {FakeRepo(snapshot_path)}
 
-            def delete_revisions(self, commit_hash: str) -> FakeStrategy:
-                deleted.append(commit_hash)
+            def delete_revisions(self, *commit_hashes: str) -> FakeStrategy:
+                deleted.extend(commit_hashes)
                 return FakeStrategy()
 
         deleted: list[str] = []
@@ -246,6 +246,58 @@ class LocalModelImportTests(unittest.TestCase):
         self.assertEqual(result["deleted_bytes"], 1234)
         self.assertEqual(deleted, ["abc123", "executed"])
         self.assertEqual(listed, [])
+
+    def test_remove_local_model_deletes_cache_even_without_registry_entry(self) -> None:
+        from api import local_models
+
+        class FakeRevision:
+            def __init__(self, commit_hash: str, snapshot_path: Path) -> None:
+                self.commit_hash = commit_hash
+                self.snapshot_path = snapshot_path
+
+        class FakeRepo:
+            repo_type = "model"
+            repo_id = "meta-llama/Llama-3.2-1B"
+
+            def __init__(self, root: Path) -> None:
+                self.revisions = {
+                    FakeRevision("rev-a", root / "snapshots" / "rev-a"),
+                    FakeRevision("rev-b", root / "snapshots" / "rev-b"),
+                }
+
+        class FakeStrategy:
+            expected_freed_size = 4096
+            expected_freed_size_str = "4.0 KB"
+
+            def execute(self) -> None:
+                deleted.append("executed")
+
+        class FakeCacheInfo:
+            def __init__(self, root: Path) -> None:
+                self.repos = {FakeRepo(root)}
+
+            def delete_revisions(self, *commit_hashes: str) -> FakeStrategy:
+                deleted.extend(commit_hashes)
+                return FakeStrategy()
+
+        deleted: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "registry.json"
+            original_registry = local_models._REGISTRY_FILE
+            original_scan_cache_dir = local_models.scan_cache_dir
+            local_models._REGISTRY_FILE = registry_path
+            local_models.scan_cache_dir = lambda: FakeCacheInfo(Path(tmp) / "cache")
+            try:
+                result = remove_local_model("meta-llama/Llama-3.2-1B", delete_files=True)
+            finally:
+                local_models._REGISTRY_FILE = original_registry
+                local_models.scan_cache_dir = original_scan_cache_dir
+
+        self.assertTrue(result["removed"])
+        self.assertFalse(result["registry_removed"])
+        self.assertTrue(result["files_deleted"])
+        self.assertEqual(set(deleted[:-1]), {"rev-a", "rev-b"})
+        self.assertEqual(deleted[-1], "executed")
 
     def test_remove_local_model_does_not_delete_arbitrary_manual_folder(self) -> None:
         from api import local_models
@@ -626,9 +678,14 @@ class HuggingFaceOAuthTests(unittest.TestCase):
 
     def test_huggingface_download_uses_saved_token_then_imports_snapshot(self) -> None:
         original_get_token = hf_oauth.get_hf_token
+        original_hf_api = hf_oauth.HfApi
         original_snapshot_download = hf_oauth.snapshot_download
         original_import_local_model = hf_oauth.import_local_model
-        calls: list[tuple[str, str | None, str | None]] = []
+        calls: list[tuple[str, str | None, str | None, list[str]]] = []
+
+        class FakeHfApi:
+            def list_repo_files(self, **kwargs) -> list[str]:
+                return ["config.json", "model.safetensors", "pytorch_model.bin"]
 
         def fake_snapshot_download(
             *,
@@ -636,12 +693,14 @@ class HuggingFaceOAuthTests(unittest.TestCase):
             revision: str | None,
             token: str | None,
             repo_type: str,
+            ignore_patterns: list[str],
         ) -> str:
             self.assertEqual(repo_type, "model")
-            calls.append((repo_id, revision, token))
+            calls.append((repo_id, revision, token, ignore_patterns))
             return "/tmp/hf-snapshot"
 
         hf_oauth.get_hf_token = lambda: "hf_oauth_secret"
+        hf_oauth.HfApi = FakeHfApi
         hf_oauth.snapshot_download = fake_snapshot_download
         hf_oauth.import_local_model = lambda model_name, path: {
             "model_name": model_name,
@@ -654,11 +713,13 @@ class HuggingFaceOAuthTests(unittest.TestCase):
             result = hf_oauth.download_huggingface_model("meta-llama/Llama-3.2-1B")
         finally:
             hf_oauth.get_hf_token = original_get_token
+            hf_oauth.HfApi = original_hf_api
             hf_oauth.snapshot_download = original_snapshot_download
             hf_oauth.import_local_model = original_import_local_model
 
         self.assertEqual(result["status"], "downloaded")
-        self.assertEqual(calls, [("meta-llama/Llama-3.2-1B", None, "hf_oauth_secret")])
+        self.assertEqual(calls[0][:3], ("meta-llama/Llama-3.2-1B", None, "hf_oauth_secret"))
+        self.assertIn("*.bin", calls[0][3])
         self.assertNotIn("hf_oauth_secret", json.dumps(result))
 
     def test_huggingface_download_requires_connection_for_gated_model(self) -> None:
@@ -675,7 +736,12 @@ class HuggingFaceOAuthTests(unittest.TestCase):
 
     def test_huggingface_download_maps_gated_access_denied(self) -> None:
         original_get_token = hf_oauth.get_hf_token
+        original_hf_api = hf_oauth.HfApi
         original_snapshot_download = hf_oauth.snapshot_download
+
+        class FakeHfApi:
+            def list_repo_files(self, **kwargs) -> list[str]:
+                return ["model.safetensors"]
 
         class DummyResponse:
             status_code = 403
@@ -686,12 +752,14 @@ class HuggingFaceOAuthTests(unittest.TestCase):
             raise hf_oauth.GatedRepoError("not approved", response=DummyResponse())
 
         hf_oauth.get_hf_token = lambda: "hf_oauth_secret"
+        hf_oauth.HfApi = FakeHfApi
         hf_oauth.snapshot_download = fake_snapshot_download
         try:
             with self.assertRaises(hf_oauth.HuggingFaceOAuthError) as raised:
                 hf_oauth.download_huggingface_model("meta-llama/Llama-3.2-1B")
         finally:
             hf_oauth.get_hf_token = original_get_token
+            hf_oauth.HfApi = original_hf_api
             hf_oauth.snapshot_download = original_snapshot_download
 
         self.assertEqual(raised.exception.code, "gated_model_access_denied")
@@ -805,6 +873,85 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             "model_name": "facebook/opt-125m",
             "rpc_uid": "uid-123",
         }
+
+    def test_generator_initial_peers_include_matching_local_node_addresses(self) -> None:
+        from api import server as api_server
+
+        class FakeNode:
+            def __init__(self, model_name: str, dht_prefix: str, running: bool, maddrs: list[str]) -> None:
+                self.model_name = model_name
+                self.dht_prefix = dht_prefix
+                self.running = running
+                self.maddrs = maddrs
+
+            def is_running(self) -> bool:
+                return self.running
+
+            def get_visible_maddrs(self) -> list[str]:
+                return self.maddrs
+
+        original_local_nodes = dict(api_server.local_nodes)
+        api_server.local_nodes.clear()
+        api_server.local_nodes.update(
+            {
+                "matching": FakeNode("facebook/opt-125m", "test-prefix", True, ["local-peer"]),
+                "wrong-model": FakeNode("facebook/opt-1.3b", "test-prefix", True, ["wrong-model"]),
+                "offline": FakeNode("facebook/opt-125m", "test-prefix", False, ["offline"]),
+            }
+        )
+        try:
+            peers = api_server._generator_initial_peers(
+                ["bootstrap", "bootstrap"],
+                "facebook/opt-125m",
+                "test-prefix",
+            )
+        finally:
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+
+        self.assertEqual(peers, ["bootstrap", "local-peer"])
+
+    def test_reachable_route_probes_each_expert(self) -> None:
+        from client import sequential as sequential_module
+
+        class FakeExpert:
+            @property
+            def info(self) -> dict:
+                probed.append(True)
+                return {"ready": True}
+
+        route = [self.make_node(0, 8, "peer-a")]
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
+        sequential.validate_route = lambda nodes=None: route
+        original_get_experts = sequential_module.get_experts
+        probed: list[bool] = []
+        sequential_module.get_experts = lambda dht, uids: [FakeExpert()]
+        try:
+            result = sequential.validate_reachable_route()
+        finally:
+            sequential_module.get_experts = original_get_experts
+
+        self.assertEqual(result, route)
+        self.assertEqual(probed, [True])
+
+    def test_reachable_route_rejects_unreachable_expert(self) -> None:
+        from client import sequential as sequential_module
+
+        class FailingExpert:
+            @property
+            def info(self) -> dict:
+                raise RuntimeError("routing: not found")
+
+        route = [self.make_node(0, 8, "peer-a")]
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
+        sequential.validate_route = lambda nodes=None: route
+        original_get_experts = sequential_module.get_experts
+        sequential_module.get_experts = lambda dht, uids: [FailingExpert()]
+        try:
+            with self.assertRaisesRegex(RuntimeError, "Route RPC probe failed.*routing: not found"):
+                sequential.validate_reachable_route()
+        finally:
+            sequential_module.get_experts = original_get_experts
 
     def test_plan_route_returns_contiguous_non_overlapping_spans(self) -> None:
         sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
@@ -2050,7 +2197,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         from api import server as api_server
 
         class DummySequential:
-            def validate_route(self) -> list[dict]:
+            def validate_reachable_route(self) -> list[dict]:
                 raise RuntimeError("missing layers")
 
         class DummyGenerator:
@@ -2313,6 +2460,109 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertIn("import the local model directory", result["message"])
         self.assertEqual(created, [])
 
+    def test_public_node_start_does_not_read_or_pass_huggingface_token(self) -> None:
+        from api import server as api_server
+
+        captured: dict[str, object] = {}
+
+        class FakeNode:
+            def __init__(self, **kwargs) -> None:
+                captured.update(kwargs)
+                self.node_id = "public-node"
+                self.dht_prefix = kwargs["dht_prefix"]
+                self.model_name = kwargs["model_name"]
+                self.layer_start = kwargs["layer_start"]
+                self.layer_end = kwargs["layer_end"]
+
+            def start(self) -> None:
+                pass
+
+            def is_running(self) -> bool:
+                return True
+
+            def get_info(self) -> dict:
+                return {"node_id": self.node_id, "running": True}
+
+        original_node_class = api_server.Node
+        original_get_token = api_server.get_hf_token
+        original_get_path = api_server.get_local_model_path
+        original_local_nodes = dict(api_server.local_nodes)
+        original_node = api_server.node
+        api_server.Node = FakeNode
+        api_server.get_hf_token = lambda: (_ for _ in ()).throw(
+            AssertionError("public startup must not read OAuth state")
+        )
+        api_server.get_local_model_path = lambda model_name: None
+        api_server.local_nodes.clear()
+        try:
+            result = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                        layer_start=0,
+                        layer_end=1,
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                        device="cpu",
+                    )
+                )
+            )
+        finally:
+            api_server.Node = original_node_class
+            api_server.get_hf_token = original_get_token
+            api_server.get_local_model_path = original_get_path
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+            api_server.node = original_node
+
+        self.assertEqual(result["status"], "started")
+        self.assertIsNone(captured["hf_token"])
+
+    def test_failed_node_start_cleans_up_and_maps_expired_oauth(self) -> None:
+        from api import server as api_server
+
+        captured: dict[str, object] = {}
+
+        class FailingNode:
+            def __init__(self, **kwargs) -> None:
+                captured["node"] = self
+                self.stopped = False
+
+            def start(self) -> None:
+                raise RuntimeError('OAuth token has expired: "exp" claim timestamp check failed')
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        original_node_class = api_server.Node
+        original_get_path = api_server.get_local_model_path
+        original_local_nodes = dict(api_server.local_nodes)
+        api_server.Node = FailingNode
+        api_server.get_local_model_path = lambda model_name: None
+        api_server.local_nodes.clear()
+        try:
+            result = asyncio.run(
+                api_server.start_node(
+                    api_server.NodeStartRequest(
+                        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                        layer_start=0,
+                        layer_end=1,
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                        device="cpu",
+                    )
+                )
+            )
+        finally:
+            api_server.Node = original_node_class
+            api_server.get_local_model_path = original_get_path
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+
+        self.assertEqual(result["error"], "huggingface_reconnect_required")
+        self.assertIn("Reconnect Hugging Face", result["message"])
+        self.assertTrue(captured["node"].stopped)
+
     def test_start_generator_requires_local_import_for_gated_model_before_loading(self) -> None:
         from api import server as api_server
 
@@ -2438,6 +2688,70 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(result["error"], "cuda_out_of_memory")
         self.assertIn("Reduce the served layer range", result["message"])
         self.assertIsNone(api_server.client_dht)
+
+    def test_failed_generator_start_unloads_partial_state_and_dht(self) -> None:
+        from api import server as api_server
+
+        captured: dict[str, object] = {}
+
+        class FakeDHT:
+            peer_id = "fake-client-peer"
+
+            def __init__(self, *args, **kwargs) -> None:
+                captured["dht"] = self
+                self.shutdown_called = False
+
+            def shutdown(self) -> None:
+                self.shutdown_called = True
+
+        class FakeSequential:
+            def __init__(self, **kwargs) -> None:
+                pass
+
+        class FailingGenerator:
+            def __init__(self, **kwargs) -> None:
+                captured["generator"] = self
+                self.unloaded = False
+
+            def load(self) -> None:
+                raise RuntimeError("generator load failed")
+
+            def unload(self) -> None:
+                self.unloaded = True
+
+        original_generator_cls = api_server.DistributedGenerator
+        original_dht_cls = api_server.hivemind.DHT
+        original_sequential_cls = api_server.RemoteSequential
+        original_get_path = api_server.get_local_model_path
+        original_generator = api_server.generator
+        original_client_dht = api_server.client_dht
+        api_server.DistributedGenerator = FailingGenerator
+        api_server.hivemind.DHT = FakeDHT
+        api_server.RemoteSequential = FakeSequential
+        api_server.get_local_model_path = lambda model_name: None
+        api_server.generator = None
+        api_server.client_dht = None
+        try:
+            result = asyncio.run(
+                api_server.start_generator(
+                    api_server.GeneratorStartRequest(
+                        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                        dht_prefix="test-prefix",
+                        initial_peers=[],
+                    )
+                )
+            )
+        finally:
+            api_server.DistributedGenerator = original_generator_cls
+            api_server.hivemind.DHT = original_dht_cls
+            api_server.RemoteSequential = original_sequential_cls
+            api_server.get_local_model_path = original_get_path
+            api_server.generator = original_generator
+            api_server.client_dht = original_client_dht
+
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(captured["generator"].unloaded)
+        self.assertTrue(captured["dht"].shutdown_called)
 
     def test_stop_generator_requests_cancellation(self) -> None:
         from api import server as api_server

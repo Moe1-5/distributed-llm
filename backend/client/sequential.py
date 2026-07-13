@@ -455,6 +455,26 @@ class RemoteSequential:
             f"Last error: {last_error}"
         )
 
+    def validate_reachable_route(self) -> list[dict]:
+        """Validate coverage and prove that every selected expert can answer RPC metadata."""
+        route = self.validate_route()
+        rpc_uids = [str(node["rpc_uid"]) for node in route]
+        experts = get_experts(self.dht, rpc_uids)
+        failures: list[str] = []
+        for index, node in enumerate(route):
+            peer_id = str(node["peer_id"])
+            expert = experts[index] if index < len(experts) else None
+            if expert is None:
+                failures.append(f"{peer_id[:8]}: expert {node['rpc_uid']} not found")
+                continue
+            try:
+                expert.info
+            except Exception as exc:
+                failures.append(f"{peer_id[:8]}: {exc}")
+        if failures:
+            raise RuntimeError("Route RPC probe failed: " + "; ".join(failures))
+        return route
+
     def _rpc_forward(
         self,
         rpc_uid:       str,

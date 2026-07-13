@@ -47,7 +47,11 @@ def load_layers(
     assert device in ("cuda", "cpu"), f"device must be 'cuda' or 'cpu', got '{device}'"
 
     source = local_model_path or model_name
-    token_kwargs = {"token": hf_token} if hf_token and not local_model_path else {}
+    token_kwargs = (
+        {"token": hf_token}
+        if hf_token and not local_model_path
+        else ({"token": False} if not local_model_path else {})
+    )
     local_kwargs = {"local_files_only": True} if local_model_path else {}
 
     logger.info(f"Fetching config for {model_name} from {source}...")

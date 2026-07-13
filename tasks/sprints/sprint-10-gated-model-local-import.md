@@ -216,3 +216,9 @@ This keeps passwords and pasted tokens out of the UI while still allowing Distri
 - What changed: staged the Sprint 10 OAuth, local import, frontend, docs, and sprint-tracking changes in git without pushing, and recorded the live Hugging Face device-login result.
 - Why: the app successfully connected to Hugging Face, but the selected `meta-llama/Llama-3.2-1B` repo is still pending account approval; stale device-code polls can also return expired/not-found after multiple auth attempts.
 - Status: Sprint 10 remains open for live validation; next live gated download should use an approved repo such as the accepted Llama 2 family, while Llama 3.2 must wait for Hugging Face approval.
+
+### 2026-07-13 - Refresh canonical documentation after OAuth and model expansion
+
+- What changed: updated the documentation landing page, architecture, runtime flows, repo map, troubleshooting guide, implementation roadmap, validation gates, frontend setup, issue-log framing, and decision records to reflect browser OAuth, validated offline gated runtime, public anonymous loading, TinyLlama/Llama 2 options, VPS/Colab workers, current node lifecycle/routing, cache deletion, and Sprint 13 incentive deferral.
+- Why: several canonical Markdown files still described the Sprint 4-era one-node/token-paste/bootstrap-field prototype and could mislead future implementation and testing.
+- Status: active documentation now matches the current source and clearly separates implemented behavior from pending live TinyLlama, gated inference, and real multi-machine validation; archived sprint records remain unchanged as historical evidence.

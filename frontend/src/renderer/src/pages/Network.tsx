@@ -417,7 +417,7 @@ export default function Network(): React.JSX.Element {
       )
       log(
         result.files_deleted
-          ? `Deleted ${modelId} cached files (${result.deleted_size})`
+          ? `Deleted all ${modelId} cached files (${result.deleted_size})`
           : result.message,
         result.files_deleted ? 'success' : 'info'
       )

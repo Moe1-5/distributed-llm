@@ -64,6 +64,7 @@
 | `tasks/lessons.md`                                           | Assistant lessons: active and internalized.                                          |
 | `tasks/sprints/sprint-10-gated-model-local-import.md`          | Active sprint plan for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
 | `tasks/sprints/sprint-11-instruction-ready-model-expansion.md` | Active future sprint plan for adding instruction-ready/chat-ready supported models without fine-tuning a baseline model. |
+| `tasks/sprints/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Active sprint for public-model auth isolation, expired-token errors, and failed-start resource cleanup. |
 | `tasks/sprints/sprint-13-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
 | `tasks/archive/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Completed sprint for safe node lifecycle, duplicate/multi-model local serving, HuggingFace token validation, trace analysis, and shutdown hardening. |
 | `tasks/archive/sprint-01-stabilize-prototype.md`              | Completed sprint for stabilizing distributed inference.                              |
@@ -101,6 +102,7 @@
 | Path                     | What's inside                                                                        |
 | ------------------------ | ------------------------------------------------------------------------------------ |
 | `backend/main.py`        | Uvicorn entry point.                                                                 |
+| `backend/colab_worker.py` | Headless remote worker entry point with browser OAuth support for Colab and GPU hosts. |
 | `backend/api/`           | FastAPI app, root `.env` loading, settings/token endpoints, Hugging Face OAuth/download helpers, and local model import registry. |
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
 | `backend/node/`          | Serving node, layer loading, Hivemind RPC, and GPU monitoring.                       |

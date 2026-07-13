@@ -323,8 +323,8 @@ def _public_import(record: dict[str, Any], include_path: bool = False) -> dict[s
     return result
 
 
-def _delete_hf_cached_snapshot(model_name: str, path: str) -> dict[str, Any]:
-    snapshot_path = Path(path).expanduser().resolve()
+def _delete_hf_cached_model(model_name: str, path: str | None = None) -> dict[str, Any]:
+    snapshot_path = Path(path).expanduser().resolve() if path else None
     try:
         cache_info = scan_cache_dir()
     except Exception as exc:
@@ -336,19 +336,33 @@ def _delete_hf_cached_snapshot(model_name: str, path: str) -> dict[str, Any]:
     for repo in cache_info.repos:
         if repo.repo_type != "model" or repo.repo_id != model_name:
             continue
-        for revision in repo.revisions:
-            if Path(revision.snapshot_path).resolve() != snapshot_path:
-                continue
-            strategy = cache_info.delete_revisions(revision.commit_hash)
-            freed_bytes = int(strategy.expected_freed_size)
-            freed_size = strategy.expected_freed_size_str
-            strategy.execute()
-            return {
-                "files_deleted": True,
-                "deleted_bytes": freed_bytes,
-                "deleted_size": freed_size,
-                "message": f"Deleted cached Hugging Face snapshot for {model_name}.",
-            }
+        revisions = list(repo.revisions)
+        managed_paths = {Path(revision.snapshot_path).resolve() for revision in revisions}
+        if snapshot_path is not None and snapshot_path not in managed_paths:
+            break
+        commit_hashes = [revision.commit_hash for revision in revisions]
+        if not commit_hashes:
+            break
+        strategy = cache_info.delete_revisions(*commit_hashes)
+        freed_bytes = int(strategy.expected_freed_size)
+        freed_size = strategy.expected_freed_size_str
+        repo_path = Path(getattr(repo, "repo_path", ""))
+        strategy.execute()
+        if repo_path.name:
+            lock_dir = repo_path.parent / ".locks" / repo_path.name
+            try:
+                lock_dir.rmdir()
+            except OSError:
+                pass
+        return {
+            "files_deleted": True,
+            "deleted_bytes": freed_bytes,
+            "deleted_size": freed_size,
+            "message": (
+                f"Deleted all {len(commit_hashes)} cached Hugging Face revision(s) "
+                f"for {model_name}."
+            ),
+        }
 
     return {
         "files_deleted": False,
@@ -424,16 +438,22 @@ def get_local_model_path(model_name: str) -> str | None:
 def remove_local_model(model_name: str, delete_files: bool = False) -> dict[str, Any]:
     registry = _load_registry()
     imports = registry.setdefault("imports", {})
-    if not isinstance(imports, dict) or model_name not in imports:
+    if not isinstance(imports, dict):
+        imports = {}
+        registry["imports"] = imports
+    record = imports.get(model_name)
+    registry_removed = model_name in imports
+
+    if not registry_removed and not delete_files:
         return {
             "removed": False,
+            "registry_removed": False,
             "files_deleted": False,
             "deleted_bytes": 0,
             "deleted_size": "0.0",
             "message": f"No local import is registered for {model_name}.",
         }
 
-    record = imports.get(model_name)
     delete_result = {
         "files_deleted": False,
         "deleted_bytes": 0,
@@ -441,16 +461,19 @@ def remove_local_model(model_name: str, delete_files: bool = False) -> dict[str,
         "message": "Removed the local import registry entry.",
     }
     if delete_files:
-        if not isinstance(record, dict) or not record.get("path"):
+        if registry_removed and (not isinstance(record, dict) or not record.get("path")):
             raise LocalModelDeletionError(
                 "local_model_import_missing_path",
                 f"Stored local import for {model_name} is missing its path.",
             )
-        delete_result = _delete_hf_cached_snapshot(model_name, str(record["path"]))
+        registered_path = str(record["path"]) if isinstance(record, dict) else None
+        delete_result = _delete_hf_cached_model(model_name, registered_path)
 
-    del imports[model_name]
-    _save_registry(registry)
+    if registry_removed:
+        del imports[model_name]
+        _save_registry(registry)
     return {
-        "removed": True,
+        "removed": registry_removed or bool(delete_result["files_deleted"]),
+        "registry_removed": registry_removed,
         **delete_result,
     }

@@ -11,8 +11,8 @@
 
 ## Active Sprint
 
-**Sprint:** Sprint 10 is the lowest active sprint and remains open for live gated-model validation; Sprint 11 has started for instruction-ready model expansion; Sprint 13 is planned for incentives.
-**Goal:** Sprint 10 implementation is complete but live Llama 3.2 download is blocked by pending Hugging Face approval; Sprint 11 now adds better open/chat/gated model options for inference validation.
+**Sprint:** Sprint 10 remains the lowest active sprint; Sprint 11 expands instruction-ready models; Sprint 12 fixes auth/startup lifecycle failures; Sprint 13 is planned for incentives.
+**Goal:** Complete live gated and instruction-ready inference validation while preventing stale OAuth credentials and failed startup attempts from leaking runtime resources.
 
 ## Tech Stack
 
@@ -26,7 +26,7 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 
 - [x] Tests configured
 - [ ] CI/CD active
-- [ ] Auth implemented
+- [x] Auth implemented
 - [ ] First deploy done
 - [ ] Database migrations tracked
 - [x] Documentation map created
@@ -41,3 +41,5 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 09 closed: non-destructive node pause/resume/delete semantics, duplicate and multi-model local serving, HuggingFace token validation, structured trace-artifact analysis, and backend shutdown hardening are checklist-complete and archived.
 - Sprint 10 implementation is complete: Hugging Face device OAuth, redacted auth status, download job status/cancel, validated local import handoff, startup from validated local paths, and manual folder fallback are tested. External live validation is blocked on approved gated-model access for the selected repo; Llama 2 access is accepted while Llama 3.2 is pending.
 - Sprint 11 has started with TinyLlama chat as an open smoke-test option, Llama 2 base/chat gated options for the accepted model family, and explicit base/chat/instruct metadata in the model registry.
+- Sprint 12 targets the live TinyLlama failure where an expired OAuth token was sent to a public repo and failed startup left partial DHT cleanup uncertain.
+- Canonical docs were refreshed on 2026-07-13 for OAuth/local imports, model registry, public bootstrap/remote workers, current lifecycle/routing, and live validation gaps.

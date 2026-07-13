@@ -41,6 +41,16 @@
 
 <!-- Add new lessons here -->
 
+### [2026-07-13] Match smoke-test topology to the application lifecycle
+**Problem:** I reused a serving node's DHT object for a generator smoke test, triggered Hivemind's valid self-dial rejection, and initially described it as a system limitation even though the real generator endpoint creates a separate client DHT identity.
+**Rule:** Distributed smoke tests must use the same identity and process boundaries as the production API path before classifying a transport failure as a product bug.
+**Why:** Physical-machine co-location is not the same as peer-identity reuse; an inaccurate harness can falsely invalidate a workflow that the application already supports.
+
+### [2026-07-13] Keep public model loading independent from OAuth state
+**Problem:** The backend passed a stored expired OAuth token to a public TinyLlama request, turning anonymous public access into a 401 failure that Transformers mislabeled as an invalid repository.
+**Rule:** Pass Hugging Face credentials only when the selected operation and repository require them; public model loading must remain anonymous, and rejected credentials must map to an explicit reconnect action.
+**Why:** Optional account state must not reduce public model availability or hide authentication expiry behind misleading model errors.
+
 ### [2026-07-10] Distinguish pasted tokens from OAuth-held tokens
 **Problem:** I planned Sprint 10 as manual local import only, but the user wanted a seamless Hugging Face login button where DistribLLM can download approved gated models without the user pasting a token.
 **Rule:** For gated model UX, distinguish "do not make the user paste a token or password" from "the app will never hold auth material"; if DistribLLM downloads gated files itself, plan for browser/device OAuth, least-privilege scopes, secure local storage, logout, and a no-auth local import fallback.
