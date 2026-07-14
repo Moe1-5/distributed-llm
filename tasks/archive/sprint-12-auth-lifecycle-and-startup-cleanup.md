@@ -2,7 +2,7 @@
 
 **Goal:** Make model startup resilient to stale Hugging Face authentication and guarantee that failed node or generator startup releases every partially created runtime resource.
 **Start:** 2026-07-13
-**End:** TBD
+**End:** 2026-07-14
 
 ---
 
@@ -121,3 +121,9 @@ Live TinyLlama testing exposed an expired OAuth token being attached to a public
 - What changed: local model validation now accepts any complete weight format and prefers complete safetensors over incomplete PyTorch bin metadata, while Hugging Face downloads skip `pytorch_model.bin.index.json` when `.bin` weights are ignored.
 - Why: downloading `meta-llama/Llama-2-7b-chat-hf` with safetensors present skipped duplicate `.bin` shards but kept the old bin index, causing a false incomplete-shard import failure after the download.
 - Status: targeted regression tests pass and the full `tests/test_generation_readiness.py` suite passes with 101 tests.
+
+### 2026-07-14 - Close Sprint 12
+
+- What changed: archived Sprint 12 after the auth lifecycle, failed-start cleanup, managed-cache cleanup, local expert routing, reachable-route probing, and safetensors/bin-index import fixes were implemented and pushed.
+- Why: the remaining urgent work is Sprint 14 performance and visibility, while Sprint 12 acceptance criteria are complete.
+- Status: Sprint 12 is closed and archived; continue active work in Sprint 14.

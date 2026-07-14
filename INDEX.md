@@ -64,8 +64,9 @@
 | `tasks/lessons.md`                                           | Assistant lessons: active and internalized.                                          |
 | `tasks/sprints/sprint-10-gated-model-local-import.md`          | Active sprint plan for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
 | `tasks/sprints/sprint-11-instruction-ready-model-expansion.md` | Active future sprint plan for adding instruction-ready/chat-ready supported models without fine-tuning a baseline model. |
-| `tasks/sprints/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Active sprint for public-model auth isolation, expired-token errors, and failed-start resource cleanup. |
 | `tasks/sprints/sprint-13-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
+| `tasks/sprints/sprint-14-performance-and-visibility.md`       | Active sprint for runtime/generation performance metrics, Monitoring visibility, chat templates, and context-aware streamed decoding. |
+| `tasks/archive/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Completed sprint for public-model auth isolation, failed-start cleanup, model cache cleanup, local expert routing, and safetensors/bin-index gated import validation. |
 | `tasks/archive/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Completed sprint for safe node lifecycle, duplicate/multi-model local serving, HuggingFace token validation, trace analysis, and shutdown hardening. |
 | `tasks/archive/sprint-01-stabilize-prototype.md`              | Completed sprint for stabilizing distributed inference.                              |
 | `tasks/archive/sprint-02-architecture-adapter-and-parity.md` | Completed sprint for architecture-aware distributed inference and parity validation. |
@@ -112,6 +113,7 @@
 | `backend/constants.py`   | Supported models, DHT constants, and generation defaults.                            |
 | `backend/pyproject.toml` | Python project metadata and dependencies.                                            |
 | `backend/uv.lock`        | Python dependency lockfile.                                                          |
+| `backend/tests/test_gpu_monitor.py` | Focused runtime resource-monitor metric and failure-path tests.                       |
 
 ---
 

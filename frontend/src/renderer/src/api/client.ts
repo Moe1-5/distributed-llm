@@ -45,14 +45,27 @@ export interface ModelInfo {
 }
 
 export interface Stats {
+  sampled_at?: string | null
+  sample_interval_seconds?: number
   cpu_percent: number
+  cpu_count?: number | null
+  load_average_1m?: number | null
   ram_percent: number
   ram_used_gb: number
+  ram_available_gb?: number
   ram_total_gb: number
+  process?: {
+    pid: number
+    cpu_percent: number
+    memory_percent: number
+    rss_gb: number
+    threads: number
+  } | null
   gpu: {
     name: string
-    util_percent: number
+    util_percent: number | null
     vram_used_gb: number
+    vram_reserved_gb?: number
     vram_total_gb: number
     vram_percent: number
   } | null

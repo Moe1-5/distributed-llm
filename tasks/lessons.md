@@ -41,6 +41,11 @@
 
 <!-- Add new lessons here -->
 
+### [2026-07-14] Keep polled UI contracts compatible during backend restarts
+**Problem:** I made Monitoring call `toFixed()` on a newly added runtime-metric field, so an Electron renderer connected to an older already-running backend could throw and show a black screen.
+**Rule:** New fields in polled backend responses must be treated as optional at runtime until both processes are restarted, with unavailable or legacy payloads rendered safely instead of dereferenced directly.
+**Why:** Electron and FastAPI restart independently during development; a temporarily mixed frontend/backend version must degrade visibly without crashing the entire renderer.
+
 ### [2026-07-13] Match smoke-test topology to the application lifecycle
 **Problem:** I reused a serving node's DHT object for a generator smoke test, triggered Hivemind's valid self-dial rejection, and initially described it as a system limitation even though the real generator endpoint creates a separate client DHT identity.
 **Rule:** Distributed smoke tests must use the same identity and process boundaries as the production API path before classifying a transport failure as a product bug.

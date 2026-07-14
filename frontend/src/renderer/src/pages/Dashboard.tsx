@@ -428,10 +428,14 @@ export default function Dashboard(): React.JSX.Element {
             />
             <StatTile
               label="GPU"
-              value={stats?.gpu ? stats.gpu.util_percent.toFixed(1) : '—'}
+              value={stats?.gpu?.util_percent != null ? stats.gpu.util_percent.toFixed(1) : '—'}
               unit="%"
-              detail={stats?.gpu?.name ?? 'No GPU'}
-              accent={stats?.gpu ? 'cyan' : 'default'}
+              detail={
+                stats?.gpu
+                  ? `${stats.gpu.name}${stats.gpu.util_percent == null ? ' · utilization unavailable' : ''}`
+                  : 'No GPU'
+              }
+              accent={stats?.gpu?.util_percent != null ? 'cyan' : 'default'}
               loading={isLoading}
             />
             <StatTile

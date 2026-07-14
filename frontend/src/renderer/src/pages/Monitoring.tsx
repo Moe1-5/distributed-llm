@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, type GeneratorStatus, type ModelInfo, type NodeInfo } from '../api/client'
+import { api, type GeneratorStatus, type ModelInfo, type NodeInfo, type Stats } from '../api/client'
 
 interface MonitoringState {
   generator: GeneratorStatus | null
   models: ModelInfo[]
   nodes: NodeInfo[]
+  stats: Stats | null
   selectedModel: string
   lastUpdated: Date | null
   lastError: string | null
@@ -45,11 +46,26 @@ function shortPeer(peerId: string): string {
   return peerId.length <= 10 ? peerId : `${peerId.slice(0, 8)}...`
 }
 
+function fixedMetric(value: unknown, digits: number): string | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : null
+}
+
+function formatVram(stats: Stats | null): string {
+  const allocated = fixedMetric(stats?.gpu?.vram_used_gb, 2)
+  if (allocated === null) return 'Unavailable'
+
+  const reserved = fixedMetric(stats?.gpu?.vram_reserved_gb, 2)
+  return reserved === null
+    ? `${allocated} GB allocated`
+    : `${allocated} GB allocated · ${reserved} GB reserved`
+}
+
 export default function Monitoring(): React.JSX.Element {
   const [state, setState] = useState<MonitoringState>({
     generator: null,
     models: [],
     nodes: [],
+    stats: null,
     selectedModel: '',
     lastUpdated: null,
     lastError: null
@@ -59,10 +75,11 @@ export default function Monitoring(): React.JSX.Element {
 
   const refresh = useCallback(async () => {
     try {
-      const [generator, modelsRes, nodesRes] = await Promise.all([
+      const [generator, modelsRes, nodesRes, stats] = await Promise.all([
         api.getGeneratorStatus(),
         api.getModels(),
-        api.getNodes()
+        api.getNodes(),
+        api.getStats().catch(() => null)
       ])
 
       setState((prev) => {
@@ -73,6 +90,7 @@ export default function Monitoring(): React.JSX.Element {
           generator,
           models: modelsRes.models,
           nodes: nodesRes.nodes ?? [],
+          stats,
           selectedModel,
           lastUpdated: new Date(),
           lastError: null
@@ -198,6 +216,61 @@ export default function Monitoring(): React.JSX.Element {
           </div>
         )}
 
+        <section>
+          <div className="mb-3 flex items-end justify-between gap-4">
+            <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
+              Runtime Performance
+            </h2>
+            <span className="font-mono text-[9px] text-text-dim">
+              {state.stats?.sampled_at
+                ? `sampled ${new Date(state.stats.sampled_at).toLocaleTimeString()}`
+                : 'waiting for first sample'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-6">
+            {[
+              [
+                'System CPU',
+                fixedMetric(state.stats?.cpu_percent, 1) !== null
+                  ? `${fixedMetric(state.stats?.cpu_percent, 1)}%`
+                  : '—'
+              ],
+              [
+                'System RAM',
+                fixedMetric(state.stats?.ram_percent, 1) !== null
+                  ? `${fixedMetric(state.stats?.ram_percent, 1)}%`
+                  : '—'
+              ],
+              [
+                'Backend RAM',
+                fixedMetric(state.stats?.process?.rss_gb, 3) !== null
+                  ? `${fixedMetric(state.stats?.process?.rss_gb, 3)} GB`
+                  : '—'
+              ],
+              [
+                'Backend CPU',
+                fixedMetric(state.stats?.process?.cpu_percent, 1) !== null
+                  ? `${fixedMetric(state.stats?.process?.cpu_percent, 1)}%`
+                  : '—'
+              ],
+              [
+                'GPU',
+                state.stats?.gpu?.util_percent != null
+                  ? `${state.stats.gpu.util_percent.toFixed(1)}%`
+                  : 'Unavailable'
+              ],
+              ['VRAM', formatVram(state.stats)]
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-xl border border-border bg-bg-elevated p-4">
+                <p className="font-mono text-[9px] tracking-widest text-text-dim uppercase">
+                  {label}
+                </p>
+                <p className="mt-2 text-lg font-semibold tabular-nums text-text-primary">{value}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
           <div className="rounded-xl border border-border bg-bg-elevated p-5">
             <div className="mb-5 flex items-start justify-between gap-4">
@@ -305,7 +378,9 @@ export default function Monitoring(): React.JSX.Element {
                 Layer Coverage
               </h2>
               <div className="mt-4 flex items-end justify-between">
-                <span className="text-3xl font-semibold text-text-primary">{coverage.percent}%</span>
+                <span className="text-3xl font-semibold text-text-primary">
+                  {coverage.percent}%
+                </span>
                 <span className="font-mono text-[11px] text-text-dim">
                   {coverage.covered}/{selectedModel?.num_layers ?? 0}
                 </span>

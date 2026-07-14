@@ -7,8 +7,8 @@
 | --- | --- | --- |
 | Sprint 10 | `tasks/sprints/sprint-10-gated-model-local-import.md` | Implementation complete for Hugging Face browser/device OAuth downloads into validated local imports; awaiting explicit close before archive. |
 | Sprint 11 | `tasks/sprints/sprint-11-instruction-ready-model-expansion.md` | Add more supported instruction-ready/chat-ready models without fine-tuning the baseline model into instruction behavior. |
-| Sprint 12 | `tasks/sprints/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Prevent stale OAuth state from breaking public models and clean up every failed model startup. |
 | Sprint 13 | `tasks/sprints/sprint-13-real-incentives-and-settlement.md` | Add real incentive rewards and settlement only after correctness, proof, health, anti-abuse, model-access, and model-quality prerequisites are ready. |
+| Sprint 14 | `tasks/sprints/sprint-14-performance-and-visibility.md` | Measure runtime and generation performance, expose resource/route visibility, and fix model-aware chat formatting plus streamed token spacing. |
 
 ## Completed Sprints
 
@@ -25,6 +25,7 @@ Completed sprint documents live in `tasks/archive/`.
 | Sprint 07 | `tasks/archive/sprint-07-output-parity-and-quality.md` | Completed and archived. |
 | Sprint 08 | `tasks/archive/sprint-08-client-refinements-and-generation-diagnostics.md` | Completed and archived. |
 | Sprint 09 | `tasks/archive/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Completed and archived. |
+| Sprint 12 | `tasks/archive/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Completed and archived. |
 
 ---
 

@@ -11,8 +11,8 @@
 
 ## Active Sprint
 
-**Sprint:** Sprint 10 remains the lowest active sprint; Sprint 11 expands instruction-ready models; Sprint 12 fixes auth/startup lifecycle failures; Sprint 13 is planned for incentives.
-**Goal:** Complete live gated and instruction-ready inference validation while preventing stale OAuth credentials and failed startup attempts from leaking runtime resources.
+**Sprint:** Sprint 10 remains the lowest active sprint; Sprint 14 is active for performance and visibility; Sprint 13 remains planned for incentives.
+**Goal:** Complete live model validation while measuring runtime/generation performance and correcting chat-template and streamed-output behavior.
 
 ## Tech Stack
 
@@ -41,5 +41,6 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 09 closed: non-destructive node pause/resume/delete semantics, duplicate and multi-model local serving, HuggingFace token validation, structured trace-artifact analysis, and backend shutdown hardening are checklist-complete and archived.
 - Sprint 10 implementation is complete: Hugging Face device OAuth, redacted auth status, download job status/cancel, validated local import handoff, startup from validated local paths, and manual folder fallback are tested. External live validation is blocked on approved gated-model access for the selected repo; Llama 2 access is accepted while Llama 3.2 is pending.
 - Sprint 11 has started with TinyLlama chat as an open smoke-test option, Llama 2 base/chat gated options for the accepted model family, and explicit base/chat/instruct metadata in the model registry.
-- Sprint 12 targets the live TinyLlama failure where an expired OAuth token was sent to a public repo and failed startup left partial DHT cleanup uncertain.
+- Sprint 12 closed on 2026-07-14: public auth isolation, failed-start cleanup, cache deletion, local expert routing, reachable-route probing, and safetensors/bin-index import validation are implemented and pushed.
+- Sprint 14 started on 2026-07-14 with timestamped machine/backend-process resource metrics and Monitoring visibility; generation timing and output-path fixes remain next.
 - Canonical docs were refreshed on 2026-07-13 for OAuth/local imports, model registry, public bootstrap/remote workers, current lifecycle/routing, and live validation gaps.
