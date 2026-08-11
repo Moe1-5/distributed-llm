@@ -99,11 +99,11 @@ There is no distributed KV cache, stable session routing, failover, or concurren
 
 ## Current Validation State
 
-- Backend regression suite: 107 tests passing as of 2026-07-23.
+- Backend regression suite: 114 tests and 19 subtests passing as of 2026-08-12.
 - Frontend TypeScript typecheck and Python compilation pass with the direct/relay transport changes.
 - Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
 - Hugging Face device OAuth and real gated Llama 2 download have been exercised.
-- The updated VPS relay reservation, direct two-device route, and relayed two-device expert RPC remain to be validated live.
+- A Windows/WSL participant obtained a complete circuit address through the public VPS relay in 1.63 seconds, and a second same-host Hivemind peer completed an OPT-125M expert metadata RPC using only that circuit address. Tensor forwarding, direct two-device routing, and relayed two-device inference remain to be validated live.
 - A complete laptop plus VPS/Colab Llama 2 route and generated response remain unproven.
 
 ## Known Operational Limits

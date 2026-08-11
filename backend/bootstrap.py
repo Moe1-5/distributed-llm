@@ -21,20 +21,37 @@ Usage:
     Subsequent runs (stable address):
         python3 bootstrap.py --port 7001 --identity_path bootstrap.id
 
-    After first run, copy the printed /ip4/<IP>/tcp/<PORT>/p2p/<PEER_ID>
-    into constants.py as DISTRIBLLM_INITIAL_PEERS.
+    After first run, configure the printed public multiaddress as
+    DISTRIBLLM_INITIAL_PEERS and DISTRIBLLM_TRUSTED_RELAYS on participants.
 """
 
 import argparse
+import os
+import platform
 import time
 import signal
 import sys
+from typing import Any
 
 import hivemind
 from hivemind.utils.logging import get_logger
 from node.reachability import ReachabilityProtocol
 
 logger = get_logger(__name__)
+
+
+def _bootstrap_dht_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """Build the public infrastructure peer's Hivemind transport options."""
+    return {
+        "host_maddrs": [f"/ip4/{args.host}/tcp/{args.port}"],
+        "announce_maddrs": args.announce_maddr or None,
+        "start": True,
+        "identity_path": args.identity_path,
+        "use_ipfs": False,
+        "initial_peers": [],
+        "use_relay": args.use_relay,
+        "force_reachability": "public" if args.announce_maddr else None,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,28 +94,28 @@ def main() -> None:
     print("  DistribLLM Bootstrap Node")
     print("=" * 60)
 
-    first_run = not __import__("os").path.exists(args.identity_path)
+    first_run = not os.path.exists(args.identity_path)
     if first_run:
         print(f"  First run — generating new identity at: {args.identity_path}")
         print(f"  IMPORTANT: Keep {args.identity_path} safe.")
         print(f"  Deleting it will change your peer ID and break existing nodes.")
     else:
         print(f"  Loading existing identity from: {args.identity_path}")
+    print(
+        f"  Runtime: Python {platform.python_version()} | "
+        f"Hivemind {hivemind.__version__}"
+    )
+    print(
+        "  Relay transport/service: "
+        f"{'enabled' if args.use_relay else 'disabled'}"
+    )
+    print(
+        "  Forced reachability: "
+        f"{'public' if args.announce_maddr else 'automatic'}"
+    )
     print()
 
-    dht = hivemind.DHT(
-        host_maddrs=[f"/ip4/{args.host}/tcp/{args.port}"],
-        announce_maddrs=args.announce_maddr or None,
-        start=True,
-        # identity_path makes peer ID deterministic across restarts
-        identity_path=args.identity_path,
-        # use_ipfs=False keeps us off the Petals/IPFS public network
-        use_ipfs=False,
-        # No initial peers — this IS the bootstrap node
-        initial_peers=[],
-        # Public bootstrap peers also provide relay fallback by default.
-        use_relay=args.use_relay,
-    )
+    dht = hivemind.DHT(**_bootstrap_dht_kwargs(args))
 
     assert dht.peer_id is not None, "DHT started but peer_id is None"
 
@@ -113,7 +130,7 @@ def main() -> None:
         print(f"    {addr}")
     print()
     print("  Copy ONE of these into backend/constants.py")
-    print("  as DISTRIBLLM_INITIAL_PEERS (use the public IP one).")
+    print("  as DISTRIBLLM_INITIAL_PEERS and DISTRIBLLM_TRUSTED_RELAYS.")
     print()
     print("  Keep this process running — nodes need it to join the swarm.")
     print("=" * 60)

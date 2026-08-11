@@ -222,3 +222,9 @@ This keeps passwords and pasted tokens out of the UI while still allowing Distri
 - What changed: updated the documentation landing page, architecture, runtime flows, repo map, troubleshooting guide, implementation roadmap, validation gates, frontend setup, issue-log framing, and decision records to reflect browser OAuth, validated offline gated runtime, public anonymous loading, TinyLlama/Llama 2 options, VPS/Colab workers, current node lifecycle/routing, cache deletion, and Sprint 13 incentive deferral.
 - Why: several canonical Markdown files still described the Sprint 4-era one-node/token-paste/bootstrap-field prototype and could mislead future implementation and testing.
 - Status: active documentation now matches the current source and clearly separates implemented behavior from pending live TinyLlama, gated inference, and real multi-machine validation; archived sprint records remain unchanged as historical evidence.
+
+### 2026-08-12 - Close and archive Sprint 10
+
+- What changed: moved Sprint 10 from active sprints to the archive and updated the active sprint table, current project state, and master index.
+- Why: the Sprint 10 implementation and local verification were already complete, and the user explicitly asked to close active sprints that are done.
+- Status: Sprint 10 is archived; Sprint 11 is now the lowest active sprint.

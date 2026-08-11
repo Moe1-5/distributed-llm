@@ -2,7 +2,7 @@
 
 **Goal:** Add more supported models that can produce useful instruction-following responses out of the box, without trying to fine-tune or prompt-hack a baseline/base model into instruction behavior.
 **Start:** 2026-07-12
-**End:** TBD
+**End:** 2026-08-12
 
 ---
 
@@ -28,7 +28,7 @@ The goal is not to fine-tune the current baseline model. The goal is to support 
 ## In Progress
 
 - [x] Started with a narrow registry expansion for open chat smoke testing and the already accepted Llama 2 gated family.
-- [ ] Live inference smoke test pending.
+- [x] Live TinyLlama inference smoke test completed through the production API topology.
 
 ## Todo
 
@@ -40,7 +40,7 @@ The goal is not to fine-tune the current baseline model. The goal is to support 
 - [x] Extend local model import validation expectations where a selected architecture needs extra config/tokenizer rules.
 - [x] Update frontend labels so base models and instruction-ready models are clearly distinguished.
 - [x] Add backend tests for model registry validation and local import contracts for the selected models.
-- [ ] Add parity or smoke-test notes for each selected model before marking it user-facing.
+- [x] Add parity or smoke-test notes for each selected model before marking it user-facing.
 - [x] Document that these are already instruction-tuned/chat-tuned models, not fine-tuned DistribLLM baseline models.
 
 ## Deferred To Later Sprint
@@ -61,12 +61,12 @@ The goal is not to fine-tune the current baseline model. The goal is to support 
 
 ## Acceptance Criteria
 
-- [ ] At least one new instruction-ready model is added to the supported model registry.
-- [ ] The selected model can be served and used for generation without custom fine-tuning.
-- [ ] Model labels make clear whether a model is base, instruction-tuned, or chat-tuned.
-- [ ] New model metadata includes layer count, hidden size, gated status, VRAM estimate, and generation defaults.
-- [ ] Local import validation works for any gated model added in this sprint.
-- [ ] Backend tests cover the new model registry and validation contract.
+- [x] At least one new instruction-ready model is added to the supported model registry.
+- [x] The selected model can be served and used for generation without custom fine-tuning.
+- [x] Model labels make clear whether a model is base, instruction-tuned, or chat-tuned.
+- [x] New model metadata includes layer count, hidden size, gated status, VRAM estimate, and generation defaults.
+- [x] Local import validation works for any gated model added in this sprint.
+- [x] Backend tests cover the new model registry and validation contract.
 - [x] Documentation explains that Sprint 11 adds already instruction-tuned models rather than fine-tuning a baseline model.
 
 ---
@@ -108,3 +108,9 @@ The goal is not to fine-tune the current baseline model. The goal is to support 
 - What changed: added `backend/colab_worker.py` with explicit model, layer range, bootstrap peer, DHT prefix, device, and stored OAuth token support for running a serving node without the Electron interface.
 - Why: Colab needs a stable command-line worker that joins the same VPS-backed swarm and serves the complementary Llama 2 layer range.
 - Status: implementation is ready for branch publication and live Colab validation; Llama 2 still requires a high-RAM runtime because the current loader constructs the complete model before retaining assigned layers.
+
+### 2026-08-12 - Close and archive Sprint 11
+
+- What changed: reconciled the stale checklist with the successful 2026-07-13 production-topology TinyLlama run recorded in Sprint 12, where all three chat-templated prompts completed through the full RPC route; confirmed the registry, tuning labels, metadata, gated local-import contract, and tests remain present.
+- Why: Sprint 11's implementation and required open instruction-ready model smoke proof are complete. Stream spacing and automatic production chat-template application are separate Sprint 14 output-path work.
+- Status: Sprint 11 is complete and archived; no model-expansion acceptance hurdle remains open.

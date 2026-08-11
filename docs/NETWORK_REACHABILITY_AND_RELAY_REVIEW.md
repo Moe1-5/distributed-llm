@@ -1,7 +1,7 @@
 # Network Reachability and Relay Review
 
-**Status:** Implemented locally; VPS and two-device validation pending  
-**Date:** 2026-07-23  
+**Status:** Public circuit and expert metadata RPC verified; two-device inference pending
+**Date:** 2026-08-12
 **Scope:** Multi-device Hivemind RPC reachability, Petals comparison, temporary testing, and the production DistribLLM network design
 
 ## Executive Summary
@@ -21,6 +21,33 @@ DistribLLM should follow the same general design:
 5. Record and expose whether every selected hop is direct or relayed.
 
 The VPS should host DistribLLM network infrastructure: bootstrap discovery, trusted relay service, and an external reachability checker. The Electron application, local FastAPI control API, and participant model layers should remain on participant machines unless a VPS is intentionally acting as a compute worker.
+
+## Live Deployment Status - 2026-08-12
+
+The updated bootstrap process is now running on the VPS with its persistent identity and public address:
+
+```text
+/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2
+```
+
+Confirmed:
+
+- The VPS firewall allows inbound TCP port `7001`.
+- A Windows participant can establish a TCP connection to the public VPS port.
+- The bootstrap loads the persistent identity from `/var/lib/distribllm/bootstrap.id`.
+- The participant uses the VPS as both its initial peer and trusted relay.
+- The participant's direct check selected relay fallback as expected for its private network.
+- A Windows/WSL participant using Python `3.12.3` and Hivemind `1.1.12` obtained a complete `/p2p-circuit/` address through the VPS in `1.633` seconds.
+- Participant logs confirm static trusted-relay selection with `-relayDiscovery=0`, private reachability, DHT client mode, and successful relay protocol detection.
+- A full-layer cached OPT-125M expert reserved a circuit, and a second independent Hivemind peer used only that circuit address to discover the complete route and complete the real `expert.info` readiness RPC in `10.116` seconds total.
+
+Remaining validation:
+
+- Tensor forwarding through the relay has not yet been validated independently of metadata RPC.
+- Two Windows/WSL participants have not yet completed distributed inference over the relay fallback.
+- The persistent VPS service and final operator recovery procedure still need live validation.
+
+The original timeout was corrected by selecting the one configured trusted relay statically and polling fresh daemon addresses. Increasing the timeout alone would not have fixed either cause. Sprint 16 now progresses to relayed tensor forwarding and two-device inference.
 
 ## Confirmed Sprint 14 Issue
 
@@ -186,7 +213,7 @@ In DistribLLM, the current VPS bootstrap and the first relay may be the same pro
 - **Bootstrap role:** tells peers how to enter the DHT and discover other peer identities and addresses.
 - **Relay role:** accepts relay reservations and forwards live RPC streams to otherwise unreachable peers.
 
-The bootstrap implementation now enables relay support and hosts the Petals-derived reachability-check protocol. This is not yet live proof: the updated process must be deployed to the VPS, advertise a reachable address, accept a worker reservation, produce a `p2p-circuit` address, and successfully carry an expert RPC probe in a two-device test.
+The bootstrap implementation now enables relay support and hosts the Petals-derived reachability-check protocol. The deployed VPS has accepted a Windows/WSL worker reservation, produced a complete `p2p-circuit` address, and carried an independent expert metadata RPC. Tensor forwarding and distributed inference between two devices remain the final live transport proof.
 
 ### 3. Optional Direct Address Configuration
 
@@ -307,31 +334,52 @@ The first production-style deployment should run one public VPS process that pro
 sudo ufw allow 7001/tcp
 ```
 
-3. Deploy the updated repository code to the VPS, for example under `/opt/distribllm`.
-4. Install the backend environment on the VPS:
+3. Deploy the same repository commit to the VPS, for example under `/opt/distribllm`, and record it:
 
 ```bash
 cd /opt/distribllm/backend
-uv sync
+git rev-parse --short HEAD
 ```
 
-5. Start the relay-capable bootstrap with a persistent identity path:
+4. Install the locked backend environment with the verified Python version and print the effective runtime. `uv run` uses this project environment, so activating `.venv` is optional:
 
 ```bash
-uv run python bootstrap.py \
+uv sync --frozen --python 3.12
+uv run --python 3.12 python -c "import sys, hivemind; print(sys.version); print(hivemind.__version__)"
+```
+
+The expected Hivemind version for the current lockfile is `1.1.12`. Do not launch the VPS with an unrelated global `python`; that can select a different Hivemind package and bundled `p2pd` binary.
+
+5. Create the persistent state directory, check for an older duplicate process, and stop that old process through its process manager before continuing:
+
+```bash
+sudo install -d -m 0750 -o "$USER" -g "$USER" /var/lib/distribllm
+pgrep -af "bootstrap.py|p2pd"
+```
+
+Run exactly one bootstrap process. Preserve the existing identity file if its peer ID is already configured on participants.
+
+6. Start the relay-capable bootstrap in the foreground with focused diagnostics:
+
+```bash
+HIVEMIND_LOGLEVEL=DEBUG \
+GOLOG_LOG_LEVEL=relay=debug \
+uv run --python 3.12 python bootstrap.py \
   --host 0.0.0.0 \
   --port 7001 \
   --identity_path /var/lib/distribllm/bootstrap.id \
   --announce-maddr /ip4/<VPS_PUBLIC_IP>/tcp/7001
 ```
 
-6. Copy the printed public multiaddress. It should have this shape:
+The startup header must report Python 3.12, Hivemind 1.1.12, relay enabled, and forced public reachability. The Hivemind debug launch line should contain `-relay=1`, `-forceReachabilityPublic=1`, the public announce address, and the persistent identity path. The bundled Hivemind 1.1.12 daemon enables Circuit Relay v2 service by default when relay support is enabled; the deprecated `use_relay_hop` option must not be added.
+
+7. Copy the printed public multiaddress. It should have this shape:
 
 ```text
 /ip4/<VPS_PUBLIC_IP>/tcp/7001/p2p/<VPS_PEER_ID>
 ```
 
-7. Configure participant machines with that same address as both bootstrap and trusted relay:
+8. Configure participant machines with that same address as both bootstrap and trusted relay:
 
 ```text
 DISTRIBLLM_INITIAL_PEERS=/ip4/<VPS_PUBLIC_IP>/tcp/7001/p2p/<VPS_PEER_ID>
@@ -342,11 +390,26 @@ DISTRIBLLM_ANNOUNCE_MADDRS=
 DISTRIBLLM_AUTO_RELAY=true
 ```
 
-8. After the manual run is verified, move the VPS process to `systemd` or another process manager. The identity file must remain persistent across restarts; deleting it changes the peer ID and invalidates existing configured addresses.
+9. From each participant's existing backend directory, sync the same locked environment and run the minimal forced-relay probe before starting FastAPI or loading a model:
+
+```bash
+git rev-parse --short HEAD
+uv sync --frozen --python 3.12
+HIVEMIND_LOGLEVEL=DEBUG \
+GOLOG_LOG_LEVEL=autorelay=debug,relay=debug \
+uv run --python 3.12 python -m relay_probe --timeout 90 --json
+```
+
+If the prompt already ends in `.../backend`, do not run `cd backend` again. The participant debug launch line must contain `-autoRelay=1`, `-trustedRelays=...`, `-relayDiscovery=0`, `-dhtClient=1`, and `-forceReachabilityPrivate=1`. The `relayDiscovery=0` compatibility setting is required for the current single trusted VPS: the bundled dynamic discovery path otherwise waits up to three minutes for four candidates, longer than the original 60-second deadline. A successful result contains the same Python/Hivemind versions and at least one complete address shaped like `/ip4/<VPS_PUBLIC_IP>/tcp/7001/p2p/<VPS_PEER_ID>/p2p-circuit/p2p/<WORKER_PEER_ID>`.
+
+The JSON must also include `python_version`, `hivemind_version`, `force_reachability`, and `relay_discovery: false`. Their absence proves that the participant is still running the older probe implementation.
+
+10. Only after the manual probe succeeds, move the VPS process to `systemd` or another process manager. The identity file must remain persistent across restarts; deleting it changes the peer ID and invalidates existing configured addresses.
 
 Minimum VPS validation before testing inference:
 
 - The process starts and prints the expected public multiaddress.
+- The VPS and participant report the expected commit, Python 3.12, and Hivemind 1.1.12.
 - The VPS port is reachable from a participant machine.
 - A participant node in `auto` mode joins the DHT through the VPS address.
 - A NAT/WSL-separated participant in relay mode obtains a visible `/p2p-circuit/` address.

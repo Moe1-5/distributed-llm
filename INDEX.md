@@ -23,6 +23,7 @@
 | Implementation roadmap                    | `docs/IMPLEMENTATION.md`                  |
 | Petals comparison                         | `docs/PETALS_COMPARISON.md`               |
 | Network reachability and relay review      | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` |
+| Windows managed WSL packaging        | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` |
 | Errors and debugging                      | `docs/ERRORS_AND_DEBUGGING.md`            |
 | Validation plan                           | `docs/VALIDATION_AND_TEST_PLAN.md`        |
 | Architectural decision history            | `docs/decisions.md`                       |
@@ -63,10 +64,12 @@
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | `tasks/active.md`                                            | Active sprint routing table.                                                         |
 | `tasks/lessons.md`                                           | Assistant lessons: active and internalized.                                          |
-| `tasks/sprints/sprint-10-gated-model-local-import.md`          | Active sprint plan for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
-| `tasks/sprints/sprint-11-instruction-ready-model-expansion.md` | Active future sprint plan for adding instruction-ready/chat-ready supported models without fine-tuning a baseline model. |
 | `tasks/sprints/sprint-13-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
 | `tasks/sprints/sprint-14-performance-and-visibility.md`       | Active sprint for runtime/generation performance metrics, Monitoring visibility, chat templates, and context-aware streamed decoding. |
+| `tasks/sprints/sprint-15-windows-managed-wsl-packaging.md`    | Active future sprint plan for Windows Electron packaging with a managed WSL 2 backend runtime. |
+| `tasks/sprints/sprint-16-vps-relay-and-live-inference-validation.md` | Active sprint for diagnosing the live AutoRelay reservation failure and proving VPS-relayed two-device inference. |
+| `tasks/archive/sprint-10-gated-model-local-import.md`          | Completed sprint for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
+| `tasks/archive/sprint-11-instruction-ready-model-expansion.md` | Completed sprint for instruction-ready/chat-ready model registry expansion, tuning labels, local-import contracts, and live TinyLlama generation validation. |
 | `tasks/archive/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Completed sprint for public-model auth isolation, failed-start cleanup, model cache cleanup, local expert routing, and safetensors/bin-index gated import validation. |
 | `tasks/archive/sprint-09-node-lifecycle-token-validation-and-trace-analysis.md` | Completed sprint for safe node lifecycle, duplicate/multi-model local serving, HuggingFace token validation, trace analysis, and shutdown hardening. |
 | `tasks/archive/sprint-01-stabilize-prototype.md`              | Completed sprint for stabilizing distributed inference.                              |
@@ -93,6 +96,7 @@
 | `docs/IMPLEMENTATION.md`           | Practical implementation roadmap and long-term phases.    |
 | `docs/PETALS_COMPARISON.md`        | Comparison with Petals and project-owned public swarm direction. |
 | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Review proposal for Petals-style direct reachability, automatic relay fallback, VPS infrastructure, security, and production validation. |
+| `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, state locations, launcher contract, and smoke-test plan. |
 | `docs/ERRORS_AND_DEBUGGING.md`     | Known errors, symptoms, and debugging guidance.           |
 | `docs/VALIDATION_AND_TEST_PLAN.md` | Validation phase gates before trusting inference or adding advanced features. |
 | `docs/architecture.md`             | Starter-system architecture summary adapted to this repo. |
@@ -110,13 +114,16 @@
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
 | `backend/node/`          | Serving node, layer loading, direct/relay transport, Hivemind RPC, and GPU monitoring. |
 | `backend/node/reachability.py` | Petals-derived independent direct-reachability probe used before relay fallback. |
+| `backend/node/relay_compat.py` | Hivemind 1.1.12 compatibility shim that selects configured trusted relays as static AutoRelay candidates. |
 | `backend/models/`        | Model-specific adapter placeholders and architecture-specific preprocessing helpers. |
 | `backend/traces/`        | Gitignored runtime JSON generation traces written by `/generator/trace`.             |
 | `backend/bootstrap.py`   | Hivemind DHT bootstrap, circuit relay, and reachability-check node.                  |
+| `backend/relay_probe.py` | Minimal Hivemind-only circuit-relay reservation probe for Sprint 16 diagnostics.     |
 | `backend/constants.py`   | Supported models, DHT constants, transport settings, and generation defaults.        |
 | `backend/pyproject.toml` | Python project metadata and dependencies.                                            |
 | `backend/uv.lock`        | Python dependency lockfile.                                                          |
 | `backend/tests/test_gpu_monitor.py` | Focused runtime resource-monitor metric and failure-path tests.                       |
+| `backend/tests/test_bootstrap_relay.py` | Focused public bootstrap relay and reachability-argument tests.                    |
 
 ---
 

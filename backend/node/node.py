@@ -28,6 +28,7 @@ from constants import (
 )
 from node.handler import InferenceHandler
 from node.reachability import ReachabilityProtocol, check_direct_reachability
+from node.relay_compat import install_static_relay_compat
 from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, RPCServer, _run_with_timeout
 
 logger = get_logger(__name__)
@@ -106,6 +107,8 @@ class Node:
         # Step 1: DHT
         if self.dht is None:
             self.connection_mode = self._select_connection_mode()
+            if self.connection_mode == "relay":
+                install_static_relay_compat()
             logger.info(
                 "Step 1/4: Starting DHT in %s mode...",
                 self.connection_mode,
@@ -127,6 +130,25 @@ class Node:
                 ),
                 trusted_relays=trusted_relays,
                 client_mode=self.connection_mode == "relay",
+                force_reachability=(
+                    "private" if self.connection_mode == "relay" else None
+                ),
+            )
+            logger.info(
+                "DHT transport args | host_maddrs=%s announce_maddrs=%s "
+                "initial_peers=%s auto_nat=%s nat_port_map=%s "
+                "use_auto_relay=%s trusted_relays=%s client_mode=%s "
+                "force_reachability=%s",
+                self.p2p_config.host_maddrs,
+                announce_maddrs,
+                self.initial_peers,
+                self.p2p_config.auto_nat,
+                self.p2p_config.nat_port_map,
+                self.p2p_config.use_auto_relay
+                and self.connection_mode == "relay",
+                trusted_relays,
+                self.connection_mode == "relay",
+                "private" if self.connection_mode == "relay" else None,
             )
         else:
             logger.info("Step 1/4: Reusing existing DHT...")
@@ -239,8 +261,16 @@ class Node:
     def _wait_for_relay_address(self) -> None:
         timeout = self.p2p_config.relay_wait_timeout
         deadline = time.monotonic() + timeout
+        last_logged_addresses: Optional[list[str]] = None
         while True:
-            addresses = self.get_visible_maddrs()
+            addresses = self.get_visible_maddrs(refresh=True)
+            if addresses != last_logged_addresses:
+                logger.info(
+                    "Waiting for relay reservation | peer_id=%s visible_maddrs=%s",
+                    self.get_peer_id(),
+                    addresses,
+                )
+                last_logged_addresses = list(addresses)
             if any("/p2p-circuit" in address for address in addresses):
                 self.transport_verified = True
                 logger.info("Relay reservation ready: %s", addresses)
@@ -251,7 +281,9 @@ class Node:
         raise RuntimeError(
             "Relay mode was selected, but no p2p-circuit address became "
             f"available within {timeout:g} seconds. Check that the VPS is "
-            "relay-capable and reachable, or increase "
+            "relay-capable and reachable, run "
+            "`python -m relay_probe --json` from the backend environment, "
+            "or increase "
             "DISTRIBLLM_RELAY_WAIT_TIMEOUT."
         )
 
@@ -460,11 +492,16 @@ class Node:
             **self.handler.get_accounting_snapshot(),
         }
 
-    def get_visible_maddrs(self) -> list[str]:
+    def get_visible_maddrs(self, *, refresh: bool = False) -> list[str]:
         if self.dht is None:
             return self._last_maddrs
         try:
-            self._last_maddrs = [str(addr) for addr in self.dht.get_visible_maddrs()]
+            addresses = (
+                self.dht.get_visible_maddrs(latest=True)
+                if refresh
+                else self.dht.get_visible_maddrs()
+            )
+            self._last_maddrs = [str(addr) for addr in addresses]
             return self._last_maddrs
         except Exception as e:
             logger.warning("Failed to read DHT visible addresses: %s", e)

@@ -204,7 +204,23 @@ If the peer advertises only `/ip4/172.x.x.x/...`, another Windows device cannot 
 
 For direct LAN diagnosis, run `Test-NetConnection <windows-lan-ip> -Port <p2p-port>` from the other Windows device. If it fails, fix the Windows/WSL path before testing inference.
 
-If startup reports that relay mode did not obtain a circuit address, verify the updated bootstrap is running with relay enabled, its address is reachable, the trusted relay peer ID matches, and the timeout is long enough. A `/p2p-circuit/` address must appear before relay transport is considered verified.
+If startup reports that relay mode did not obtain a circuit address, verify the updated bootstrap is running with relay enabled, its address is reachable, the trusted relay peer ID matches, and the timeout is long enough. From the backend environment, run:
+
+```bash
+HIVEMIND_LOGLEVEL=DEBUG \
+GOLOG_LOG_LEVEL=autorelay=debug,relay=debug \
+uv run --python 3.12 python -m relay_probe --timeout 90 --json
+```
+
+The probe starts only a Hivemind DHT peer with relay settings, forces private reachability so AutoRelay engages, selects configured trusted relays as static candidates, and refreshes daemon addresses while waiting for a `/p2p-circuit/` address. It does not start FastAPI, load model layers, or advertise an expert. Its JSON reports the effective Python and Hivemind versions. A `/p2p-circuit/` address must appear before relay transport is considered verified.
+
+Verified public baseline on 2026-08-12: Python `3.12.3` with Hivemind `1.1.12` obtained a complete circuit address through the project VPS in `1.633` seconds. A separate same-host Hivemind peer then used only a full OPT-125M worker's circuit address and completed the production `expert.info` readiness RPC. These results prove reservation and expert metadata transport, but a two-device tensor-forward and generation test is still required.
+
+Activating `.venv` is optional when the command uses `uv run`; `uv` selects the project environment. Activation matters only for plain `python` commands. On both the VPS and participant, prefer `uv sync --frozen --python 3.12` followed by `uv run --python 3.12 ...` so the current lockfile supplies Hivemind 1.1.12 and its matching `p2pd` binary.
+
+If TCP bootstrap succeeds but the probe still times out, compare the repository commit and runtime versions, then inspect the VPS debug launch line for `-relay=1` and `-forceReachabilityPublic=1`. Inspect the participant line for `-autoRelay=1`, `-trustedRelays=...`, `-relayDiscovery=0`, `-dhtClient=1`, and `-forceReachabilityPrivate=1`. The bundled daemon's discovery path normally waits up to three minutes for four candidates; DistribLLM disables that path when an explicit trusted relay is configured so one project VPS can be used immediately. Increasing the timeout alone does not correct an old checkout, missing relay service, or mismatched runtime.
+
+If the probe JSON does not contain `python_version`, `hivemind_version`, `force_reachability`, and `relay_discovery: false`, the participant is still running the older probe implementation and must update to the same commit before retesting.
 
 ## Poor or Repetitive Output
 

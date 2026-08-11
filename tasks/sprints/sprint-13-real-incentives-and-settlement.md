@@ -12,7 +12,7 @@ Sprint 06 intentionally added simulated contribution accounting, not real token 
 
 Real incentives should wait until useful work can be measured reliably and abuse-resistant proof exists. Rewarding compute before route correctness, health checks, and receipt validation would risk paying for stale, failed, fake, or low-quality work.
 
-Sprint 10 is now reserved for the simpler gated-model local import flow, and Sprint 11 is reserved for adding better instruction-ready model options. Incentives remain important, but they should not compete with model-access reliability or model-quality work.
+Sprints 10 and 11 completed the gated-model local import flow and instruction-ready model expansion. Incentives remain important, but this sprint stays open because real multi-device inference, route-health evidence, signed contribution receipts, and anti-abuse rules are not yet proven.
 
 ---
 

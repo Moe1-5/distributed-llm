@@ -19,7 +19,9 @@ from client.sequential import RemoteSequential
 from models.architecture_adapter import get_architecture_adapter
 from node.handler import InferenceHandler
 from node.node import Node
+from node.relay_compat import _static_relay_process_args
 from node.rpc_server import RPCServer
+from relay_probe import _relay_dht_kwargs, run_relay_probe
 from api.local_models import (
     LocalModelValidationError,
     import_local_model,
@@ -109,6 +111,144 @@ class InitialPeersTests(unittest.TestCase):
                 "fixed non-zero port",
             ):
                 get_p2p_network_config()
+
+
+class RelayProbeTests(unittest.TestCase):
+    def _config(self, timeout: float = 0) -> P2PNetworkConfig:
+        return P2PNetworkConfig(
+            mode="relay",
+            port=0,
+            announce_maddrs=(),
+            trusted_relays=(
+                "/ip4/203.0.113.10/tcp/7001/p2p/relay",
+            ),
+            auto_nat=True,
+            nat_port_map=True,
+            use_auto_relay=True,
+            relay_wait_timeout=timeout,
+        )
+
+    def test_relay_probe_uses_worker_relay_dht_arguments(self) -> None:
+        config = self._config()
+
+        kwargs = _relay_dht_kwargs(
+            initial_peers=[
+                "/ip4/203.0.113.10/tcp/7001/p2p/relay"
+            ],
+            p2p_config=config,
+        )
+
+        self.assertEqual(kwargs["host_maddrs"], ["/ip4/0.0.0.0/tcp/0"])
+        self.assertEqual(
+            kwargs["initial_peers"],
+            ["/ip4/203.0.113.10/tcp/7001/p2p/relay"],
+        )
+        self.assertTrue(kwargs["use_relay"])
+        self.assertTrue(kwargs["use_auto_relay"])
+        self.assertEqual(
+            kwargs["trusted_relays"],
+            ["/ip4/203.0.113.10/tcp/7001/p2p/relay"],
+        )
+        self.assertTrue(kwargs["client_mode"])
+        self.assertFalse(kwargs["use_ipfs"])
+        self.assertEqual(kwargs["force_reachability"], "private")
+
+    def test_trusted_relay_uses_static_p2pd_selection(self) -> None:
+        def make_args(*args, **kwargs) -> list[str]:
+            return [
+                str(args[0]),
+                *[f"{key}={value}" for key, value in kwargs.items()],
+            ]
+
+        args = _static_relay_process_args(
+            make_args,
+            "p2pd",
+            autoRelay=True,
+            trustedRelays="/ip4/203.0.113.10/tcp/7001/p2p/relay",
+        )
+
+        self.assertIn("relayDiscovery=False", args)
+
+    def test_relay_probe_succeeds_when_circuit_address_is_visible(self) -> None:
+        import relay_probe as relay_probe_module
+
+        refreshes: list[bool] = []
+        relay_address = (
+            "/ip4/203.0.113.10/tcp/7001/p2p/relay/"
+            "p2p-circuit/p2p/worker"
+        )
+
+        class FakeDHT:
+            peer_id = "worker"
+
+            def __init__(self, **kwargs) -> None:
+                self.shutdown_called = False
+
+            def get_visible_maddrs(self, latest: bool = False) -> list[str]:
+                refreshes.append(latest)
+                return [relay_address]
+
+            def shutdown(self) -> None:
+                self.shutdown_called = True
+
+        original_dht = relay_probe_module.hivemind.DHT
+        relay_probe_module.hivemind.DHT = FakeDHT
+        try:
+            result = run_relay_probe(
+                initial_peers=[
+                    "/ip4/203.0.113.10/tcp/7001/p2p/relay"
+                ],
+                p2p_config=self._config(),
+            )
+        finally:
+            relay_probe_module.hivemind.DHT = original_dht
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.peer_id, "worker")
+        self.assertEqual(result.circuit_maddrs, [relay_address])
+        self.assertIsNone(result.error)
+        self.assertFalse(result.relay_discovery)
+        self.assertEqual(refreshes, [True])
+
+    def test_relay_probe_reports_timeout_without_model_loading(self) -> None:
+        import relay_probe as relay_probe_module
+
+        class FakeDHT:
+            peer_id = "worker"
+
+            def __init__(self, **kwargs) -> None:
+                pass
+
+            def get_visible_maddrs(self, latest: bool = False) -> list[str]:
+                return ["/ip4/172.24.1.2/tcp/49152/p2p/worker"]
+
+            def shutdown(self) -> None:
+                pass
+
+        original_dht = relay_probe_module.hivemind.DHT
+        relay_probe_module.hivemind.DHT = FakeDHT
+        try:
+            result = run_relay_probe(
+                initial_peers=[
+                    "/ip4/203.0.113.10/tcp/7001/p2p/relay"
+                ],
+                p2p_config=self._config(timeout=0),
+            )
+        finally:
+            relay_probe_module.hivemind.DHT = original_dht
+
+        self.assertFalse(result.ok)
+        self.assertIn("No /p2p-circuit/ address", result.error or "")
+        self.assertEqual(
+            result.visible_maddrs,
+            ["/ip4/172.24.1.2/tcp/49152/p2p/worker"],
+        )
+
+    def test_relay_probe_rejects_missing_peers(self) -> None:
+        result = run_relay_probe(initial_peers=[], p2p_config=self._config())
+
+        self.assertFalse(result.ok)
+        self.assertIn("requires at least one", result.error or "")
 
 
 class DummyDHT:
@@ -1468,6 +1608,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertTrue(dht_kwargs["use_relay"])
         self.assertFalse(dht_kwargs["use_auto_relay"])
         self.assertFalse(dht_kwargs["client_mode"])
+        self.assertIsNone(dht_kwargs["force_reachability"])
 
     def test_node_auto_mode_falls_back_to_relay_and_announces_transport(self) -> None:
         import node.node as node_module
@@ -1477,6 +1618,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             "p2p-circuit/p2p/worker"
         )
         dht_kwargs: dict[str, object] = {}
+        refreshes: list[bool] = []
 
         class FakeHandler:
             def load(self) -> None:
@@ -1502,7 +1644,8 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 value = self.values.get(key)
                 return DummyDHTResult(value) if value is not None else None
 
-            def get_visible_maddrs(self) -> list[str]:
+            def get_visible_maddrs(self, latest: bool = False) -> list[str]:
+                refreshes.append(latest)
                 return [relay_address]
 
         class FakeRPC:
@@ -1560,6 +1703,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(node.connection_mode, "relay")
         self.assertFalse(node.direct_reachability)
         self.assertTrue(node.transport_verified)
+        self.assertIn(True, refreshes)
         self.assertEqual(node.get_visible_maddrs(), [relay_address])
         self.assertEqual(
             dht_kwargs["host_maddrs"],
@@ -1567,6 +1711,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         )
         self.assertTrue(dht_kwargs["use_auto_relay"])
         self.assertTrue(dht_kwargs["client_mode"])
+        self.assertEqual(dht_kwargs["force_reachability"], "private")
         self.assertEqual(
             dht_kwargs["trusted_relays"],
             ["/ip4/203.0.113.10/tcp/7001/p2p/relay"],

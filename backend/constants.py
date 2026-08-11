@@ -4,11 +4,8 @@ Single source of truth for DistribLLM network configuration.
 
 Bootstrap peers:
     These are the well-known stable entry points for the swarm.
-    Run bootstrap.py ONCE with --identity_path bootstrap.id to generate
-    a stable peer ID, then hardcode the printed address here.
-
-    Until you have a VPS, run bootstrap.py locally and use the
-    /ip4/127.0.0.1/... address for single-machine testing.
+    Configure them through DISTRIBLLM_INITIAL_PEERS. Production participants
+    use the project VPS public address; local tests may use a loopback address.
 
 use_ipfs=False:
     Hivemind's P2P layer has a use_ipfs flag. When True, it connects
@@ -22,14 +19,11 @@ from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # Bootstrap peers
-# Replace this with your VPS address once you have one.
-# Run: python3 bootstrap.py --port 7001 --identity_path bootstrap.id
-# Then copy the printed /ip4/<YOUR_IP>/tcp/7001/p2p/<PEER_ID> here.
+# Infrastructure addresses are deployment configuration, not source defaults.
+# An empty value makes a missing environment configuration explicit instead of
+# silently dialing an obsolete developer-machine peer.
 # ---------------------------------------------------------------------------
-DEFAULT_DISTRIBLLM_INITIAL_PEERS: list[str] = [
-    "/ip4/127.0.0.1/tcp/7001/p2p/QmY54qgx7Si9KCWXFVdrn4J7kGPfdJUoNHNeTy1JqnDnX7",
-    "/ip4/172.27.32.227/tcp/7001/p2p/QmY54qgx7Si9KCWXFVdrn4J7kGPfdJUoNHNeTy1JqnDnX7"
-]
+DEFAULT_DISTRIBLLM_INITIAL_PEERS: list[str] = []
 
 
 def get_initial_peers() -> list[str]:
