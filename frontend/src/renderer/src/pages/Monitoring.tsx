@@ -60,6 +60,12 @@ function formatVram(stats: Stats | null): string {
     : `${allocated} GB allocated · ${reserved} GB reserved`
 }
 
+function formatDuration(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'Unavailable'
+  if (value >= 1000) return `${(value / 1000).toFixed(2)} s`
+  return `${value.toFixed(1)} ms`
+}
+
 export default function Monitoring(): React.JSX.Element {
   const [state, setState] = useState<MonitoringState>({
     generator: null,
@@ -116,6 +122,8 @@ export default function Monitoring(): React.JSX.Element {
   const selectedModel = state.models.find((model) => model.id === state.selectedModel)
   const modelNodes = state.nodes.filter((node) => node.model_name === state.selectedModel)
   const routeTrace = state.generator?.node_trace ?? []
+  const generatorPerformance = state.generator?.performance
+  const lastGeneration = generatorPerformance?.last_generation
 
   const coverage = useMemo(() => {
     if (!selectedModel) {
@@ -269,6 +277,71 @@ export default function Monitoring(): React.JSX.Element {
               </div>
             ))}
           </div>
+        </section>
+
+        <section>
+          <div className="mb-3 flex items-end justify-between gap-4">
+            <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
+              Generation Performance
+            </h2>
+            <span className="font-mono text-[9px] text-text-dim">
+              Latest completed generation
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
+            {[
+              ['Startup', formatDuration(generatorPerformance?.startup_duration_ms)],
+              ['Model load', formatDuration(generatorPerformance?.load_duration_ms)],
+              ['Route check', formatDuration(generatorPerformance?.route_validation_ms)],
+              ['First token', formatDuration(lastGeneration?.time_to_first_token_ms)],
+              ['Total', formatDuration(lastGeneration?.total_duration_ms)],
+              [
+                'Throughput',
+                lastGeneration
+                  ? `${lastGeneration.tokens_per_second.toFixed(2)} tok/s`
+                  : 'Unavailable'
+              ]
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-border bg-bg-elevated p-4">
+                <p className="font-mono text-[9px] tracking-widest text-text-dim uppercase">
+                  {label}
+                </p>
+                <p className="mt-2 text-lg font-semibold tabular-nums text-text-primary">{value}</p>
+              </div>
+            ))}
+          </div>
+
+          {lastGeneration && (
+            <div className="mt-3 overflow-hidden rounded-lg border border-border bg-bg-elevated">
+              <div className="grid grid-cols-[minmax(0,1fr)_100px_90px_110px] gap-3 border-b border-border px-4 py-2 font-mono text-[9px] tracking-widest text-text-dim uppercase">
+                <span>Relay hop</span>
+                <span>Layers</span>
+                <span>Calls</span>
+                <span>Average</span>
+              </div>
+              {lastGeneration.hop_metrics.length === 0 ? (
+                <p className="px-4 py-3 font-mono text-[11px] text-text-dim">
+                  No completed RPC hop measurements yet.
+                </p>
+              ) : (
+                lastGeneration.hop_metrics.map((hop) => (
+                  <div
+                    key={`${hop.peer_id}-${hop.layer_start}-${hop.layer_end}`}
+                    className="grid grid-cols-[minmax(0,1fr)_100px_90px_110px] gap-3 border-b border-border px-4 py-2.5 font-mono text-[11px] last:border-b-0"
+                  >
+                    <span className="truncate text-text-secondary">{shortPeer(hop.peer_id)}</span>
+                    <span className="text-cyan">
+                      {hop.layer_start}-{hop.layer_end}
+                    </span>
+                    <span className="tabular-nums text-text-secondary">{hop.calls}</span>
+                    <span className="tabular-nums text-text-primary">
+                      {formatDuration(hop.average_latency_ms)}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
         </section>
 
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">

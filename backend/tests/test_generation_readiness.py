@@ -1179,6 +1179,37 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         finally:
             sequential_module.get_experts = original_get_experts
 
+    def test_forward_records_route_and_rpc_hop_timings(self) -> None:
+        node = {
+            **self.make_node(0, 1, "peer-a"),
+            "rpc_uid": "test-prefix.0.1",
+            "running": True,
+            "layers_loaded": True,
+            "rpc_running": True,
+        }
+        sequential = RemoteSequential(
+            DummyDHT(),
+            "test-prefix",
+            num_layers=1,
+            model_name="facebook/opt-125m",
+        )
+        sequential._discover_nodes = lambda: [node]
+        sequential._call_node = lambda **kwargs: kwargs["hidden_states"]
+
+        output, trace = sequential.forward(torch.zeros(1, 2, 4))
+        metrics = sequential.get_last_forward_metrics()
+
+        self.assertEqual(tuple(output.shape), (1, 2, 4))
+        self.assertEqual(trace, ["peer-a… (layers 0→1)"])
+        self.assertGreaterEqual(metrics["discovery_ms"], 0)
+        self.assertGreaterEqual(metrics["route_validation_ms"], 0)
+        self.assertGreaterEqual(metrics["rpc_total_ms"], 0)
+        self.assertGreaterEqual(metrics["total_ms"], metrics["rpc_total_ms"])
+        self.assertEqual(len(metrics["hops"]), 1)
+        self.assertEqual(metrics["hops"][0]["peer_id"], "peer-a")
+        self.assertEqual(metrics["hops"][0]["layer_start"], 0)
+        self.assertEqual(metrics["hops"][0]["layer_end"], 1)
+
     def test_plan_route_returns_contiguous_non_overlapping_spans(self) -> None:
         sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
 
@@ -1998,6 +2029,83 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(received_kwargs["repetition_penalty"], 1.0)
         self.assertFalse(received_kwargs["do_sample"])
 
+    def test_generate_stream_reports_generation_and_hop_metrics(self) -> None:
+        class DummyTokenizer:
+            eos_token_id = 0
+
+            def encode(self, prompt: str, return_tensors: str = "pt") -> torch.Tensor:
+                return torch.tensor([[1, 2]])
+
+            def decode(self, token_ids: torch.Tensor, skip_special_tokens: bool = True) -> str:
+                return "x"
+
+        class TimedSequential:
+            def forward(
+                self,
+                hidden_states: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+                position_ids: torch.Tensor | None = None,
+            ) -> tuple[torch.Tensor, list[str]]:
+                return hidden_states, ["peer… (layers 0→1)"]
+
+            def get_last_forward_metrics(self) -> dict:
+                return {
+                    "route_validation_ms": 0.5,
+                    "hops": [
+                        {
+                            "peer_id": "peer-id",
+                            "rpc_uid": "distribllm.0.1",
+                            "layer_start": 0,
+                            "layer_end": 1,
+                            "latency_ms": 2.5,
+                        }
+                    ],
+                }
+
+        generator = DistributedGenerator(
+            "facebook/opt-125m",
+            sequential=TimedSequential(),
+            device="cpu",
+        )
+        generator._loaded = True
+        generator.tokenizer = DummyTokenizer()
+        generator.embed_tokens = nn.Embedding(10, 4)
+        generator.position_embeddings = nn.Embedding(8, 4)
+        generator.norm = nn.Identity()
+        generator.lm_head = nn.Linear(4, 10)
+        generator._sample = lambda logits, **kwargs: torch.tensor([[1]])
+
+        async def run_generation() -> list[dict]:
+            return [
+                item
+                async for item in generator.generate_stream(
+                    "hello",
+                    max_new_tokens=2,
+                    do_sample=False,
+                )
+            ]
+
+        result = asyncio.run(run_generation())
+        completed = next(item for item in result if item.get("done"))
+        metrics = completed["metrics"]
+
+        self.assertEqual(metrics["generated_tokens"], 2)
+        self.assertGreaterEqual(metrics["time_to_first_token_ms"], 0)
+        self.assertGreaterEqual(
+            metrics["total_duration_ms"],
+            metrics["time_to_first_token_ms"],
+        )
+        self.assertGreater(metrics["tokens_per_second"], 0)
+        self.assertEqual(metrics["route_validation_ms_total"], 1.0)
+        self.assertFalse(metrics["stopped"])
+        self.assertEqual(metrics["hop_metrics"][0]["calls"], 2)
+        self.assertEqual(metrics["hop_metrics"][0]["total_latency_ms"], 5.0)
+        self.assertEqual(metrics["hop_metrics"][0]["average_latency_ms"], 2.5)
+        self.assertEqual(
+            generator.get_performance_snapshot()["last_generation"],
+            metrics,
+        )
+
     def test_generate_stream_honors_stop_request_after_route_step(self) -> None:
         class DummyTokenizer:
             eos_token_id = 0
@@ -2037,7 +2145,11 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         result = asyncio.run(run_generation())
 
-        self.assertEqual(result, [{"done": True, "node_trace": ["peer… (layers 0→1)"]}])
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]["done"])
+        self.assertEqual(result[0]["node_trace"], ["peer… (layers 0→1)"])
+        self.assertEqual(result[0]["metrics"]["generated_tokens"], 0)
+        self.assertTrue(result[0]["metrics"]["stopped"])
 
     def test_sample_uses_argmax_when_do_sample_is_false(self) -> None:
         generator = DistributedGenerator("facebook/opt-125m", sequential=object())
@@ -2539,6 +2651,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         self.assertFalse(result["ready"])
         self.assertEqual(result["reasons"], ["Generator not loaded."])
+        self.assertIsNone(result["performance"])
 
     def test_generator_status_reports_route_validation_error(self) -> None:
         from api import server as api_server
@@ -2564,6 +2677,53 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertFalse(result["route_ready"])
         self.assertEqual(result["reasons"], ["missing layers"])
+
+    def test_generator_status_reports_startup_route_and_generation_metrics(self) -> None:
+        from api import server as api_server
+
+        class DummySequential:
+            def validate_reachable_route(self) -> list[dict]:
+                return [
+                    {
+                        "peer_id": "peer-a",
+                        "layer_start": 0,
+                        "layer_end": 12,
+                    }
+                ]
+
+        class DummyGenerator:
+            model_name = "facebook/opt-125m"
+            sequential = DummySequential()
+
+            def is_loaded(self) -> bool:
+                return True
+
+            def get_performance_snapshot(self) -> dict:
+                return {
+                    "startup_duration_ms": 100.0,
+                    "load_duration_ms": 75.0,
+                    "last_generation": {
+                        "generated_tokens": 2,
+                        "tokens_per_second": 4.0,
+                    },
+                }
+
+        original_generator = api_server.generator
+        api_server.generator = DummyGenerator()
+        try:
+            result = asyncio.run(api_server.get_generator_status())
+        finally:
+            api_server.generator = original_generator
+
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["route_ready"])
+        self.assertEqual(result["performance"]["startup_duration_ms"], 100.0)
+        self.assertEqual(result["performance"]["load_duration_ms"], 75.0)
+        self.assertGreaterEqual(result["performance"]["route_validation_ms"], 0)
+        self.assertEqual(
+            result["performance"]["last_generation"]["generated_tokens"],
+            2,
+        )
 
     def test_models_report_not_runnable_without_dht_connection(self) -> None:
         from api import server as api_server

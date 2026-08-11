@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1581,6 +1582,7 @@ async def stop_node(node_id: Optional[str] = None) -> dict:
 @app.post("/generator/start")
 async def start_generator(req: GeneratorStartRequest) -> dict:
     global generator, client_dht, client_dht_prefix
+    startup_started_at = time.perf_counter()
 
     model_info = SUPPORTED_MODELS[req.model_name]
     try:
@@ -1650,7 +1652,18 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         if not generator.is_loaded():
             raise RuntimeError("generator.load() completed but is_loaded() is False")
 
-        return {"status": "ready"}
+        startup_duration_ms = (time.perf_counter() - startup_started_at) * 1000
+        set_startup_duration = getattr(generator, "set_startup_duration_ms", None)
+        if callable(set_startup_duration):
+            set_startup_duration(startup_duration_ms)
+        return {
+            "status": "ready",
+            "performance": (
+                generator.get_performance_snapshot()
+                if hasattr(generator, "get_performance_snapshot")
+                else {"startup_duration_ms": startup_duration_ms}
+            ),
+        }
 
     except AssertionError as e:
         _cleanup_failed_generator(generator)
@@ -1678,18 +1691,34 @@ async def get_generator_status() -> dict:
             "route_ready": False,
             "reasons": ["Generator not loaded."],
             "node_trace": [],
+            "performance": None,
         }
 
     reasons: list[str] = []
     node_trace: list[str] = []
     route_ready = False
 
+    route_validation_started_at = time.perf_counter()
     try:
         route = generator.sequential.validate_reachable_route()
         route_ready = True
         node_trace = _format_route_trace(route)
     except Exception as e:
         reasons.append(str(e))
+    route_validation_ms = (
+        time.perf_counter() - route_validation_started_at
+    ) * 1000
+    performance_getter = getattr(generator, "get_performance_snapshot", None)
+    performance = (
+        performance_getter()
+        if callable(performance_getter)
+        else {
+            "startup_duration_ms": None,
+            "load_duration_ms": None,
+            "last_generation": None,
+        }
+    )
+    performance["route_validation_ms"] = route_validation_ms
 
     return {
         "ready": generator.is_loaded() and route_ready,
@@ -1697,6 +1726,7 @@ async def get_generator_status() -> dict:
         "route_ready": route_ready,
         "reasons": reasons,
         "node_trace": node_trace,
+        "performance": performance,
     }
 
 
@@ -1787,6 +1817,7 @@ async def chat(req: ChatRequest) -> dict:
 
     full_response         = ""
     node_trace: list[str] = []
+    generation_metrics: Optional[dict] = None
 
     async for chunk in generator.generate_stream(
         prompt=req.message,
@@ -1798,14 +1829,21 @@ async def chat(req: ChatRequest) -> dict:
         do_sample=req.do_sample,
     ):
         if "token"  in chunk: full_response += chunk["token"]
-        elif "done" in chunk: node_trace = chunk.get("node_trace", [])
+        elif "done" in chunk:
+            node_trace = chunk.get("node_trace", [])
+            generation_metrics = chunk.get("metrics")
         elif "error" in chunk:
             raise HTTPException(status_code=500, detail=chunk["error"])
 
     return {
         "response":         full_response,
         "node_trace":       node_trace,
-        "tokens_generated": len(full_response.split()),
+        "tokens_generated": (
+            generation_metrics.get("generated_tokens", 0)
+            if generation_metrics is not None
+            else 0
+        ),
+        "performance": generation_metrics,
     }
 
 

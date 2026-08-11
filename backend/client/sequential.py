@@ -151,6 +151,7 @@ class RemoteSequential:
         self.num_layers = num_layers
         self.model_name = model_name
         self._replica_cursors: dict[tuple[int, int], int] = {}
+        self._last_forward_metrics: dict = {}
 
     def _validate_node_metadata(self, info: dict, peer_id: str = "unknown") -> dict:
         required = {"peer_id", "layer_start", "layer_end", "model_name", "rpc_uid"}
@@ -334,7 +335,9 @@ class RemoteSequential:
  
         # ── Step 1: node discovery ────────────────────────────────────────────
         logger.debug("[forward] Step 1/3 — discovering nodes …")
+        discovery_started_at = time.perf_counter()
         nodes = self._discover_nodes()
+        discovery_ms = (time.perf_counter() - discovery_started_at) * 1000
  
         if not nodes:
             # This is almost always caused by a silent _announce() crash.
@@ -362,13 +365,16 @@ class RemoteSequential:
             f"[forward] Step 2/3 — validating route "
             f"(need layers 0…{self.num_layers - 1}) …"
         )
+        route_started_at = time.perf_counter()
         ordered_nodes = self.validate_route(nodes)
+        route_validation_ms = (time.perf_counter() - route_started_at) * 1000
         logger.info(
             f"[forward] Step 2/3 ✓ — route validated for {len(ordered_nodes)} node(s)"
         )
  
         # ── Step 3: sequential RPC calls ─────────────────────────────────────
-        node_trace    = []
+        node_trace = []
+        hop_metrics: list[dict] = []
  
         route_str = " → ".join(
             f"layers {n['layer_start']}–{n['layer_end']} @ {_peer_short(n['peer_id'])}"
@@ -404,6 +410,15 @@ class RemoteSequential:
                 position_ids=position_ids
             )
             hop_ms = (time.perf_counter() - t_hop) * 1000
+            hop_metrics.append(
+                {
+                    "peer_id": str(peer_id),
+                    "rpc_uid": str(rpc_uid),
+                    "layer_start": int(layer_start),
+                    "layer_end": int(layer_end),
+                    "latency_ms": hop_ms,
+                }
+            )
  
             logger.debug(
                 f"[forward] Hop {hop_idx + 1}/{len(ordered_nodes)} ✓ | "
@@ -414,6 +429,13 @@ class RemoteSequential:
             node_trace.append(f"{peer_id[:8]}… (layers {layer_start}→{layer_end})")
  
         total_ms = (time.perf_counter() - t_start) * 1000
+        self._last_forward_metrics = {
+            "discovery_ms": discovery_ms,
+            "route_validation_ms": route_validation_ms,
+            "rpc_total_ms": sum(hop["latency_ms"] for hop in hop_metrics),
+            "total_ms": total_ms,
+            "hops": hop_metrics,
+        }
         logger.info(
             f"[forward] ── FORWARD PASS COMPLETE ──────────────────────\n"
             f"  hops    : {len(node_trace)}\n"
@@ -422,6 +444,16 @@ class RemoteSequential:
             f"  trace   : {' → '.join(node_trace)}"
         )
         return hidden_states, node_trace
+
+    def get_last_forward_metrics(self) -> dict:
+        """Return timing evidence for the latest successful forward pass."""
+        return {
+            **self._last_forward_metrics,
+            "hops": [
+                dict(hop)
+                for hop in self._last_forward_metrics.get("hops", [])
+            ],
+        }
 
     # ------------------------------------------------------------------
     # RPC call

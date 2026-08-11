@@ -99,10 +99,12 @@ Network -> Run Inference
   -> POST /generator/start
   -> create client DHT
   -> load tokenizer/embeddings/norm/LM head
+  -> record full startup and local-component load duration
   -> GET /generator/status
   -> discover compatible nodes
   -> validate a complete contiguous non-overlapping route
   -> resolve every selected expert and probe RPC metadata
+  -> report route validation duration
   -> enable inference only when ready
 ```
 
@@ -118,7 +120,8 @@ Inference page opens /stream WebSocket
   -> sends hidden states through selected RPC route
   -> applies local output components
   -> samples/decodes next token
-  -> streams token chunks and route trace
+  -> records first-token, total, throughput, and per-hop RPC timings
+  -> streams token chunks, then route trace and completion metrics
 ```
 
 The user can request cancellation between token steps. Diagnostic endpoints can compare next-token logits/generated output with direct Hugging Face execution and write redacted JSON traces.
@@ -143,7 +146,7 @@ In automatic network mode, a NAT-separated worker keeps an outbound reservation 
 
 ## 10. Monitoring and Cleanup
 
-- `/status`, `/stats`, `/nodes`, `/models`, and `/generator/status` drive UI readiness and monitoring.
+- `/status`, `/stats`, `/nodes`, `/models`, and `/generator/status` drive UI readiness and monitoring. Monitoring combines sampled machine/process/GPU metrics with the latest completed generation and aggregated RPC-hop timings.
 - `/incentives/accounting` reports simulated contribution metrics only.
 - Managed Hugging Face snapshots can be removed with file deletion; arbitrary manual folders are unregistered but not recursively deleted.
 - Backend shutdown uses bounded cleanup for local nodes and the generator DHT.

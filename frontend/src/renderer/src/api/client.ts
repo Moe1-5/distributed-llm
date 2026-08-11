@@ -92,6 +92,35 @@ export interface GeneratorStatus {
   route_ready: boolean
   reasons: string[]
   node_trace: string[]
+  performance: GeneratorPerformance | null
+}
+
+export interface HopPerformance {
+  peer_id: string
+  rpc_uid: string
+  layer_start: number
+  layer_end: number
+  calls: number
+  total_latency_ms: number
+  average_latency_ms: number
+  last_latency_ms: number
+}
+
+export interface GenerationPerformance {
+  time_to_first_token_ms: number | null
+  total_duration_ms: number
+  generated_tokens: number
+  tokens_per_second: number
+  route_validation_ms_total: number
+  stopped: boolean
+  hop_metrics: HopPerformance[]
+}
+
+export interface GeneratorPerformance {
+  startup_duration_ms: number | null
+  load_duration_ms: number | null
+  route_validation_ms?: number | null
+  last_generation: GenerationPerformance | null
 }
 
 export interface AppSettings {
@@ -421,7 +450,13 @@ export const api = {
       typeof maxNewTokensOrOptions === 'object'
         ? maxNewTokensOrOptions
         : { maxNewTokens: maxNewTokensOrOptions, temperature, topP }
-    return post<{ response: string; node_trace: string[]; error?: string }>('/chat', {
+    return post<{
+      response: string
+      node_trace: string[]
+      tokens_generated: number
+      performance: GenerationPerformance | null
+      error?: string
+    }>('/chat', {
       message,
       ...generationOptionsPayload(options)
     })
@@ -499,6 +534,7 @@ export interface StreamChunk {
   token?: string
   done?: boolean
   node_trace?: string[]
+  metrics?: GenerationPerformance
   error?: string
 }
 

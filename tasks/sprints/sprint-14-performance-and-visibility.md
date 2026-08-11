@@ -22,15 +22,15 @@ The live TinyLlama route now completes correctly, but the application does not e
 
 - [x] Register Sprint 14 and start its dedicated branch.
 - [x] Add the first runtime resource metrics slice to the backend and Monitoring page.
-- [ ] Add generation and route timing metrics.
+- [x] Add generation and route timing metrics.
 
 ## Todo
 
 - [x] Report timestamped machine CPU/RAM and backend-process CPU/RSS/thread usage.
 - [x] Distinguish PyTorch allocated and reserved VRAM.
 - [x] Surface runtime resource measurements on Monitoring with unavailable states.
-- [ ] Record generator startup/load duration, route validation duration, time to first token, total generation duration, and tokens per second.
-- [ ] Record per-hop RPC latency without changing route selection behavior.
+- [x] Record generator startup/load duration, route validation duration, time to first token, total generation duration, and tokens per second.
+- [x] Record per-hop RPC latency without changing route selection behavior.
 - [x] Add fixed serving P2P ports, reachable announce-address configuration, direct probing, and relay fallback for real multi-device routes.
 - [ ] Deploy the relay-capable bootstrap and validate direct and relayed two-device inference.
 - [ ] Separate local node lifecycle cards from all-peer Monitoring visibility.
@@ -49,8 +49,8 @@ The live TinyLlama route now completes correctly, but the application does not e
 
 ## Acceptance Criteria
 
-- [ ] Monitoring displays fresh machine, backend-process, GPU, route, and generation measurements with clear units.
-- [ ] The backend exposes time to first token, total duration, generated token count, and tokens per second for completed generation.
+- [x] Monitoring displays fresh machine, backend-process, GPU, route, and generation measurements with clear units.
+- [x] The backend exposes time to first token, total duration, generated token count, and tokens per second for completed generation.
 - [ ] Chat/instruct prompts use the selected model's tokenizer chat template exactly once.
 - [ ] Concatenated stream fragments match full generated-sequence decoding, including spaces.
 - [ ] Missing GPU or platform-specific metrics are reported as unavailable, not misleading zeros.
@@ -102,3 +102,9 @@ The live TinyLlama route now completes correctly, but the application does not e
 - What changed: expanded the network reachability review with a VPS relay deployment runbook, participant environment configuration, minimum relay validation checks, recommended direct-versus-auto test order, and a two-device inference validation checklist.
 - Why: the next open risk is live proof on real Windows/WSL devices, and the test plan needs to make clear that relay is the production fallback while direct LAN remains a separate performance/dev path.
 - Status: documentation is ready for the VPS relay deployment and two-device inference test; no live VPS deployment or inference run was performed in this documentation session.
+
+### 2026-08-12 - Add generation and per-hop timing evidence
+
+- What changed: added observational timing snapshots for generator startup and model load, readiness-route validation, time to first token, total generation duration, generated token count, tokens per second, and aggregated RPC latency for each selected layer hop; completion payloads and generator status expose the metrics, and Monitoring renders the latest values without changing route selection.
+- Why: the upcoming two-device inference test needs enough evidence to distinguish model loading, route validation, relay RPC, and token-generation costs instead of reporting only whether generation eventually succeeded.
+- Status: all 117 backend tests plus 19 subtests, changed Python compilation, both frontend TypeScript checks, the production Electron/Vite build, and `git diff --check` pass. Chat-template application, context-aware stream decoding, and a live TinyLlama performance baseline remain open.

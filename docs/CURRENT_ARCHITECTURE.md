@@ -83,7 +83,7 @@ Current layer-loading limitation: Transformers constructs the complete model in 
 
 When serving and generating on the same machine, generator startup directly seeds matching local node multiaddresses alongside configured bootstrap peers. Generator peers enable relay dialing. Readiness resolves every selected expert and probes RPC metadata so DHT coverage or a claimed relay address alone cannot produce a false-ready state.
 
-`DistributedGenerator` loads local model components and performs autoregressive generation through that route. It supports exact generation controls, stop requests, route readiness, next-token parity probes, generated-output comparisons, and JSON trace artifacts.
+`DistributedGenerator` loads local model components and performs autoregressive generation through that route. It supports exact generation controls, stop requests, route readiness, next-token parity probes, generated-output comparisons, and JSON trace artifacts. Generator status also exposes startup/load duration, current route-probe duration, latest time to first token, total generation duration, token throughput, and per-hop RPC latency aggregates. These measurements are observational and do not alter route selection.
 
 The current data plane is:
 
@@ -99,7 +99,7 @@ There is no distributed KV cache, stable session routing, failover, or concurren
 
 ## Current Validation State
 
-- Backend regression suite: 114 tests and 19 subtests passing as of 2026-08-12.
+- Backend regression suite: 117 tests and 19 subtests passing as of 2026-08-12.
 - Frontend TypeScript typecheck and Python compilation pass with the direct/relay transport changes.
 - Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
 - Hugging Face device OAuth and real gated Llama 2 download have been exercised.

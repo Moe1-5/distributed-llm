@@ -13,6 +13,8 @@ Remote components (P2P network via RemoteSequential):
     - All transformer decoder layers
 """
 
+import copy
+import time
 from typing import AsyncGenerator, Optional
 
 import torch
@@ -57,6 +59,9 @@ class DistributedGenerator:
         self._loaded_model: Optional[nn.Module] = None
         self._loaded = False
         self._stop_requested = False
+        self._load_duration_ms: Optional[float] = None
+        self._startup_duration_ms: Optional[float] = None
+        self._last_generation_metrics: Optional[dict] = None
 
 
     def _get_gen_config(self) -> dict:
@@ -97,6 +102,7 @@ class DistributedGenerator:
     # ------------------------------------------------------------------
 
     def load(self) -> None:
+        started_at = time.perf_counter()
         logger.info(
             f"Loading local components for {self.model_name} | "
             f"hf_token={'set' if self.hf_token else 'not set'} | "
@@ -153,7 +159,21 @@ class DistributedGenerator:
         torch.cuda.empty_cache()
 
         self._loaded = True
-        logger.info("Local components loaded.")
+        self._load_duration_ms = (time.perf_counter() - started_at) * 1000
+        logger.info(
+            "Local components loaded in %.1fms.",
+            self._load_duration_ms,
+        )
+
+    def set_startup_duration_ms(self, duration_ms: float) -> None:
+        self._startup_duration_ms = max(0.0, float(duration_ms))
+
+    def get_performance_snapshot(self) -> dict:
+        return {
+            "startup_duration_ms": self._startup_duration_ms,
+            "load_duration_ms": self._load_duration_ms,
+            "last_generation": copy.deepcopy(self._last_generation_metrics),
+        }
 
     def _validate_loaded_components(self) -> None:
         missing = []
@@ -193,6 +213,7 @@ class DistributedGenerator:
         self.lm_head = None
         self.architecture_adapter = None
         self._loaded_model = None
+        self._last_generation_metrics = None
         torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
@@ -215,6 +236,11 @@ class DistributedGenerator:
             raise ValueError("prompt must not be empty")
 
         self.clear_stop()
+        generation_started_at = time.perf_counter()
+        first_token_at: Optional[float] = None
+        generated_token_count = 0
+        route_validation_ms_total = 0.0
+        hop_totals: dict[tuple[str, int, int], dict] = {}
         cfg = self._get_gen_config()
         logger.info(
             "[gen] starting generation prompt=%r max_new_tokens=%s temperature=%s top_p=%s",
@@ -291,6 +317,39 @@ class DistributedGenerator:
                     position_ids=position_ids,
                 )
 
+                forward_metrics_getter = getattr(
+                    self.sequential,
+                    "get_last_forward_metrics",
+                    None,
+                )
+                if callable(forward_metrics_getter):
+                    forward_metrics = forward_metrics_getter()
+                    route_validation_ms_total += float(
+                        forward_metrics.get("route_validation_ms", 0.0)
+                    )
+                    for hop in forward_metrics.get("hops", []):
+                        key = (
+                            str(hop.get("peer_id", "unknown")),
+                            int(hop.get("layer_start", 0)),
+                            int(hop.get("layer_end", 0)),
+                        )
+                        aggregate = hop_totals.setdefault(
+                            key,
+                            {
+                                "peer_id": key[0],
+                                "rpc_uid": str(hop.get("rpc_uid", "")),
+                                "layer_start": key[1],
+                                "layer_end": key[2],
+                                "calls": 0,
+                                "total_latency_ms": 0.0,
+                                "last_latency_ms": 0.0,
+                            },
+                        )
+                        latency_ms = float(hop.get("latency_ms", 0.0))
+                        aggregate["calls"] += 1
+                        aggregate["total_latency_ms"] += latency_ms
+                        aggregate["last_latency_ms"] = latency_ms
+
                 node_trace = trace
                 if self._stop_requested:
                     logger.info("[gen] stop requested after route step=%s", step)
@@ -326,6 +385,9 @@ class DistributedGenerator:
 
                 if next_token_id.shape != (1, 1):
                     raise RuntimeError(f"Expected shape (1,1), got {next_token_id.shape}")
+                generated_token_count += 1
+                if first_token_at is None:
+                    first_token_at = time.perf_counter()
                 token_text = self.tokenizer.decode(
                     next_token_id[0],
                     skip_special_tokens=True,
@@ -339,7 +401,41 @@ class DistributedGenerator:
                     logger.debug(f"EOS at step {step}")
                     break
 
-            yield {"done": True, "node_trace": node_trace}
+            completed_at = time.perf_counter()
+            total_duration_ms = (completed_at - generation_started_at) * 1000
+            elapsed_seconds = max(completed_at - generation_started_at, 1e-9)
+            hop_metrics = []
+            for aggregate in hop_totals.values():
+                calls = int(aggregate["calls"])
+                hop_metrics.append(
+                    {
+                        **aggregate,
+                        "average_latency_ms": (
+                            float(aggregate["total_latency_ms"]) / calls
+                            if calls
+                            else 0.0
+                        ),
+                    }
+                )
+            metrics = {
+                "time_to_first_token_ms": (
+                    (first_token_at - generation_started_at) * 1000
+                    if first_token_at is not None
+                    else None
+                ),
+                "total_duration_ms": total_duration_ms,
+                "generated_tokens": generated_token_count,
+                "tokens_per_second": generated_token_count / elapsed_seconds,
+                "route_validation_ms_total": route_validation_ms_total,
+                "stopped": self._stop_requested,
+                "hop_metrics": hop_metrics,
+            }
+            self._last_generation_metrics = metrics
+            yield {
+                "done": True,
+                "node_trace": node_trace,
+                "metrics": copy.deepcopy(metrics),
+            }
 
         except Exception as e:
             logger.error(f"Generation error: {e}", exc_info=True)
