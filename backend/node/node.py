@@ -3,11 +3,11 @@ node.py
 Represents this machine as a fully functional P2P serving node.
 
 Startup sequence:
-    1. Start hivemind DHT
-    2. Load transformer layers via InferenceHandler
-    3. Start RPC server
-    4. Announce to DHT
-    5. Keep re-announcing every 30s
+    1. Select verified direct transport or circuit-relay fallback
+    2. Start the Hivemind DHT peer
+    3. Load transformer layers via InferenceHandler
+    4. Start the RPC server
+    5. Announce model and transport state, refreshing every 30s
 """
 
 import time
@@ -20,9 +20,15 @@ import torch
 # from hivemind.utils.networking import get_dht_time          # correct import for 1.1.12
 from hivemind.utils.logging import get_logger
 
+from constants import (
+    ANNOUNCE_INTERVAL,
+    DHT_EXPIRY_TIME,
+    P2PNetworkConfig,
+    get_p2p_network_config,
+)
 from node.handler import InferenceHandler
+from node.reachability import ReachabilityProtocol, check_direct_reachability
 from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, RPCServer, _run_with_timeout
-from constants import ANNOUNCE_INTERVAL, DHT_EXPIRY_TIME
 
 logger = get_logger(__name__)
 
@@ -41,6 +47,7 @@ class Node:
         local_model_path: Optional[str] = None,
         node_id:       Optional[str] = None,
         rpc_uid_suffix: Optional[int] = None,
+        p2p_config: Optional[P2PNetworkConfig] = None,
     ):
         if not model_name.strip():
             raise ValueError("model_name must not be empty")
@@ -69,16 +76,21 @@ class Node:
         self.local_model_path = local_model_path
         self.node_id       = node_id or uuid4().hex[:12]
         self.rpc_uid_suffix = rpc_uid_suffix
+        self.p2p_config = p2p_config or get_p2p_network_config()
 
         self.dht:     Optional[hivemind.DHT]     = None
         self.handler: Optional[InferenceHandler] = None
         self.rpc:     Optional[RPCServer]        = None
+        self.reachability_protocol: Optional[ReachabilityProtocol] = None
 
         self._running         = False
         self._announce_enabled = False
         self._announce_thread: Optional[threading.Thread] = None
         self._last_peer_id: Optional[str] = None
         self._last_maddrs: list[str] = []
+        self.connection_mode = "checking"
+        self.direct_reachability: Optional[bool] = None
+        self.transport_verified = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -89,15 +101,32 @@ class Node:
             f"Node starting | model={self.model_name} "
             f"layers={self.layer_start}-{self.layer_end} device={self.device}"
         )
+        self.transport_verified = False
 
         # Step 1: DHT
         if self.dht is None:
-            logger.info("Step 1/4: Starting DHT...")
+            self.connection_mode = self._select_connection_mode()
+            logger.info(
+                "Step 1/4: Starting DHT in %s mode...",
+                self.connection_mode,
+            )
+            announce_maddrs = list(self.p2p_config.announce_maddrs) or None
+            trusted_relays = list(self.p2p_config.trusted_relays) or None
             self.dht = hivemind.DHT(
-                host_maddrs=["/ip4/0.0.0.0/tcp/0"],
+                host_maddrs=self.p2p_config.host_maddrs,
+                announce_maddrs=announce_maddrs,
                 initial_peers=self.initial_peers,
                 start=True,
                 use_ipfs=False,
+                auto_nat=self.p2p_config.auto_nat,
+                nat_port_map=self.p2p_config.nat_port_map,
+                use_relay=True,
+                use_auto_relay=(
+                    self.p2p_config.use_auto_relay
+                    and self.connection_mode == "relay"
+                ),
+                trusted_relays=trusted_relays,
+                client_mode=self.connection_mode == "relay",
             )
         else:
             logger.info("Step 1/4: Reusing existing DHT...")
@@ -105,6 +134,11 @@ class Node:
             raise RuntimeError("DHT started but peer_id is None")
         self._last_peer_id = str(self.dht.peer_id)
         logger.info(f"DHT started. Peer ID: {self.dht.peer_id}")
+        if self.connection_mode == "relay":
+            self._wait_for_relay_address()
+        else:
+            self.transport_verified = self.direct_reachability is True
+            self._start_reachability_protocol()
 
         # Step 2: Load layers
         if self.handler is None or not self.handler.is_loaded():
@@ -146,6 +180,103 @@ class Node:
 
         logger.info(f"Node fully started. Addresses: {self.get_visible_maddrs()}")
 
+    def _select_connection_mode(self) -> str:
+        configured_mode = self.p2p_config.mode
+        if configured_mode in {"direct", "relay"}:
+            if configured_mode == "relay" and not self.initial_peers:
+                raise RuntimeError(
+                    "Relay mode requires at least one bootstrap or relay peer"
+                )
+            if (
+                configured_mode == "relay"
+                and not self.p2p_config.use_auto_relay
+            ):
+                raise RuntimeError(
+                    "Relay mode requires DISTRIBLLM_AUTO_RELAY=true"
+                )
+            self.direct_reachability = (
+                None if configured_mode == "direct" else False
+            )
+            return configured_mode
+
+        if not self.initial_peers:
+            logger.info(
+                "No bootstrap peers are configured; using direct mode "
+                "for local development"
+            )
+            self.direct_reachability = None
+            return "direct"
+
+        try:
+            self.direct_reachability = check_direct_reachability(
+                initial_peers=self.initial_peers,
+                host_maddrs=self.p2p_config.host_maddrs,
+                announce_maddrs=(
+                    list(self.p2p_config.announce_maddrs) or None
+                ),
+                use_ipfs=False,
+                use_relay=False,
+                auto_nat=self.p2p_config.auto_nat,
+                nat_port_map=self.p2p_config.nat_port_map,
+                startup_timeout=60,
+            )
+        except Exception as e:
+            logger.warning(
+                "Direct reachability probe failed; falling back to relay: %s",
+                e,
+            )
+            self.direct_reachability = None
+
+        if self.direct_reachability is True:
+            return "direct"
+        if not self.p2p_config.use_auto_relay:
+            raise RuntimeError(
+                "This worker is not directly reachable and automatic relay "
+                "fallback is disabled"
+            )
+        return "relay"
+
+    def _wait_for_relay_address(self) -> None:
+        timeout = self.p2p_config.relay_wait_timeout
+        deadline = time.monotonic() + timeout
+        while True:
+            addresses = self.get_visible_maddrs()
+            if any("/p2p-circuit" in address for address in addresses):
+                self.transport_verified = True
+                logger.info("Relay reservation ready: %s", addresses)
+                return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        raise RuntimeError(
+            "Relay mode was selected, but no p2p-circuit address became "
+            f"available within {timeout:g} seconds. Check that the VPS is "
+            "relay-capable and reachable, or increase "
+            "DISTRIBLLM_RELAY_WAIT_TIMEOUT."
+        )
+
+    def _start_reachability_protocol(self) -> None:
+        if (
+            self.dht is None
+            or self.reachability_protocol is not None
+            or not self.initial_peers
+        ):
+            return
+        try:
+            self.reachability_protocol = ReachabilityProtocol.attach_to_dht(
+                self.dht
+            )
+        except Exception as e:
+            logger.warning(
+                "Could not start the optional reachability service: %s",
+                e,
+            )
+
+    def _stop_reachability_protocol(self) -> None:
+        if self.reachability_protocol is not None:
+            self.reachability_protocol.shutdown()
+            self.reachability_protocol = None
+
     def turn_off(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS) -> None:
         logger.info("Node turning off serving while keeping loaded layers...")
         self._running = False
@@ -160,10 +291,12 @@ class Node:
         if self.rpc is not None:
             self.rpc.stop(timeout=timeout)
             self.rpc = None
+        self._stop_reachability_protocol()
         if self.dht is not None:
             dht = self.dht
             _run_with_timeout("node-dht-pause-shutdown", dht.shutdown, timeout)
         self.dht = None
+        self.transport_verified = False
         logger.info(
             "Node serving turned off; loaded layers are preserved and serving handles were released."
         )
@@ -178,6 +311,7 @@ class Node:
         if self.rpc is not None:
             self.rpc.stop(timeout=timeout)
             self.rpc = None
+        self._stop_reachability_protocol()
         if self.handler is not None:
             self.handler.unload()
             self.handler = None
@@ -185,6 +319,7 @@ class Node:
             dht = self.dht
             _run_with_timeout("node-dht-shutdown", dht.shutdown, timeout)
             self.dht = None
+        self.transport_verified = False
         logger.info("Node stopped.")
 
     # ------------------------------------------------------------------
@@ -226,6 +361,9 @@ class Node:
                     self.rpc.is_running() if self.rpc else False
                 ) if rpc_running is None else rpc_running,
                 "rpc_uid":       self.rpc.get_uid()       if self.rpc     else None,
+                "connection_mode": self.connection_mode,
+                "direct_reachability": self.direct_reachability,
+                "transport_verified": self.transport_verified,
                 "timestamp":     time.time(),
             },
             expiration_time=expiry,
@@ -293,6 +431,9 @@ class Node:
             "maddrs":        self.get_visible_maddrs(),
             "layers_loaded": self.handler.is_loaded() if self.handler else False,
             "rpc_running":   self.rpc.is_running()    if self.rpc     else False,
+            "connection_mode": self.connection_mode,
+            "direct_reachability": self.direct_reachability,
+            "transport_verified": self.transport_verified,
             "accounting":    self.get_accounting_snapshot(),
         }
 

@@ -58,7 +58,12 @@ from api.hf_oauth import (
     start_huggingface_device_flow,
 )
 from api.settings import get_hf_token, save_hf_token, delete_hf_token, token_is_set
-from constants import SUPPORTED_MODELS, DHT_PREFIX, get_initial_peers
+from constants import (
+    SUPPORTED_MODELS,
+    DHT_PREFIX,
+    get_initial_peers,
+    get_p2p_network_config,
+)
 
 load_project_env()
 
@@ -1607,6 +1612,7 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         req.model_name,
         req.dht_prefix,
     )
+    p2p_config = get_p2p_network_config()
 
     try:
         _shutdown_client_dht()
@@ -1615,6 +1621,9 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
             initial_peers=peers,
             start=True,
             use_ipfs=False,
+            use_relay=True,
+            trusted_relays=list(p2p_config.trusted_relays) or None,
+            client_mode=True,
         )
         if client_dht.peer_id is None:
             raise RuntimeError("Generator DHT started but peer_id is None")

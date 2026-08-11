@@ -5,7 +5,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 ## Backend Entry Points
 
 - `backend/main.py`: starts FastAPI/Uvicorn; defaults to port 8000.
-- `backend/bootstrap.py`: stable discovery-only Hivemind bootstrap using `bootstrap.id`.
+- `backend/bootstrap.py`: stable Hivemind bootstrap, circuit-relay peer, and direct-reachability checker using `bootstrap.id`.
 - `backend/colab_worker.py`: headless serving worker with model/layer/device/peer arguments and optional Hugging Face device OAuth.
 
 ## Backend API and Configuration
@@ -15,11 +15,12 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `backend/api/hf_oauth.py`: Hugging Face device OAuth, redacted connection state, managed snapshot-download jobs, cancellation, and download-to-import handoff.
 - `backend/api/local_models.py`: local snapshot inspection, validation, registry, revalidation, and safe managed-cache deletion.
 - `backend/api/settings.py`: OAuth token storage outside the repository by default, with a documented path override.
-- `backend/constants.py`: supported models, tuning/shape/generation metadata, DHT timing/prefix constants, and environment-backed initial peers.
+- `backend/constants.py`: supported models, tuning/shape/generation metadata, DHT timing/prefix constants, environment-backed initial peers, and typed direct/relay transport settings.
 
 ## Distributed Serving and Generation
 
-- `backend/node/node.py`: DHT, layer handler, RPC, announcements, pause/resume/delete lifecycle, and contribution state for one layer slice.
+- `backend/node/node.py`: direct-reachability selection, relay fallback, DHT, layer handler, RPC, announcements, pause/resume/delete lifecycle, and contribution state for one layer slice.
+- `backend/node/reachability.py`: Petals-derived protocol that asks an independent peer to test direct libp2p dialing with relay disabled.
 - `backend/node/block_loader.py`: anonymous/public or offline/local model construction and decoder-layer extraction. It currently constructs the complete model before retaining a range.
 - `backend/node/handler.py`: validated remote forward execution, architecture adapter integration, dtype/device conversion, and accounting.
 - `backend/node/rpc_server.py`: Hivemind expert wrapper, unique RPC UIDs, and bounded server shutdown helpers.

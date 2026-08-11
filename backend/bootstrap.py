@@ -11,6 +11,9 @@ Key behaviour:
 
     use_ipfs=False   keeps us off the Petals/IPFS public network.
 
+    use_relay=True   lets NAT-separated workers reserve circuit-relay paths.
+                     The bootstrap remains a non-compute infrastructure peer.
+
 Usage:
     First run (generates identity):
         python3 bootstrap.py --port 7001 --identity_path bootstrap.id
@@ -29,6 +32,7 @@ import sys
 
 import hivemind
 from hivemind.utils.logging import get_logger
+from node.reachability import ReachabilityProtocol
 
 logger = get_logger(__name__)
 
@@ -47,6 +51,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--host", type=str, default="0.0.0.0",
         help="Host IP to bind to (default: 0.0.0.0 = all interfaces)"
+    )
+    parser.add_argument(
+        "--announce-maddr",
+        action="append",
+        default=[],
+        help=(
+            "Public multiaddr to announce; repeat for multiple addresses. "
+            "Example: /ip4/203.0.113.10/tcp/7001"
+        ),
+    )
+    parser.add_argument(
+        "--no-relay",
+        action="store_false",
+        dest="use_relay",
+        help="Disable libp2p circuit-relay forwarding.",
     )
     return parser.parse_args()
 
@@ -69,6 +88,7 @@ def main() -> None:
 
     dht = hivemind.DHT(
         host_maddrs=[f"/ip4/{args.host}/tcp/{args.port}"],
+        announce_maddrs=args.announce_maddr or None,
         start=True,
         # identity_path makes peer ID deterministic across restarts
         identity_path=args.identity_path,
@@ -76,11 +96,17 @@ def main() -> None:
         use_ipfs=False,
         # No initial peers — this IS the bootstrap node
         initial_peers=[],
+        # Public bootstrap peers also provide relay fallback by default.
+        use_relay=args.use_relay,
     )
 
     assert dht.peer_id is not None, "DHT started but peer_id is None"
 
     visible = [str(addr) for addr in dht.get_visible_maddrs()]
+    reachability_protocol = ReachabilityProtocol.attach_to_dht(
+        dht,
+        await_ready=True,
+    )
 
     print("  Bootstrap addresses (share these with your nodes):")
     for addr in visible:
@@ -95,6 +121,7 @@ def main() -> None:
     # Graceful shutdown on Ctrl+C
     def _shutdown(sig, frame):
         print("\nShutting down bootstrap node...")
+        reachability_protocol.shutdown()
         dht.shutdown()
         sys.exit(0)
 

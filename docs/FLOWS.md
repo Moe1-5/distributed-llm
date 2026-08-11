@@ -5,12 +5,13 @@
 ```text
 operator starts backend/bootstrap.py with persistent bootstrap.id
   -> bootstrap listens on configured TCP port
+  -> relay support and the direct-reachability checker start
   -> loopback and public multiaddresses are printed
   -> public address is placed in DISTRIBLLM_INITIAL_PEERS
-  -> serving nodes and generators use it for discovery
+  -> serving nodes and generators use it for discovery and relay fallback
 ```
 
-The bootstrap is infrastructure, not a model-serving node or normal client tab. Preserve `bootstrap.id`; replacing it changes the peer ID. Processes on the VPS may use its loopback address, while laptops, Colab, and other machines must use the public address.
+The bootstrap is infrastructure, not a model-serving node or normal client tab. Preserve `bootstrap.id`; replacing it changes the peer ID. Processes on the VPS may use its loopback address, while laptops, Colab, and other machines must use the public address. The same first VPS process may provide both bootstrap discovery and circuit forwarding, although those are separate responsibilities.
 
 ## 2. Public Model Serving
 
@@ -19,10 +20,11 @@ Network -> Serve Layers
   -> select an open model, layer range, and device
   -> POST /node/start
   -> backend explicitly disables Hugging Face credentials
-  -> Node starts DHT
+  -> Node tests direct reachability with relay disabled
+  -> Node starts direct, or reserves an outbound circuit-relay path
   -> Transformers downloads/loads the model anonymously
   -> selected layers are retained on CPU or CUDA
-  -> RPC server starts and metadata is announced
+  -> RPC server starts and model/transport metadata is announced
 ```
 
 Public loading uses `token=False`, so expired OAuth or Hugging Face CLI credentials cannot turn a public request into a 401 failure.
@@ -75,7 +77,7 @@ This allows offline startup after a successful download/import. OAuth expiry aff
 
 ```text
 start
-  -> DHT -> layer load -> RPC -> announce
+  -> direct probe -> direct DHT or relay reservation -> layer load -> RPC -> announce
 
 turn off
   -> stop announcing/RPC/DHT serving handles
@@ -136,6 +138,8 @@ clone testing branch on remote machine
 ```
 
 Every worker currently downloads/builds the complete model before retaining its range. Colab therefore needs both GPU availability and sufficient system RAM. Joining the DHT does not guarantee inbound RPC reachability through Colab NAT.
+
+In automatic network mode, a NAT-separated worker keeps an outbound reservation to a trusted public relay and advertises a circuit route. A generator dials the relay, which forwards the encrypted libp2p stream to the worker. Directly reachable workers avoid the extra hop.
 
 ## 10. Monitoring and Cleanup
 

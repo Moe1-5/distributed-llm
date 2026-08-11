@@ -43,4 +43,5 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 11 has started with TinyLlama chat as an open smoke-test option, Llama 2 base/chat gated options for the accepted model family, and explicit base/chat/instruct metadata in the model registry.
 - Sprint 12 closed on 2026-07-14: public auth isolation, failed-start cleanup, cache deletion, local expert routing, reachable-route probing, and safetensors/bin-index import validation are implemented and pushed.
 - Sprint 14 started on 2026-07-14 with timestamped machine/backend-process resource metrics and Monitoring visibility; generation timing and output-path fixes remain next.
+- Sprint 14 added Petals-style direct reachability, fixed-port/announce configuration, automatic circuit-relay fallback, relay-aware generators/bootstrap, and transport visibility on 2026-07-23. Automated checks pass; deployment to the VPS and live direct/relayed two-device inference remain open.
 - Canonical docs were refreshed on 2026-07-13 for OAuth/local imports, model registry, public bootstrap/remote workers, current lifecycle/routing, and live validation gaps.

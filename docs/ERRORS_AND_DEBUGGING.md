@@ -194,7 +194,17 @@ Possible causes:
 - tensor shape/dtype or architecture mismatch
 - Colab joined discovery outbound but cannot accept inbound RPC
 
-Inspect node logs, route trace, `backend/client/sequential.py`, `backend/node/handler.py`, and worker-visible multiaddresses. VPS workers may need fixed-port/relay support beyond the bootstrap port.
+Inspect node logs, route trace, `backend/client/sequential.py`, `backend/node/handler.py`, and worker-visible multiaddresses.
+
+If the peer advertises only `/ip4/172.x.x.x/...`, another Windows device cannot normally reach that WSL-private address. Choose one path:
+
+- Direct LAN: set a fixed `DISTRIBLLM_P2P_PORT`, announce the Windows LAN address, enable WSL mirrored networking or a Windows `portproxy`, and allow that TCP port through the Windows/Hyper-V firewall.
+- Direct Internet: additionally forward the router's public port, unless NAT mapping succeeds.
+- Production default: use `DISTRIBLLM_NETWORK_MODE=auto` with a reachable trusted relay and no manual announce address.
+
+For direct LAN diagnosis, run `Test-NetConnection <windows-lan-ip> -Port <p2p-port>` from the other Windows device. If it fails, fix the Windows/WSL path before testing inference.
+
+If startup reports that relay mode did not obtain a circuit address, verify the updated bootstrap is running with relay enabled, its address is reachable, the trusted relay peer ID matches, and the timeout is long enough. A `/p2p-circuit/` address must appear before relay transport is considered verified.
 
 ## Poor or Repetitive Output
 
@@ -221,5 +231,5 @@ Trace JSON defaults to `backend/traces/`; override with `DISTRIBLLM_TRACE_DIR`. 
 6. Host has enough CPU RAM for full-model construction.
 7. `/nodes` shows fresh compatible nodes and RPC UIDs.
 8. `/generator/status` reports complete contiguous coverage.
-9. Worker RPC addresses are reachable across firewall/NAT.
+9. Worker transport reports direct or relay, and every selected expert passes its RPC probe.
 10. Use parity/trace tools before diagnosing output quality.

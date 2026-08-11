@@ -157,6 +157,19 @@ function NodeCard({
             RPC ACTIVE
           </span>
         )}
+        {node.connection_mode && (
+          <span
+            className={`rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase ${
+              node.connection_mode === 'relay'
+                ? 'border-amber/30 bg-amber/10 text-amber'
+                : node.connection_mode === 'direct'
+                  ? 'border-green/20 bg-green/5 text-green'
+                  : 'border-border text-text-dim'
+            }`}
+          >
+            {node.connection_mode}
+          </span>
+        )}
       </div>
 
       {isLocal && (

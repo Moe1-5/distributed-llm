@@ -22,6 +22,7 @@
 | Runtime flows                             | `docs/FLOWS.md`                           |
 | Implementation roadmap                    | `docs/IMPLEMENTATION.md`                  |
 | Petals comparison                         | `docs/PETALS_COMPARISON.md`               |
+| Network reachability and relay review      | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` |
 | Errors and debugging                      | `docs/ERRORS_AND_DEBUGGING.md`            |
 | Validation plan                           | `docs/VALIDATION_AND_TEST_PLAN.md`        |
 | Architectural decision history            | `docs/decisions.md`                       |
@@ -91,6 +92,7 @@
 | `docs/FLOWS.md`                    | Runtime flows.                                            |
 | `docs/IMPLEMENTATION.md`           | Practical implementation roadmap and long-term phases.    |
 | `docs/PETALS_COMPARISON.md`        | Comparison with Petals and project-owned public swarm direction. |
+| `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Review proposal for Petals-style direct reachability, automatic relay fallback, VPS infrastructure, security, and production validation. |
 | `docs/ERRORS_AND_DEBUGGING.md`     | Known errors, symptoms, and debugging guidance.           |
 | `docs/VALIDATION_AND_TEST_PLAN.md` | Validation phase gates before trusting inference or adding advanced features. |
 | `docs/architecture.md`             | Starter-system architecture summary adapted to this repo. |
@@ -106,11 +108,12 @@
 | `backend/colab_worker.py` | Headless remote worker entry point with browser OAuth support for Colab and GPU hosts. |
 | `backend/api/`           | FastAPI app, root `.env` loading, settings/token endpoints, Hugging Face OAuth/download helpers, and local model import registry. |
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
-| `backend/node/`          | Serving node, layer loading, Hivemind RPC, and GPU monitoring.                       |
+| `backend/node/`          | Serving node, layer loading, direct/relay transport, Hivemind RPC, and GPU monitoring. |
+| `backend/node/reachability.py` | Petals-derived independent direct-reachability probe used before relay fallback. |
 | `backend/models/`        | Model-specific adapter placeholders and architecture-specific preprocessing helpers. |
 | `backend/traces/`        | Gitignored runtime JSON generation traces written by `/generator/trace`.             |
-| `backend/bootstrap.py`   | Hivemind DHT bootstrap node.                                                         |
-| `backend/constants.py`   | Supported models, DHT constants, and generation defaults.                            |
+| `backend/bootstrap.py`   | Hivemind DHT bootstrap, circuit relay, and reachability-check node.                  |
+| `backend/constants.py`   | Supported models, DHT constants, transport settings, and generation defaults.        |
 | `backend/pyproject.toml` | Python project metadata and dependencies.                                            |
 | `backend/uv.lock`        | Python dependency lockfile.                                                          |
 | `backend/tests/test_gpu_monitor.py` | Focused runtime resource-monitor metric and failure-path tests.                       |

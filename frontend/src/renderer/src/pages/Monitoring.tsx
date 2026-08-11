@@ -461,6 +461,24 @@ export default function Monitoring(): React.JSX.Element {
                     <span className="rounded border border-border px-2 py-0.5 font-mono text-[10px] text-text-dim uppercase">
                       {node.device}
                     </span>
+                    {node.connection_mode && (
+                      <span
+                        className={`rounded border px-2 py-0.5 font-mono text-[10px] uppercase ${
+                          node.connection_mode === 'relay'
+                            ? 'border-amber/30 bg-amber/10 text-amber'
+                            : node.connection_mode === 'direct'
+                              ? 'border-green/20 bg-green/5 text-green'
+                              : 'border-border text-text-dim'
+                        }`}
+                      >
+                        {node.connection_mode}
+                      </span>
+                    )}
+                    {node.transport_verified === false && (
+                      <span className="rounded border border-red/20 bg-red/5 px-2 py-0.5 font-mono text-[10px] text-red">
+                        TRANSPORT UNVERIFIED
+                      </span>
+                    )}
                   </div>
                 </div>
               ))}

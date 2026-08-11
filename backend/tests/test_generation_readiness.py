@@ -32,7 +32,13 @@ from api.local_models import (
 )
 from api import hf_oauth
 from api import settings as hf_settings
-from constants import DEFAULT_DISTRIBLLM_INITIAL_PEERS, SUPPORTED_MODELS, get_initial_peers
+from constants import (
+    DEFAULT_DISTRIBLLM_INITIAL_PEERS,
+    P2PNetworkConfig,
+    SUPPORTED_MODELS,
+    get_initial_peers,
+    get_p2p_network_config,
+)
 
 
 class InitialPeersTests(unittest.TestCase):
@@ -46,6 +52,63 @@ class InitialPeersTests(unittest.TestCase):
     def test_empty_environment_value_uses_default_peers(self):
         with patch.dict(os.environ, {"DISTRIBLLM_INITIAL_PEERS": ""}):
             self.assertEqual(get_initial_peers(), DEFAULT_DISTRIBLLM_INITIAL_PEERS)
+
+    def test_reads_direct_p2p_configuration_from_environment(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DISTRIBLLM_NETWORK_MODE": "direct",
+                "DISTRIBLLM_P2P_PORT": "7100",
+                "DISTRIBLLM_ANNOUNCE_MADDRS": (
+                    "/ip4/192.168.1.25/tcp/7100"
+                ),
+                "DISTRIBLLM_TRUSTED_RELAYS": (
+                    "/ip4/203.0.113.10/tcp/7001/p2p/relay"
+                ),
+                "DISTRIBLLM_AUTO_NAT": "false",
+                "DISTRIBLLM_NAT_PORT_MAP": "no",
+                "DISTRIBLLM_AUTO_RELAY": "yes",
+                "DISTRIBLLM_RELAY_WAIT_TIMEOUT": "90",
+            },
+            clear=True,
+        ):
+            config = get_p2p_network_config()
+
+        self.assertEqual(config.mode, "direct")
+        self.assertEqual(config.port, 7100)
+        self.assertEqual(
+            config.host_maddrs,
+            ["/ip4/0.0.0.0/tcp/7100"],
+        )
+        self.assertEqual(
+            config.announce_maddrs,
+            ("/ip4/192.168.1.25/tcp/7100",),
+        )
+        self.assertEqual(
+            config.trusted_relays,
+            ("/ip4/203.0.113.10/tcp/7001/p2p/relay",),
+        )
+        self.assertFalse(config.auto_nat)
+        self.assertFalse(config.nat_port_map)
+        self.assertTrue(config.use_auto_relay)
+        self.assertEqual(config.relay_wait_timeout, 90)
+
+    def test_rejects_announce_address_with_random_listening_port(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DISTRIBLLM_P2P_PORT": "0",
+                "DISTRIBLLM_ANNOUNCE_MADDRS": (
+                    "/ip4/192.168.1.25/tcp/7100"
+                ),
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "fixed non-zero port",
+            ):
+                get_p2p_network_config()
 
 
 class DummyDHT:
@@ -1328,6 +1391,8 @@ class RemoteSequentialRouteTests(unittest.TestCase):
     def test_node_start_reuses_loaded_handler_when_resuming(self) -> None:
         import node.node as node_module
 
+        dht_kwargs: dict[str, object] = {}
+
         class FakeHandler:
             def __init__(self) -> None:
                 self.load_calls = 0
@@ -1346,6 +1411,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
             def __init__(self, *args, **kwargs) -> None:
                 self.values: dict[str, object] = {}
+                dht_kwargs.update(kwargs)
 
             def store(self, key: str, value: object, expiration_time: float) -> None:
                 self.values[key] = value
@@ -1395,6 +1461,119 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertIs(node.handler, fake_handler)
         self.assertEqual(fake_handler.load_calls, 0)
         self.assertTrue(node.is_running())
+        self.assertEqual(
+            dht_kwargs["host_maddrs"],
+            ["/ip4/0.0.0.0/tcp/0"],
+        )
+        self.assertTrue(dht_kwargs["use_relay"])
+        self.assertFalse(dht_kwargs["use_auto_relay"])
+        self.assertFalse(dht_kwargs["client_mode"])
+
+    def test_node_auto_mode_falls_back_to_relay_and_announces_transport(self) -> None:
+        import node.node as node_module
+
+        relay_address = (
+            "/ip4/203.0.113.10/tcp/7001/p2p/relay/"
+            "p2p-circuit/p2p/worker"
+        )
+        dht_kwargs: dict[str, object] = {}
+
+        class FakeHandler:
+            def load(self) -> None:
+                return None
+
+            def is_loaded(self) -> bool:
+                return True
+
+            def get_accounting_snapshot(self) -> dict:
+                return {}
+
+        class FakeDHT:
+            peer_id = "worker"
+
+            def __init__(self, *args, **kwargs) -> None:
+                dht_kwargs.update(kwargs)
+                self.values: dict[str, object] = {}
+
+            def store(self, key: str, value: object, expiration_time: float) -> None:
+                self.values[key] = value
+
+            def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
+                value = self.values.get(key)
+                return DummyDHTResult(value) if value is not None else None
+
+            def get_visible_maddrs(self) -> list[str]:
+                return [relay_address]
+
+        class FakeRPC:
+            def __init__(self, handler, dht, dht_prefix, uid_suffix=None) -> None:
+                self.running = False
+
+            def start(self) -> None:
+                self.running = True
+
+            def is_running(self) -> bool:
+                return self.running
+
+            def get_uid(self) -> str:
+                return "test-prefix.0.1"
+
+        config = P2PNetworkConfig(
+            mode="auto",
+            port=7100,
+            announce_maddrs=(),
+            trusted_relays=(
+                "/ip4/203.0.113.10/tcp/7001/p2p/relay",
+            ),
+            auto_nat=True,
+            nat_port_map=True,
+            use_auto_relay=True,
+            relay_wait_timeout=0,
+        )
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            initial_peers=[
+                "/ip4/203.0.113.10/tcp/7001/p2p/relay"
+            ],
+            device="cpu",
+            p2p_config=config,
+        )
+        node.handler = FakeHandler()
+        node._ensure_announce_thread = lambda: None
+
+        original_dht = node_module.hivemind.DHT
+        original_rpc = node_module.RPCServer
+        original_probe = node_module.check_direct_reachability
+        node_module.hivemind.DHT = FakeDHT
+        node_module.RPCServer = FakeRPC
+        node_module.check_direct_reachability = lambda **kwargs: False
+        try:
+            node.start()
+        finally:
+            node_module.hivemind.DHT = original_dht
+            node_module.RPCServer = original_rpc
+            node_module.check_direct_reachability = original_probe
+
+        self.assertEqual(node.connection_mode, "relay")
+        self.assertFalse(node.direct_reachability)
+        self.assertTrue(node.transport_verified)
+        self.assertEqual(node.get_visible_maddrs(), [relay_address])
+        self.assertEqual(
+            dht_kwargs["host_maddrs"],
+            ["/ip4/0.0.0.0/tcp/7100"],
+        )
+        self.assertTrue(dht_kwargs["use_auto_relay"])
+        self.assertTrue(dht_kwargs["client_mode"])
+        self.assertEqual(
+            dht_kwargs["trusted_relays"],
+            ["/ip4/203.0.113.10/tcp/7001/p2p/relay"],
+        )
+        announced = node.dht.values["test-prefix.node_info.worker"]
+        self.assertEqual(announced["connection_mode"], "relay")
+        self.assertTrue(announced["transport_verified"])
 
     def test_get_visible_maddrs_falls_back_when_dht_handle_is_closed(self) -> None:
         class ClosedDHT:

@@ -42,7 +42,7 @@ One backend can serve multiple non-overlapping slices, but all local slices must
 
 ## Bootstrap Configuration
 
-`backend/bootstrap.py` binds a stable identity and prints loopback/public multiaddresses. Remote clients must use the public address. Runtime peers come from the comma- or newline-separated `DISTRIBLLM_INITIAL_PEERS` environment value, with development defaults in `backend/constants.py`.
+`backend/bootstrap.py` binds a stable identity, enables Hivemind/libp2p circuit-relay support, hosts the independent direct-reachability check protocol, and prints loopback/public multiaddresses. Remote clients must use the public address. Runtime peers come from the comma- or newline-separated `DISTRIBLLM_INITIAL_PEERS` environment value, with development defaults in `backend/constants.py`.
 
 The stable `bootstrap.id` is a private identity file. It must not be committed or shared. A VPS bootstrap should run under a persistent process manager and expose its TCP port through both host and provider firewalls.
 
@@ -65,12 +65,15 @@ OAuth credentials are stored outside the repository by default under the user co
 
 `Node.start()` performs:
 
-1. Connect to the bootstrap/DHT.
-2. Load the selected model and retain the requested layer range.
-3. Start a Hivemind RPC expert.
-4. Announce validated metadata and periodically refresh it.
+1. Probe direct reachability with relay disabled when network mode is `auto`.
+2. Start a direct DHT peer or reserve an outbound circuit-relay path.
+3. Load the selected model and retain the requested layer range.
+4. Start a Hivemind RPC expert.
+5. Announce validated model and transport metadata and periodically refresh it.
 
 Nodes support pause, resume, and delete/unload as distinct operations. Failed startup calls cleanup so partial DHT, RPC, handler, and CUDA state are released.
+
+`DISTRIBLLM_NETWORK_MODE`, `DISTRIBLLM_P2P_PORT`, `DISTRIBLLM_ANNOUNCE_MADDRS`, and the relay settings control transport. Direct Windows/WSL operation requires a fixed port, a Windows LAN/public announce address, and mirrored networking or Windows port forwarding. Auto mode falls back to an outbound relay reservation and does not require the ordinary participant to expose a public router port.
 
 Current layer-loading limitation: Transformers constructs the complete model in CPU memory before DistribLLM retains the assigned layers. Layer slicing reduces final device memory, but not peak download/CPU-loading memory.
 
@@ -78,7 +81,7 @@ Current layer-loading limitation: Transformers constructs the complete model in 
 
 `RemoteSequential` validates DHT metadata, filters by model, builds a contiguous non-overlapping route, rejects gaps/incompatible ranges, and calls selected RPC experts in layer order.
 
-When serving and generating on the same machine, generator startup directly seeds matching local node multiaddresses alongside configured bootstrap peers. Readiness resolves every selected expert and probes RPC metadata so DHT coverage alone cannot produce a false-ready state.
+When serving and generating on the same machine, generator startup directly seeds matching local node multiaddresses alongside configured bootstrap peers. Generator peers enable relay dialing. Readiness resolves every selected expert and probes RPC metadata so DHT coverage or a claimed relay address alone cannot produce a false-ready state.
 
 `DistributedGenerator` loads local model components and performs autoregressive generation through that route. It supports exact generation controls, stop requests, route readiness, next-token parity probes, generated-output comparisons, and JSON trace artifacts.
 
@@ -96,11 +99,11 @@ There is no distributed KV cache, stable session routing, failover, or concurren
 
 ## Current Validation State
 
-- Backend regression suite: 96 tests plus 19 subtests passing as of 2026-07-13.
-- Frontend TypeScript typecheck and Python compilation pass.
+- Backend regression suite: 107 tests passing as of 2026-07-23.
+- Frontend TypeScript typecheck and Python compilation pass with the direct/relay transport changes.
 - Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
 - Hugging Face device OAuth and real gated Llama 2 download have been exercised.
-- TinyLlama live retry remains pending after Sprint 12 isolated public loading from expired OAuth state.
+- The updated VPS relay reservation, direct two-device route, and relayed two-device expert RPC remain to be validated live.
 - A complete laptop plus VPS/Colab Llama 2 route and generated response remain unproven.
 
 ## Known Operational Limits

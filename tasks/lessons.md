@@ -41,6 +41,11 @@
 
 <!-- Add new lessons here -->
 
+### [2026-07-22] Explain unfamiliar network mechanisms as concrete traffic flows
+**Problem:** I recommended a public circuit relay without first explaining what the relay is, which machine opens each connection, whether participant ports must be opened, or how inference RPC traffic moves through it.
+**Rule:** When proposing unfamiliar transport infrastructure, document the direct and fallback packet flows, operator requirements, security boundary, bandwidth tradeoff, and an explicit yes-or-no answer to the user's deployment question.
+**Why:** Correct architecture terminology is not enough for review; the user must be able to understand and operate the proposed system without already knowing libp2p networking.
+
 ### [2026-07-14] Keep polled UI contracts compatible during backend restarts
 **Problem:** I made Monitoring call `toFixed()` on a newly added runtime-metric field, so an Electron renderer connected to an older already-running backend could throw and show a black screen.
 **Rule:** New fields in polled backend responses must be treated as optional at runtime until both processes are restarted, with unavailable or legacy payloads rendered safely instead of dereferenced directly.

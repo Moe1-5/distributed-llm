@@ -18,6 +18,7 @@ use_ipfs=False:
 """
 
 import os
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # Bootstrap peers
@@ -43,6 +44,119 @@ def get_initial_peers() -> list[str]:
 
 
 DISTRIBLLM_INITIAL_PEERS: list[str] = get_initial_peers()
+
+
+def _get_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{name} must be true/false, yes/no, on/off, or 1/0; got {raw_value!r}"
+    )
+
+
+def _get_multiaddrs_env(name: str) -> tuple[str, ...]:
+    raw_value = os.environ.get(name, "")
+    values = tuple(
+        value.strip()
+        for value in raw_value.replace("\n", ",").split(",")
+        if value.strip()
+    )
+    invalid = [value for value in values if not value.startswith("/") or any(char.isspace() for char in value)]
+    if invalid:
+        raise ValueError(
+            f"{name} contains invalid multiaddrs: {', '.join(invalid)}"
+        )
+    return values
+
+
+@dataclass(frozen=True)
+class P2PNetworkConfig:
+    """Validated process-wide Hivemind transport configuration."""
+
+    mode: str
+    port: int
+    announce_maddrs: tuple[str, ...]
+    trusted_relays: tuple[str, ...]
+    auto_nat: bool
+    nat_port_map: bool
+    use_auto_relay: bool
+    relay_wait_timeout: float
+
+    @property
+    def host_maddrs(self) -> list[str]:
+        return [f"/ip4/0.0.0.0/tcp/{self.port}"]
+
+
+def get_p2p_network_config() -> P2PNetworkConfig:
+    """
+    Load direct/relay settings from the environment.
+
+    mode=auto probes direct reachability and falls back to a relay.
+    mode=direct skips relay selection for intentional LAN/public operation.
+    mode=relay forces outbound relay reservation for NAT-separated workers.
+    """
+
+    mode = os.environ.get("DISTRIBLLM_NETWORK_MODE", "auto").strip().lower()
+    if mode not in {"auto", "direct", "relay"}:
+        raise ValueError(
+            "DISTRIBLLM_NETWORK_MODE must be auto, direct, or relay; "
+            f"got {mode!r}"
+        )
+
+    raw_port = os.environ.get("DISTRIBLLM_P2P_PORT", "0").strip() or "0"
+    try:
+        port = int(raw_port)
+    except ValueError as e:
+        raise ValueError(
+            f"DISTRIBLLM_P2P_PORT must be an integer; got {raw_port!r}"
+        ) from e
+    if not 0 <= port <= 65535:
+        raise ValueError(
+            f"DISTRIBLLM_P2P_PORT must be between 0 and 65535; got {port}"
+        )
+
+    raw_timeout = (
+        os.environ.get("DISTRIBLLM_RELAY_WAIT_TIMEOUT", "60").strip() or "60"
+    )
+    try:
+        relay_wait_timeout = float(raw_timeout)
+    except ValueError as e:
+        raise ValueError(
+            "DISTRIBLLM_RELAY_WAIT_TIMEOUT must be a number; "
+            f"got {raw_timeout!r}"
+        ) from e
+    if relay_wait_timeout < 0:
+        raise ValueError(
+            "DISTRIBLLM_RELAY_WAIT_TIMEOUT must be zero or greater"
+        )
+
+    announce_maddrs = _get_multiaddrs_env("DISTRIBLLM_ANNOUNCE_MADDRS")
+    if announce_maddrs and port == 0:
+        raise ValueError(
+            "DISTRIBLLM_P2P_PORT must be a fixed non-zero port when "
+            "DISTRIBLLM_ANNOUNCE_MADDRS is configured"
+        )
+    if any("/tcp/0" in address or "/udp/0" in address for address in announce_maddrs):
+        raise ValueError(
+            "DISTRIBLLM_ANNOUNCE_MADDRS cannot advertise port zero"
+        )
+
+    return P2PNetworkConfig(
+        mode=mode,
+        port=port,
+        announce_maddrs=announce_maddrs,
+        trusted_relays=_get_multiaddrs_env("DISTRIBLLM_TRUSTED_RELAYS"),
+        auto_nat=_get_bool_env("DISTRIBLLM_AUTO_NAT", True),
+        nat_port_map=_get_bool_env("DISTRIBLLM_NAT_PORT_MAP", True),
+        use_auto_relay=_get_bool_env("DISTRIBLLM_AUTO_RELAY", True),
+        relay_wait_timeout=relay_wait_timeout,
+    )
 
 # ---------------------------------------------------------------------------
 # Supported models

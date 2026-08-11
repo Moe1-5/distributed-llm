@@ -74,3 +74,13 @@
 **Alternatives:** Download every framework format or delete only the exact registered snapshot. Both waste disk or leave recovery gaps.
 
 **Consequences:** Managed downloads use less disk, deletion reports registry and cache outcomes separately, and arbitrary manual folders remain protected from recursive deletion.
+
+### [2026-07-23] Prefer verified direct transport with circuit-relay fallback
+
+**Context:** Two WSL devices discovered a complete layer route through the public bootstrap but advertised unrelated private `172.x` addresses, so the generator could not dial the remote expert.
+
+**Decision:** Follow the Petals transport pattern. Probe direct reachability with relay disabled, use a fixed port and reachable announce address when direct operation is selected, and otherwise reserve an outbound connection through a trusted project-owned Hivemind/libp2p circuit relay. Keep route readiness dependent on a real expert RPC probe and expose direct-versus-relay state.
+
+**Alternatives:** Require public router forwarding on every participant, require all users to join a private overlay network, or send every connection through a central relay. These add unacceptable setup, administrative coupling, or avoidable latency and bandwidth cost.
+
+**Consequences:** Most Windows/WSL participants can operate without opening a public router port, while reachable operators retain the faster direct path. The VPS relay forwards activation traffic and therefore needs capacity limits, monitoring, redundancy, and live Hivemind compatibility validation.

@@ -21,6 +21,9 @@ export interface NodeInfo {
   maddrs: string[]
   layers_loaded: boolean
   rpc_running: boolean
+  connection_mode?: 'checking' | 'direct' | 'relay'
+  direct_reachability?: boolean | null
+  transport_verified?: boolean
 }
 
 export interface ModelInfo {

@@ -621,3 +621,41 @@ All three responses were semantically correct and traversed the complete remote 
 **Fix direction:** preserve generated token identifiers and derive each stream delta from context-aware decoding, or use the tokenizer's supported streaming decoder. Add a regression test proving that streamed fragments concatenate to the same visible text as decoding the full generated sequence once.
 
 **Status:** confirmed output-formatting defect. It was recorded but not fixed during the smoke-test pass.
+
+## 14. Two-device routes are discovered but remote WSL experts are not dialable
+
+**Observed during two-device OPT-125M testing on 2026-07-14:**
+
+- Two separate Windows/WSL devices successfully joined the same DistribLLM DHT through the public VPS bootstrap.
+- One device served `facebook/opt-125m` layers `0-6`; the other served layers `6-12`.
+- `/nodes` discovered both peers and reported complete compatible metadata coverage.
+- Generator components loaded, but reachable-route validation failed before inference:
+
+```text
+Route RPC probe failed: 12D3KooW: routing: not found
+```
+
+**Advertised addresses:**
+
+```text
+Device A: /ip4/172.24.38.184/tcp/37879/p2p/12D3KooW...
+Device B: /ip4/172.27.32.227/tcp/39791/p2p/12D3KooW...
+```
+
+Both peers also advertised loopback addresses. The `172.x` addresses belong to separate WSL-private networks, and the randomly selected P2P ports are not stable or normally reachable from the other physical device.
+
+**Why bootstrap success is insufficient:**
+
+At the time of the failed test, the VPS bootstrap provided peer discovery and DHT metadata exchange but was not configured as a Hivemind relay and did not forward expert RPC traffic. After discovering a route, the generator still needed a dialable address for every serving peer.
+
+**Required implementation direction:**
+
+- Add a configurable fixed serving P2P port instead of binding every node to `tcp/0`.
+- Add an explicit reachable announce address for LAN, public, or overlay-network operation.
+- Document and validate Windows-to-WSL port forwarding and firewall requirements for LAN testing.
+- Alternatively, configure an overlay network or a trusted Hivemind relay for NAT-separated peers.
+- Keep route readiness false until every selected expert answers the RPC metadata probe.
+- Show only locally managed nodes on the Nodes page; keep all DHT-discovered peers on Monitoring.
+- Display enough of each peer ID to distinguish peers that share the common `12D3KooW` prefix.
+
+**Status:** implementation complete locally; live multi-device verification pending. On 2026-07-23, typed fixed-port/announce/relay settings, a Petals-derived direct-reachability probe, automatic relay fallback, relay-capable bootstrap behavior, generator relay dialing, transport metadata, UI mode visibility, and regression tests were added. The issue remains open until the updated VPS accepts a circuit reservation and two separate devices complete an expert RPC and inference route through direct and relay paths.
