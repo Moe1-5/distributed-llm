@@ -1219,11 +1219,34 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual([node["layer_start"] for node in plan], [0, 4])
         self.assertEqual([node["layer_end"] for node in plan], [4, 8])
 
-    def test_plan_route_rejects_overlapping_spans(self) -> None:
+    def test_plan_route_rejects_overlapping_spans_without_complete_subset(self) -> None:
         sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
 
-        with self.assertRaisesRegex(ValueError, "not contiguous"):
+        with self.assertRaisesRegex(ValueError, "No contiguous route"):
             sequential._plan_route([self.make_node(0, 5), self.make_node(4, 8)])
+
+    def test_plan_route_ignores_partial_span_when_full_provider_exists(self) -> None:
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=12)
+
+        plan = sequential._plan_route([self.make_node(0, 6, "partial"), self.make_node(0, 12, "full")])
+
+        self.assertEqual([(node["layer_start"], node["layer_end"]) for node in plan], [(0, 12)])
+        self.assertEqual(plan[0]["peer_id"], "full")
+
+    def test_plan_route_uses_shorter_first_span_when_longer_span_dead_ends(self) -> None:
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=12)
+        nodes = [
+            self.make_node(0, 8, "dead-end"),
+            self.make_node(0, 6, "first"),
+            self.make_node(6, 12, "second"),
+        ]
+
+        plan = sequential._plan_route(nodes)
+
+        self.assertEqual(
+            [(node["layer_start"], node["layer_end"]) for node in plan],
+            [(0, 6), (6, 12)],
+        )
 
     def test_plan_route_load_balances_duplicate_layer_replicas(self) -> None:
         sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
@@ -3679,7 +3702,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertIsNone(client_after_shutdown)
         self.assertIs(api_server.client_dht, original_client_dht)
 
-    def test_incentive_accounting_endpoint_is_simulated_only(self) -> None:
+    def test_incentive_accounting_endpoint_is_off_by_default_and_read_only(self) -> None:
         from api import server as api_server
 
         class DummyNode:
@@ -3699,9 +3722,11 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         finally:
             api_server.node = original_node
 
-        self.assertEqual(result["mode"], "simulated")
-        self.assertFalse(result["token_ui_enabled"])
+        self.assertEqual(result["mode"], "off")
+        self.assertTrue(result["token_ui_enabled"])
         self.assertFalse(result["reward_settlement_enabled"])
+        self.assertIn("public_key", result["identity"])
+        self.assertEqual(result["account"]["verified_credits"], 0)
         self.assertEqual(result["local_contribution"]["model_name"], "facebook/opt-125m")
         self.assertIn("token_positions_served", result["fields"])
 

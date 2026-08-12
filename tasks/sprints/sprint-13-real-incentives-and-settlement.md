@@ -1,7 +1,7 @@
 # Sprint 13 - Real Incentives and Settlement
 
-**Goal:** Turn simulated contribution accounting into real incentive/reward behavior only after inference correctness, route health, anti-abuse checks, proof/receipt prerequisites, and gated-model local import reliability are ready.
-**Start:** TBD
+**Goal:** Turn simulated contribution counters into signed proof-of-useful-work receipts and a project-owned read-only credit ledger, with credit mode gated by live validation.
+**Start:** 2026-08-12
 **End:** TBD
 
 ---
@@ -16,46 +16,53 @@ Sprints 10 and 11 completed the gated-model local import flow and instruction-re
 
 ---
 
-## Prerequisites
+## Prerequisites and Gates
 
 - [ ] Direct HuggingFace versus distributed parity is validated for the target demo/transport model.
-- [ ] Local multi-node split inference is proven with complete compatible layer coverage.
+- [x] Local multi-node split inference is proven with complete compatible layer coverage.
 - [ ] Real multi-machine inference is proven across separate devices.
-- [ ] Gated-model local import is reliable enough that model access does not depend on pasted tokens.
-- [ ] Route health checks exist for selected nodes before inference starts.
-- [ ] Serving nodes produce signed request/response receipts or another verifiable proof-of-service record.
-- [ ] Accounting records include model, layer range, device/hardware class, peer identity, request success/failure, latency, token positions served, and route/session identifier.
-- [ ] Anti-abuse rules exist for fake work, repeated failed requests, stale DHT metadata, duplicate identities, and self-dealing routes.
-- [ ] Reward formulas are reviewed against model size, layer count, hardware cost, reliability, latency, and successful completed work.
+- [x] Gated-model local import is reliable enough that model access does not depend on pasted tokens.
+- [x] Route selection identifies the exact complete subset of serving nodes before inference.
+- [x] Serving nodes can produce worker-signed receipts and generator-signed acceptance.
+- [x] Receipts include model revision, layer range, peer and app identities, position count, commitments, route, session, request, nonce, and timestamps.
+- [x] Replay, tampering, invalid route membership, unsupported model revisions, and self-dealing are rejected.
+- [x] Reward weighting excludes spoofable hardware and latency claims and pays only accepted position-layer work.
 
 ## In Progress
 
-- [ ] Not started.
+- [ ] Run the receipt-capable RPC in shadow mode across two independent devices.
+- [ ] Review live accepted/rejected receipt evidence before enabling credit mode.
 
 ## Todo
 
-- [ ] Design signed contribution receipts for served layer requests.
-- [ ] Add route/session IDs that connect generator requests to serving-node accounting records.
-- [ ] Define reward weighting by model, layer range, hardware/device class, latency, reliability, and success/failure.
-- [ ] Define slashing or non-payment rules for failed, stale, malformed, or unverifiable work.
-- [ ] Decide whether rewards settle on-chain, off-chain, or through a simulated ledger first.
-- [ ] Add backend tests for receipt validation, accounting aggregation, and abuse cases.
-- [ ] Add a read-only rewards/accounting UI only after backend semantics are validated.
-- [ ] Add claim/payout UI only after settlement mechanics are proven.
+- [ ] Deploy the FastAPI settlement service behind VPS TLS and rate limiting.
+- [ ] Exercise off, shadow, and credit configuration in the deployment topology.
+- [ ] Add durable client-side retry storage if shadow testing shows receipt loss during outages.
+- [ ] Keep transfers, claims, withdrawals, and model-access gating out of this sprint.
 
 ## Done
 
-- [ ] None yet.
+- [x] Added persistent Ed25519 app identities separate from p2p identities.
+- [x] Added BLAKE3 tensor and route commitments with canonical signed JSON.
+- [x] Added an optional receipt-capable expert while preserving the original RPC.
+- [x] Added asynchronous paired-receipt submission and local outcome tracking.
+- [x] Added a VPS-deployable FastAPI settlement app with SQLite WAL storage.
+- [x] Added append-only receipt and credit records with policy-versioned integer rewards.
+- [x] Added account, entries, receipt submission, and policy APIs.
+- [x] Added an Incentives page for identity, mode, connection, credits, receipts, and useful work.
+- [x] Added cryptographic, abuse, durability, concurrency, and pagination tests.
 
 ---
 
 ## Acceptance Criteria
 
-- [ ] The system can verify that a serving node actually contributed to a completed route.
-- [ ] Reward accounting is model-aware, layer-aware, hardware-aware, reliability-aware, and latency-aware.
-- [ ] Failed or unverifiable work cannot earn rewards.
-- [ ] Token/reward UI is not exposed before backend accounting and proof validation pass tests.
-- [ ] Real settlement is behind an explicit feature gate.
+- [x] The system verifies a worker receipt against a generator-accepted completed route.
+- [x] Reward accounting is model-revision-aware, layer-aware, position-aware, and policy-versioned.
+- [x] Failed, standby, duplicate, self-dealing, stale, malformed, or unverifiable work cannot earn credits.
+- [x] The UI is read-only and exposes no claim, transfer, withdrawal, or model-access control.
+- [x] Settlement is gated by off, shadow, and credit modes and defaults to off on clients.
+- [ ] Shadow mode is verified through real receipt-capable RPC on two devices.
+- [ ] Credit mode is explicitly approved after live evidence review.
 
 ---
 
@@ -78,3 +85,15 @@ Sprints 10 and 11 completed the gated-model local import flow and instruction-re
 - What changed: renumbered the real incentives and settlement plan from Sprint 11 to Sprint 13.
 - Why: the next future sprint slot is needed for model expansion before incentives, so rewards stay behind model access and model-quality work.
 - Status: planned for a later sprint; not started.
+
+### 2026-08-12 - Implement proof-of-useful-work receipts and settlement ledger
+
+- What changed: added app identities, signed request/worker/acceptance receipts, an optional receipt RPC, asynchronous submission, the VPS FastAPI and SQLite WAL ledger, read-only accounting APIs and UI, explicit dependencies, environment configuration, documentation, and abuse/durability tests.
+- Why: the approved design rewards accepted inference service without mining, hardware self-reporting, token-gated inference, or premature payout mechanics.
+- Status: 149 backend tests plus 19 subtests, frontend type checks, lint, production build, and standalone shadow settlement startup pass; live two-device shadow validation and deployment review remain open before credit mode approval.
+
+### 2026-08-12 - Isolate incentives work on its feature branch
+
+- What changed: moved the intact coverage and incentives worktree to `feature/coverage-aware-incentives`, codified the purpose-matched `feature/` branch rule, and reran the complete automated verification suite.
+- Why: active sprint work must remain independently reviewable while live reachability approval is pending.
+- Status: 149 backend tests plus 19 subtests, frontend type checks, lint, and production build pass; the sprint remains open for two-device shadow-mode evidence and explicit credit-mode approval.

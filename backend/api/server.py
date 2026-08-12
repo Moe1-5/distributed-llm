@@ -37,6 +37,7 @@ from node.gpu_monitor import GPUMonitor
 from node.node import Node
 from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, _run_with_timeout
 from client.sequential import RemoteSequential
+from client.coverage import build_serving_plan, coverage_ranges, missing_ranges
 from client.generation import DistributedGenerator
 from api.local_models import (
     LocalModelDeletionError,
@@ -64,6 +65,13 @@ from constants import (
     DHT_PREFIX,
     get_initial_peers,
     get_p2p_network_config,
+)
+from incentives.runtime import (
+    fetch_settlement_account,
+    get_incentive_mode,
+    get_receipt_submitter,
+    get_runtime_identity,
+    get_settlement_url,
 )
 
 load_project_env()
@@ -103,6 +111,12 @@ def _format_route_trace(route: list[dict]) -> list[str]:
         f"{item['peer_id'][:8]}… (layers {item['layer_start']}→{item['layer_end']})"
         for item in route
     ]
+
+
+def _is_serving_metadata(item: dict) -> bool:
+    layers_loaded = bool(item.get("layers_loaded", True))
+    rpc_running = bool(item.get("rpc_running", True))
+    return bool(item.get("running", layers_loaded and rpc_running)) and layers_loaded and rpc_running
 
 
 def _is_cuda_out_of_memory(exc: BaseException) -> bool:
@@ -636,6 +650,8 @@ class NodeStartRequest(BaseModel):
     dht_prefix:    str = DHT_PREFIX
     initial_peers: list[str] = []
     device:        str = "cuda" if torch.cuda.is_available() else "cpu"
+    coverage_revision: Optional[str] = None
+    confirm_redundancy: bool = False
 
     @field_validator("model_name")
     @classmethod
@@ -1026,6 +1042,9 @@ async def get_models() -> dict:
             "total_layers": route_status["total_layers"],
             "compatible_nodes": route_status["compatible_nodes"],
             "route_trace": route_status["route_trace"],
+            "coverage_ranges": route_status["coverage_ranges"],
+            "missing_ranges": route_status["missing_ranges"],
+            "standby_ranges": route_status["standby_ranges"],
         })
     return {
         "models":          models,
@@ -1050,6 +1069,18 @@ def _get_model_route_status(
         "total_layers": total_layers,
         "compatible_nodes": 0,
         "route_trace": [],
+        "coverage_ranges": [
+            {
+                "layer_start": 0,
+                "layer_end": total_layers,
+                "provider_count": 0,
+                "status": "missing",
+            }
+        ] if total_layers else [],
+        "missing_ranges": [
+            {"layer_start": 0, "layer_end": total_layers}
+        ] if total_layers else [],
+        "standby_ranges": [],
     }
 
     if dht is None:
@@ -1068,6 +1099,11 @@ def _get_model_route_status(
         network_status = seq.get_network_status()
         nodes = network_status["nodes"]
         route = seq.validate_route(nodes)
+        serving_nodes = [item for item in nodes if _is_serving_metadata(item)]
+        selected_keys = {
+            (item["peer_id"], item["layer_start"], item["layer_end"], item["rpc_uid"])
+            for item in route
+        }
         return {
             "runnable": True,
             "route_ready": True,
@@ -1077,17 +1113,36 @@ def _get_model_route_status(
             "total_layers": total_layers,
             "compatible_nodes": len(route),
             "route_trace": _format_route_trace(route),
+            "coverage_ranges": coverage_ranges(serving_nodes, total_layers),
+            "missing_ranges": missing_ranges(serving_nodes, total_layers),
+            "standby_ranges": [
+                {
+                    "peer_id": item["peer_id"],
+                    "layer_start": item["layer_start"],
+                    "layer_end": item["layer_end"],
+                }
+                for item in serving_nodes
+                if (
+                    item["peer_id"],
+                    item["layer_start"],
+                    item["layer_end"],
+                    item["rpc_uid"],
+                ) not in selected_keys
+            ],
         }
     except Exception as e:
         try:
             network_status = seq.get_network_status()
             nodes = network_status["nodes"]
+            serving_nodes = [item for item in nodes if _is_serving_metadata(item)]
             return {
                 **empty_status,
                 "reasons": [str(e)],
                 "covered_layers": network_status["covered_layers"],
                 "missing_layers": network_status["missing_layers"],
                 "compatible_nodes": len(nodes),
+                "coverage_ranges": coverage_ranges(serving_nodes, total_layers),
+                "missing_ranges": missing_ranges(serving_nodes, total_layers),
             }
         except Exception as status_error:
             return {
@@ -1096,27 +1151,74 @@ def _get_model_route_status(
             }
 
 
+def _get_serving_plan(model_id: str, layer_count: int) -> dict:
+    if model_id not in SUPPORTED_MODELS:
+        raise HTTPException(status_code=404, detail=f"Unsupported model '{model_id}'.")
+    total_layers = int(SUPPORTED_MODELS[model_id]["num_layers"])
+    if not 1 <= layer_count <= total_layers:
+        raise HTTPException(
+            status_code=422,
+            detail=f"layer_count must be between 1 and {total_layers}",
+        )
+
+    dht = _active_local_dht() or client_dht
+    nodes: list[dict] = []
+    if dht is not None:
+        seq = RemoteSequential(
+            dht=dht,
+            dht_prefix=_active_dht_prefix(),
+            num_layers=total_layers,
+            model_name=model_id,
+        )
+        nodes = [
+            item
+            for item in seq.get_network_status()["nodes"]
+            if _is_serving_metadata(item)
+        ]
+    return build_serving_plan(
+        model_name=model_id,
+        nodes=nodes,
+        total_layers=total_layers,
+        layer_count=layer_count,
+    )
+
+
+@app.get("/models/{model_id:path}/serving-plan")
+async def get_model_serving_plan(model_id: str, layer_count: int) -> dict:
+    return _get_serving_plan(model_id, layer_count)
+
+
 # ---------------------------------------------------------------------------
-# Simulated contribution accounting
+# Useful-work contribution accounting
 # ---------------------------------------------------------------------------
 
 @app.get("/incentives/accounting")
 async def get_incentive_accounting() -> dict:
-    """
-    Return simulated contribution accounting only.
-    This intentionally does not expose balances, token claims, or payout actions.
-    """
+    """Return local useful-work counters and read-only settlement state."""
     local_contributions = [
         local_node.get_accounting_snapshot() for local_node in _local_node_list()
     ]
+    mode = get_incentive_mode()
+    identity = get_runtime_identity()
+    submitter = get_receipt_submitter()
+    loop = asyncio.get_running_loop()
+    account = await loop.run_in_executor(
+        None,
+        fetch_settlement_account,
+        identity.public_key,
+    )
     return {
-        "mode": "simulated",
-        "token_ui_enabled": False,
-        "reward_settlement_enabled": False,
+        "mode": mode,
+        "protocol_version": 1,
+        "identity": {"public_key": identity.public_key},
+        "settlement_url": get_settlement_url() or None,
+        "submission": submitter.snapshot(),
+        "account": account,
+        "token_ui_enabled": True,
+        "reward_settlement_enabled": mode == "credit",
         "policy": (
-            "Initial accounting is model-aware and contribution-aware only. "
-            "No real token rewards are issued until route correctness, health checks, "
-            "and anti-abuse validation are proven."
+            "Only worker-signed service accepted by a distinct generator can earn credits. "
+            "Credits are read-only and do not gate models, transfer, or withdraw."
         ),
         "fields": [
             "peer_id",
@@ -1435,6 +1537,47 @@ async def start_node(req: NodeStartRequest) -> dict:
                 "Use a non-overlapping slice."
             ),
         }
+
+    if req.coverage_revision is not None:
+        fresh_plan = _get_serving_plan(
+            req.model_name,
+            req.layer_end - req.layer_start,
+        )
+        if req.coverage_revision != fresh_plan["coverage_revision"]:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "serving_plan_changed",
+                    "message": "Network coverage changed. Review the refreshed recommendation.",
+                    "serving_plan": fresh_plan,
+                },
+            )
+
+        selected_counts = [
+            item["provider_count"]
+            for item in fresh_plan["coverage_ranges"]
+            for layer in range(item["layer_start"], item["layer_end"])
+            if req.layer_start <= layer < req.layer_end
+        ]
+        adds_no_missing_coverage = bool(selected_counts) and all(
+            count > 0 for count in selected_counts
+        )
+        if (
+            fresh_plan["missing_ranges"]
+            and adds_no_missing_coverage
+            and not req.confirm_redundancy
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "redundant_range_confirmation_required",
+                    "message": (
+                        f"Layers {req.layer_start}-{req.layer_end} are already covered while "
+                        "other layers are missing. Confirm to serve this redundant range anyway."
+                    ),
+                    "serving_plan": fresh_plan,
+                },
+            )
 
     model_info = SUPPORTED_MODELS[req.model_name]
     try:

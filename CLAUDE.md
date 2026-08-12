@@ -16,6 +16,7 @@ Before searching the filesystem for any file, scan `INDEX.md`. The Quick "Where 
 
 - Any task: plan, implement, verify, update the relevant sprint file.
 - Non-trivial work: make the plan explicit before broad code edits.
+- Sprint implementation and closure records must be made on a purpose-matched branch under `feature/`; do not continue sprint work directly on an integration or base branch.
 - After any correction from the user: add an entry to `tasks/lessons.md` under `## Active` immediately.
 - Sprint ends: move the sprint file to `tasks/archive/`, remove it from `tasks/active.md`, update `.context/current.md` only when the user explicitly says "close sprint N"; never archive based on checkboxes alone.
 - Lesson internalized: when a lesson has not been violated in two or more sprints, move it from `## Active` to `## Internalized`.

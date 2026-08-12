@@ -92,6 +92,8 @@ delete
 
 Multiple local nodes may serve non-overlapping ranges under one prefix. Overlapping local ranges and mixed local prefixes are rejected. Failed startup cleans partial resources before returning an actionable error.
 
+Before startup, `GET /models/{model_id}/serving-plan` ranks a range for the requested layer count using current provider counts and executable-route reachability. Recommended starts carry a coverage revision; stale plans and pure redundancy while gaps remain return HTTP 409 for review.
+
 ## 7. Generator and Route Readiness
 
 ```text
@@ -126,6 +128,8 @@ Inference page opens /stream WebSocket
 
 The user can request cancellation between token steps. Diagnostic endpoints can compare next-token logits/generated output with direct Hugging Face execution and write redacted JSON traces.
 
+In shadow or credit mode, a receipt-capable hop signs the tensor commitments and useful position count. The generator validates the worker receipt, signs acceptance for the selected complete route, and queues the pair for VPS settlement without blocking token generation.
+
 ## 9. Remote Worker Flow
 
 `backend/colab_worker.py` runs a headless serving node:
@@ -147,7 +151,7 @@ In automatic network mode, a NAT-separated worker keeps an outbound reservation 
 ## 10. Monitoring and Cleanup
 
 - `/status`, `/stats`, `/nodes`, `/models`, and `/generator/status` drive UI readiness and monitoring. Monitoring combines sampled machine/process/GPU metrics with the latest completed generation and aggregated RPC-hop timings.
-- `/incentives/accounting` reports simulated contribution metrics only.
+- `/incentives/accounting` reports app identity, off/shadow/credit mode, settlement health, read-only credits, receipt outcomes, and local contribution counters.
 - Managed Hugging Face snapshots can be removed with file deletion; arbitrary manual folders are unregistered but not recursively deleted.
 - Backend shutdown uses bounded cleanup for local nodes and the generator DHT.
 - Trace files live under `backend/traces/` or `DISTRIBLLM_TRACE_DIR` and remain gitignored.

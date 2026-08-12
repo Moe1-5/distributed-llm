@@ -13,6 +13,7 @@
 | Petals comparison | `PETALS_COMPARISON.md` | Similarities, differences, public-swarm positioning, and what to borrow from Petals |
 | Network reachability and relay review | `NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Sprint 14 transport defect, Petals-derived implementation, Windows/WSL direct setup, locked VPS deployment procedure, live relay diagnosis, rollout, and acceptance criteria |
 | Windows managed WSL packaging | `WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed distro strategy, state locations, launcher contract, and first smoke test |
+| Coverage and incentives | `COVERAGE_AND_INCENTIVES.md` | Coverage-aware serving plans, useful-work receipt protocol, VPS settlement operation, and rollout modes |
 | Errors and debugging | `ERRORS_AND_DEBUGGING.md` | Current OAuth, model access, CUDA/RAM, bootstrap, RPC/NAT, route, and trace troubleshooting |
 | Validation and testing | `VALIDATION_AND_TEST_PLAN.md` | Current regression status plus local, gated, instruction-ready, cleanup, and real multi-machine phase gates |
 | Starter-system architecture summary | `architecture.md` | Stack, folder ownership, key patterns, and external services |

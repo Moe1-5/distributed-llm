@@ -11,6 +11,7 @@ This folder documents the current codebase, the intended distributed inference f
 - [Petals Comparison](./PETALS_COMPARISON.md) - how this project relates to `bigscience-workshop/petals`.
 - [Errors and Debugging](./ERRORS_AND_DEBUGGING.md) - current errors, symptoms, root causes, and where to inspect.
 - [Validation and Test Plan](./VALIDATION_AND_TEST_PLAN.md) - checks needed before trusting distributed inference.
+- [Coverage and Incentives](./COVERAGE_AND_INCENTIVES.md) - layer recommendations, signed useful-work receipts, settlement, and rollout.
 
 The running issue log is kept at the repository root: [../ISSUES.md](../ISSUES.md).
 
@@ -31,10 +32,11 @@ This is similar in spirit to Petals, but currently much simpler:
 
 ## Current Work
 
-- Sprint 10: gated Hugging Face OAuth download/import implementation is complete; live end-to-end gated inference remains open.
-- Sprint 11: TinyLlama chat and Llama 2 model expansion is implemented; live instruction-ready distributed inference remains open.
-- Sprint 12: public model loading is isolated from stale OAuth state and failed startup cleanup is implemented; live TinyLlama retry remains open.
-- Sprint 13: real incentives and settlement remain deferred until correctness and anti-abuse prerequisites are proven.
+- Sprint 13: useful-work receipts, anti-abuse validation, shadow/credit settlement, and read-only accounting UI are implemented; live shadow validation remains open.
+- Sprint 14: generation and RPC performance visibility is implemented on its feature branch; output-quality work remains open.
+- Sprint 15: Windows packaging uses a planned managed WSL backend boundary.
+- Sprint 16: VPS relay reservation and metadata RPC are proven; tensor forwarding and two-device inference remain open.
+- Sprint 17: coverage-aware recommendations and overlap-safe route subset selection are implemented; two-device validation remains open.
 
 ## End Vision
 

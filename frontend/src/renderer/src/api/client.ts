@@ -45,6 +45,82 @@ export interface ModelInfo {
   total_layers: number
   compatible_nodes: number
   route_trace: string[]
+  coverage_ranges?: CoverageRange[]
+  missing_ranges?: LayerRange[]
+  standby_ranges?: NodeRange[]
+}
+
+export interface LayerRange {
+  layer_start: number
+  layer_end: number
+}
+
+export interface NodeRange extends LayerRange {
+  peer_id: string
+}
+
+export interface CoverageRange extends LayerRange {
+  provider_count: number
+  status: 'missing' | 'covered' | 'redundant'
+}
+
+export interface ServingPlan {
+  model_name: string
+  total_layers: number
+  requested_layer_count: number
+  coverage_revision: string
+  coverage_ranges: CoverageRange[]
+  missing_ranges: LayerRange[]
+  recommended_range: LayerRange & {
+    adds: 'missing_coverage' | 'redundancy'
+    newly_covered_layers: number
+    completes_route: boolean
+    reason: string
+  }
+  runnable_before: boolean
+  runnable_after: boolean
+  selected_route: LayerRange[]
+  projected_route: LayerRange[]
+  standby_ranges: NodeRange[]
+  projected_coverage_ranges: CoverageRange[]
+}
+
+export interface ContributionAccounting {
+  peer_id?: string | null
+  model_name: string
+  layer_start: number
+  layer_end: number
+  layers_served?: number
+  device?: string
+  requests_served: number
+  failed_requests?: number
+  token_positions_served?: number
+  avg_latency_ms?: number
+}
+
+export interface IncentiveAccounting {
+  mode: 'off' | 'shadow' | 'credit'
+  protocol_version: number
+  identity: { public_key: string }
+  settlement_url: string | null
+  submission: {
+    pending: number
+    accepted: number
+    rejected: number
+    last_error: string | null
+    settlement_connected: boolean
+    recent: Array<{ request_id: string; status: string; error?: string }>
+  }
+  account: {
+    public_key: string
+    verified_credits: number
+    entry_count: number
+    available: boolean
+    error: string | null
+  }
+  reward_settlement_enabled: boolean
+  policy: string
+  local_contributions: ContributionAccounting[]
 }
 
 export interface Stats {
@@ -224,6 +300,8 @@ export interface NodeStartParams {
   dht_prefix: string
   initial_peers: string[]
   device: string
+  coverage_revision?: string
+  confirm_redundancy?: boolean
 }
 
 export interface GeneratorStartParams {
@@ -347,6 +425,18 @@ async function get<T>(path: string): Promise<T> {
   return res.json() as Promise<T>
 }
 
+export class ApiError extends Error {
+  status: number
+  payload: unknown
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.payload = payload
+  }
+}
+
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
@@ -355,8 +445,10 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   })
   if (!res.ok) {
     let detail = ''
+    let responsePayload: unknown = null
     try {
       const payload = (await res.json()) as { detail?: unknown; error?: unknown; message?: unknown }
+      responsePayload = payload
       const rawDetail = payload.detail ?? payload.error ?? payload.message
       if (typeof rawDetail === 'string') {
         detail = `: ${rawDetail}`
@@ -368,7 +460,7 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     } catch {
       detail = ''
     }
-    throw new Error(`POST ${path} failed: ${res.status}${detail}`)
+    throw new ApiError(`POST ${path} failed: ${res.status}${detail}`, res.status, responsePayload)
   }
   return res.json() as Promise<T>
 }
@@ -404,6 +496,7 @@ export const api = {
   getStatus: () => get<NetworkStatus>('/status'),
   getStats: () => get<Stats>('/stats'),
   getNodes: () => get<{ nodes: NodeInfo[]; error?: string; warning?: string }>('/nodes'),
+  getIncentiveAccounting: () => get<IncentiveAccounting>('/incentives/accounting'),
 
   // Models — validated list from server, used for dropdown
   getModels: () =>
@@ -412,6 +505,10 @@ export const api = {
       token_available: boolean
       default_peers: string[]
     }>('/models'),
+  getServingPlan: (modelName: string, layerCount: number) =>
+    get<ServingPlan>(
+      `/models/${modelName}/serving-plan?layer_count=${encodeURIComponent(layerCount)}`
+    ),
 
   // Node management
   startNode: (params: NodeStartParams) =>

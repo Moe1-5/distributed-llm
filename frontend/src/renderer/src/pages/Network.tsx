@@ -10,13 +10,14 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import type {
   HuggingFaceConnection,
   HuggingFaceDeviceFlow,
   HuggingFaceDownloadJob,
   LocalModelImport,
-  ModelInfo
+  ModelInfo,
+  ServingPlan
 } from '../api/client'
 
 // ---------------------------------------------------------------------------
@@ -24,6 +25,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 type Tab = 'serve' | 'inference'
+type AllocationMode = 'recommended' | 'custom'
 
 interface ActivityEntry {
   id: string
@@ -46,6 +48,56 @@ function makeEntry(message: string, type: ActivityEntry['type']): ActivityEntry 
 
 function tuningLabel(model: ModelInfo): string {
   return model.tuning === 'base' ? 'base' : model.tuning === 'chat' ? 'chat' : 'instruct'
+}
+
+function defaultLayerCount(model: ModelInfo): number {
+  return Math.max(1, Math.ceil(model.num_layers / 2))
+}
+
+function rangeLabel(ranges: Array<{ layer_start: number; layer_end: number }>): string {
+  return ranges.map((range) => `${range.layer_start}-${range.layer_end}`).join(', ')
+}
+
+function CoverageStrip({
+  totalLayers,
+  ranges,
+  recommended
+}: {
+  totalLayers: number
+  ranges: Array<{
+    layer_start: number
+    layer_end: number
+    provider_count: number
+    status: 'missing' | 'covered' | 'redundant'
+  }>
+  recommended?: { layer_start: number; layer_end: number }
+}): React.JSX.Element {
+  const counts = Array.from({ length: totalLayers }, () => 0)
+  for (const range of ranges) {
+    for (let layer = range.layer_start; layer < range.layer_end; layer += 1) {
+      counts[layer] = range.provider_count
+    }
+  }
+
+  return (
+    <div className="flex h-7 w-full gap-0.5" aria-label="Layer coverage">
+      {counts.map((count, layer) => {
+        const isRecommended =
+          recommended && layer >= recommended.layer_start && layer < recommended.layer_end
+        return (
+          <div
+            key={layer}
+            title={`Layer ${layer}: ${count} provider${count === 1 ? '' : 's'}${isRecommended ? ' · recommended' : ''}`}
+            className={`min-w-0 flex-1 border ${
+              isRecommended ? 'border-cyan' : 'border-transparent'
+            } ${
+              count === 0 ? 'bg-red/25' : count === 1 ? 'bg-green/35' : 'bg-cyan/35'
+            }`}
+          />
+        )
+      })}
+    </div>
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +123,10 @@ export default function Network(): React.JSX.Element {
   const [serveModel, setServeModel] = useState('')
   const [layerStart, setLayerStart] = useState(0)
   const [layerEnd, setLayerEnd] = useState(0)
+  const [layerCount, setLayerCount] = useState(1)
+  const [allocationMode, setAllocationMode] = useState<AllocationMode>('recommended')
+  const [servingPlan, setServingPlan] = useState<ServingPlan | null>(null)
+  const [servingPlanLoading, setServingPlanLoading] = useState(false)
   const [device, setDevice] = useState('cuda')
   const [nodeRunning, setNodeRunning] = useState(false)
   const [nodeLoading, setNodeLoading] = useState(false)
@@ -114,8 +170,10 @@ export default function Network(): React.JSX.Element {
           const first = modelsRes.models[0]
           setServeModel(first.id)
           setInferModel(first.id)
+          const initialLayerCount = defaultLayerCount(first)
+          setLayerCount(initialLayerCount)
           setLayerStart(0)
-          setLayerEnd(first.num_layers)
+          setLayerEnd(initialLayerCount)
         }
 
         setBackendOk(true)
@@ -141,22 +199,64 @@ export default function Network(): React.JSX.Element {
       setServeModel(modelId)
       const model = models.find((m) => m.id === modelId)
       if (model) {
+        const nextLayerCount = defaultLayerCount(model)
+        setLayerCount(nextLayerCount)
         setLayerStart(0)
-        setLayerEnd(model.num_layers)
+        setLayerEnd(nextLayerCount)
+        setServingPlan(null)
       }
     },
     [models]
   )
-
-  // ---------------------------------------------------------------------------
-  // Local gated-model import
-  // ---------------------------------------------------------------------------
 
   const selectedServeModel = models.find((m) => m.id === serveModel)
   const selectedInferModel = models.find((m) => m.id === inferModel)
   const serveNeedsLocalImport = Boolean(selectedServeModel?.gated && !selectedServeModel.local_imported)
   const inferNeedsLocalImport = Boolean(selectedInferModel?.gated && !selectedInferModel.local_imported)
   const selectedModelForImport = tab === 'serve' ? serveModel : inferModel
+
+  const refreshServingPlan = useCallback(
+    async (modelId: string, count: number): Promise<ServingPlan | null> => {
+      if (!modelId || count < 1) return null
+      setServingPlanLoading(true)
+      try {
+        const plan = await api.getServingPlan(modelId, count)
+        setServingPlan(plan)
+        if (allocationMode === 'recommended') {
+          setLayerStart(plan.recommended_range.layer_start)
+          setLayerEnd(plan.recommended_range.layer_end)
+        }
+        return plan
+      } catch (err) {
+        log(err instanceof Error ? err.message : 'Could not load the serving plan', 'error')
+        return null
+      } finally {
+        setServingPlanLoading(false)
+      }
+    },
+    [allocationMode, log]
+  )
+
+  useEffect(() => {
+    if (!serveModel || !selectedServeModel) return
+    const safeCount = Math.min(Math.max(1, layerCount), selectedServeModel.num_layers)
+    void refreshServingPlan(serveModel, safeCount)
+    const timer = window.setInterval(() => {
+      void refreshServingPlan(serveModel, safeCount)
+    }, 8000)
+    return () => window.clearInterval(timer)
+  }, [layerCount, refreshServingPlan, selectedServeModel, serveModel])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void api.getModels().then((result) => setModels(result.models)).catch(() => undefined)
+    }, 10000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  // ---------------------------------------------------------------------------
+  // Local gated-model import
+  // ---------------------------------------------------------------------------
 
   const markLocalImport = useCallback((imported: LocalModelImport) => {
     setLocalImports((prev) => [
@@ -460,14 +560,59 @@ export default function Network(): React.JSX.Element {
       const accessOk = await ensureLocalImport(serveModel)
       if (!accessOk) return
 
-      const res = await api.startNode({
-        model_name: serveModel,
-        layer_start: layerStart,
-        layer_end: layerEnd,
-        dht_prefix: 'distribllm',
-        initial_peers: [],
-        device
-      })
+      const currentPlan = await refreshServingPlan(serveModel, layerEnd - layerStart)
+      if (!currentPlan) {
+        log('Could not validate current network coverage. Node was not started.', 'error')
+        return
+      }
+      const requestedStart =
+        allocationMode === 'recommended'
+          ? currentPlan.recommended_range.layer_start
+          : layerStart
+      const requestedEnd =
+        allocationMode === 'recommended'
+          ? currentPlan.recommended_range.layer_end
+          : layerEnd
+
+      const start = (confirmRedundancy: boolean): ReturnType<typeof api.startNode> =>
+        api.startNode({
+          model_name: serveModel,
+          layer_start: requestedStart,
+          layer_end: requestedEnd,
+          dht_prefix: 'distribllm',
+          initial_peers: [],
+          device,
+          coverage_revision: currentPlan.coverage_revision,
+          confirm_redundancy: confirmRedundancy
+        })
+
+      let res
+      try {
+        res = await start(false)
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          const payload = err.payload as {
+            detail?: { error?: string; message?: string; serving_plan?: ServingPlan }
+          }
+          const detail = payload.detail
+          if (detail?.serving_plan) setServingPlan(detail.serving_plan)
+          if (detail?.error === 'redundant_range_confirmation_required') {
+            const confirmed = window.confirm(
+              `${detail.message ?? 'This range is already covered.'}\n\nServe it anyway?`
+            )
+            if (!confirmed) {
+              log('Node start cancelled. The recommended missing range is ready to apply.', 'info')
+              return
+            }
+            res = await start(true)
+          } else {
+            log(detail?.message ?? err.message, 'error')
+            return
+          }
+        } else {
+          throw err
+        }
+      }
 
       if (res.status === 'error') {
         if (res.error === 'local_model_import_required') {
@@ -498,8 +643,25 @@ export default function Network(): React.JSX.Element {
     layerStart,
     layerEnd,
     device,
-    ensureLocalImport
+    ensureLocalImport,
+    refreshServingPlan,
+    allocationMode
   ])
+
+  const handleServeMissingRange = useCallback(() => {
+    if (!selectedInferModel) return
+    const largestMissing = [...(selectedInferModel.missing_ranges ?? [])].sort(
+      (a, b) => b.layer_end - b.layer_start - (a.layer_end - a.layer_start)
+    )[0]
+    setServeModel(selectedInferModel.id)
+    setLayerCount(
+      largestMissing
+        ? largestMissing.layer_end - largestMissing.layer_start
+        : defaultLayerCount(selectedInferModel)
+    )
+    setAllocationMode('recommended')
+    setTab('serve')
+  }, [selectedInferModel])
 
   // ---------------------------------------------------------------------------
   // Start generator
@@ -608,7 +770,7 @@ export default function Network(): React.JSX.Element {
         <div>
           <p className="font-mono text-[10px] text-amber">HUGGING FACE ACCESS REQUIRED</p>
           <p className="mt-1 text-[12px] leading-relaxed text-text-secondary">
-            Accept this model's Hugging Face terms first. Then connect your account so DistribLLM
+            Accept this model&apos;s Hugging Face terms first. Then connect your account so DistribLLM
             can download the approved files locally.
           </p>
         </div>
@@ -845,33 +1007,110 @@ export default function Network(): React.JSX.Element {
 
               {renderLocalImportPanel(selectedServeModel)}
 
-              {/* Layer range */}
-              <div className="flex gap-3">
-                <div className="flex flex-1 flex-col gap-1.5">
-                  <label className={labelCls}>Layer Start</label>
-                  <input
-                    type="number"
-                    value={layerStart}
-                    min={0}
-                    max={layerEnd - 1}
-                    onChange={(e) => setLayerStart(Number(e.target.value))}
+              <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-bg-surface p-1">
+                {(['recommended', 'custom'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => {
+                      setAllocationMode(mode)
+                      if (mode === 'recommended' && servingPlan) {
+                        setLayerStart(servingPlan.recommended_range.layer_start)
+                        setLayerEnd(servingPlan.recommended_range.layer_end)
+                      }
+                    }}
                     disabled={nodeLoading}
-                    className={inputCls}
-                  />
-                </div>
-                <div className="flex flex-1 flex-col gap-1.5">
-                  <label className={labelCls}>Layer End</label>
-                  <input
-                    type="number"
-                    value={layerEnd}
-                    min={layerStart + 1}
-                    max={selectedServeModel?.num_layers ?? 999}
-                    onChange={(e) => setLayerEnd(Number(e.target.value))}
-                    disabled={nodeLoading}
-                    className={inputCls}
-                  />
-                </div>
+                    className={`h-8 rounded-md font-mono text-[10px] font-semibold uppercase ${
+                      allocationMode === mode
+                        ? 'bg-cyan-dim text-cyan'
+                        : 'text-text-dim hover:bg-bg-hover hover:text-text-secondary'
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
               </div>
+
+              {allocationMode === 'recommended' ? (
+                <div className="flex flex-col gap-3">
+                  <div className="flex flex-col gap-1.5">
+                    <label className={labelCls}>Layers to contribute</label>
+                    <input
+                      type="number"
+                      value={layerCount}
+                      min={1}
+                      max={selectedServeModel?.num_layers ?? 1}
+                      onChange={(e) => {
+                        const max = selectedServeModel?.num_layers ?? 1
+                        setLayerCount(Math.min(max, Math.max(1, Number(e.target.value))))
+                      }}
+                      disabled={nodeLoading}
+                      className={inputCls}
+                    />
+                  </div>
+
+                  {selectedServeModel && servingPlan && (
+                    <div className="rounded-lg border border-border bg-bg-surface p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-mono text-[10px] text-text-dim">NETWORK COVERAGE</span>
+                        <span className="font-mono text-[10px] text-cyan">
+                          {servingPlan.recommended_range.layer_start}-
+                          {servingPlan.recommended_range.layer_end}
+                        </span>
+                      </div>
+                      <div className="mt-2">
+                        <CoverageStrip
+                          totalLayers={servingPlan.total_layers}
+                          ranges={servingPlan.coverage_ranges}
+                          recommended={servingPlan.recommended_range}
+                        />
+                      </div>
+                      <div className="mt-2 flex items-center gap-3 font-mono text-[9px] text-text-dim">
+                        <span><span className="mr-1 inline-block h-2 w-2 bg-red/40" />Missing</span>
+                        <span><span className="mr-1 inline-block h-2 w-2 bg-green/50" />Covered</span>
+                        <span><span className="mr-1 inline-block h-2 w-2 bg-cyan/50" />Replicated</span>
+                      </div>
+                      <p
+                        className={`mt-2 text-[11px] ${
+                          servingPlan.recommended_range.adds === 'redundancy'
+                            ? 'text-amber'
+                            : 'text-text-secondary'
+                        }`}
+                      >
+                        {servingPlanLoading
+                          ? 'Refreshing coverage...'
+                          : servingPlan.recommended_range.reason}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex gap-3">
+                  <div className="flex flex-1 flex-col gap-1.5">
+                    <label className={labelCls}>Layer Start</label>
+                    <input
+                      type="number"
+                      value={layerStart}
+                      min={0}
+                      max={layerEnd - 1}
+                      onChange={(e) => setLayerStart(Number(e.target.value))}
+                      disabled={nodeLoading}
+                      className={inputCls}
+                    />
+                  </div>
+                  <div className="flex flex-1 flex-col gap-1.5">
+                    <label className={labelCls}>Layer End</label>
+                    <input
+                      type="number"
+                      value={layerEnd}
+                      min={layerStart + 1}
+                      max={selectedServeModel?.num_layers ?? 999}
+                      onChange={(e) => setLayerEnd(Number(e.target.value))}
+                      disabled={nodeLoading}
+                      className={inputCls}
+                    />
+                  </div>
+                </div>
+              )}
 
               {/* Device */}
               <div className="flex flex-col gap-1.5">
@@ -941,7 +1180,9 @@ export default function Network(): React.JSX.Element {
                       }`}
                     >
                       {selectedInferModel.runnable
-                        ? `Runnable route across ${selectedInferModel.compatible_nodes} node(s)`
+                        ? selectedInferModel.compatible_nodes === 1
+                          ? 'Runnable through one full-range provider'
+                          : `Runnable split across ${selectedInferModel.compatible_nodes} providers`
                         : `Not runnable: ${
                             selectedInferModel.route_reasons[0] ?? 'missing compatible coverage'
                           }`}
@@ -950,9 +1191,47 @@ export default function Network(): React.JSX.Element {
                       {selectedInferModel.covered_layers} / {selectedInferModel.total_layers}{' '}
                       layers covered
                     </p>
+                    {selectedInferModel.coverage_ranges && (
+                      <div className="mt-2">
+                        <CoverageStrip
+                          totalLayers={selectedInferModel.total_layers}
+                          ranges={selectedInferModel.coverage_ranges}
+                        />
+                      </div>
+                    )}
+                    {!selectedInferModel.runnable &&
+                      (selectedInferModel.missing_ranges?.length ?? 0) > 0 && (
+                        <p className="mt-2 font-mono text-[10px] text-amber">
+                          Needs layers {rangeLabel(selectedInferModel.missing_ranges ?? [])}
+                        </p>
+                      )}
+                    {selectedInferModel.runnable && selectedInferModel.route_trace.length > 0 && (
+                      <div className="mt-2 border-t border-border pt-2">
+                        <p className="font-mono text-[9px] text-text-dim">SELECTED ROUTE</p>
+                        {selectedInferModel.route_trace.map((hop) => (
+                          <p key={hop} className="mt-1 font-mono text-[10px] text-text-secondary">
+                            {hop}
+                          </p>
+                        ))}
+                        {(selectedInferModel.standby_ranges?.length ?? 0) > 0 && (
+                          <p className="mt-2 font-mono text-[9px] text-text-dim">
+                            {selectedInferModel.standby_ranges?.length} standby provider(s)
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
+
+              {selectedInferModel && !selectedInferModel.runnable && (
+                <button
+                  onClick={handleServeMissingRange}
+                  className="h-10 rounded-lg border border-amber/30 bg-amber/10 font-mono text-[11px] font-semibold text-amber hover:bg-amber/20"
+                >
+                  SERVE MISSING RANGE
+                </button>
+              )}
 
               {renderLocalImportPanel(selectedInferModel)}
 
@@ -985,12 +1264,12 @@ export default function Network(): React.JSX.Element {
               ) : (
                 <button
                   onClick={() => void handleStartGenerator()}
-                  disabled={genLoading || !inferModel}
+                  disabled={genLoading || !inferModel || !selectedInferModel?.runnable}
                   className={`
                     w-full rounded-xl border py-3 font-mono text-[12px] font-semibold
                     transition-all duration-150
                     ${
-                      genLoading || !inferModel
+                      genLoading || !inferModel || !selectedInferModel?.runnable
                         ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
                         : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
                     }

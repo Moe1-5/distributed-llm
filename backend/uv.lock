@@ -306,6 +306,8 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "accelerate" },
+    { name = "blake3" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "hivemind" },
     { name = "nvidia-ml-py" },
@@ -318,6 +320,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=1.6.0" },
+    { name = "blake3", specifier = ">=1.0.8" },
+    { name = "cryptography", specifier = ">=46.0.5" },
     { name = "fastapi", specifier = ">=0.135.1" },
     { name = "hivemind", specifier = ">=1.1.12" },
     { name = "nvidia-ml-py", specifier = ">=12.560.30" },

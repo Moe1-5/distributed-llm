@@ -10,7 +10,8 @@ const NAV_ITEMS: { id: Page; label: string; icon: string }[] = [
   { id: 'dashboard', label: 'Nodes', icon: '⬡' },
   { id: 'network', label: 'Network', icon: '◎' },
   { id: 'chat', label: 'Inference', icon: '◈' },
-  { id: 'monitoring', label: 'Monitoring', icon: '▣' }
+  { id: 'monitoring', label: 'Monitoring', icon: '▣' },
+  { id: 'incentives', label: 'Incentives', icon: '◇' }
 ]
 
 export default function Sidebar({ currentPage, onNavigate }: SidebarProps): React.JSX.Element {

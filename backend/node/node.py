@@ -30,6 +30,7 @@ from node.handler import InferenceHandler
 from node.reachability import ReachabilityProtocol, check_direct_reachability
 from node.relay_compat import install_static_relay_compat
 from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, RPCServer, _run_with_timeout
+from incentives.runtime import get_runtime_identity
 
 logger = get_logger(__name__)
 
@@ -375,6 +376,7 @@ class Node:
         if peer_id is None:
             return
         expiry  = time.time() + DHT_EXPIRY_TIME   # fixed import
+        receipt_metadata = self._get_receipt_metadata(peer_id)
 
         # Write full metadata
         self.dht.store(
@@ -393,6 +395,7 @@ class Node:
                     self.rpc.is_running() if self.rpc else False
                 ) if rpc_running is None else rpc_running,
                 "rpc_uid":       self.rpc.get_uid()       if self.rpc     else None,
+                **receipt_metadata,
                 "connection_mode": self.connection_mode,
                 "direct_reachability": self.direct_reachability,
                 "transport_verified": self.transport_verified,
@@ -452,8 +455,9 @@ class Node:
         )
 
     def get_info(self) -> dict:
+        peer_id = self.get_peer_id()
         return {
-            "peer_id":       self.get_peer_id(),
+            "peer_id":       peer_id,
             "node_id":       self.node_id,
             "model_name":    self.model_name,
             "layer_start":   self.layer_start,
@@ -467,6 +471,33 @@ class Node:
             "direct_reachability": self.direct_reachability,
             "transport_verified": self.transport_verified,
             "accounting":    self.get_accounting_snapshot(),
+            **self._get_receipt_metadata(peer_id),
+        }
+
+    def _get_receipt_metadata(self, peer_id: Optional[str]) -> dict:
+        receipt_uid_getter = getattr(self.rpc, "get_receipt_uid", None)
+        receipt_uid = receipt_uid_getter() if callable(receipt_uid_getter) else None
+        if receipt_uid is None or peer_id is None:
+            return {
+                "receipt_protocol": None,
+                "receipt_rpc_uid": None,
+                "app_public_key": None,
+                "identity_binding": None,
+            }
+        identity = get_runtime_identity()
+        protocol_getter = getattr(self.rpc, "get_receipt_protocol", None)
+        protocol = protocol_getter() if callable(protocol_getter) else None
+        payload = {
+            "protocol_version": protocol,
+            "peer_id": peer_id,
+            "app_public_key": identity.public_key,
+            "bound_at": time.time(),
+        }
+        return {
+            "receipt_protocol": protocol,
+            "receipt_rpc_uid": receipt_uid,
+            "app_public_key": identity.public_key,
+            "identity_binding": {"payload": payload, "signature": identity.sign(payload)},
         }
 
     def get_accounting_snapshot(self) -> dict:

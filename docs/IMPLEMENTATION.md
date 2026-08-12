@@ -2,16 +2,15 @@
 
 This plan turns the current prototype into a reliable Petals-inspired distributed inference system for this project's own public/discoverable swarm. The network should be open enough for external devices to join and contribute resources, but isolated from public Petals/IPFS infrastructure by project-owned bootstrap nodes, DHT namespaces, metadata contracts, model registry, and routing rules.
 
-## Current Position - 2026-07-13
+## Current Position - 2026-08-12
 
 Phases 0 through 3 have substantial implemented foundations: structured readiness, contiguous route planning, cancellation, OPT/Llama-family adapter behavior, parity/trace tooling, multi-node local registries, monitoring, Hugging Face OAuth downloads, validated gated local imports, and instruction-ready model metadata. These areas still require broader live multi-machine validation; their presence in earlier roadmap phases no longer means they are wholly unimplemented.
 
 Current active validation work:
 
-- Sprint 10: complete live gated-model startup/generation/offline reuse evidence.
-- Sprint 11: complete TinyLlama/Llama 2 instruction-ready inference evidence.
-- Sprint 12: live-check anonymous public loading and failed-start cleanup after the expired-token fix.
-- Sprint 13: real incentives and settlement remain deferred.
+- Sprint 13: useful-work receipts and read-only settlement are implemented; live shadow validation gates credit mode.
+- Sprint 16: relay reservation and expert metadata RPC are proven; two-device tensor inference remains open.
+- Sprint 17: layer recommendations and overlap-safe route subset selection are implemented; live coverage validation remains open.
 
 ## Phase 0: Stabilize the Current Prototype
 
@@ -53,7 +52,7 @@ Goal: remote layer execution should run each layer exactly once in order.
 
 ### Current Problem
 
-Historical problem: `RemoteSequential` sorted every discovered node and could execute overlaps. The current route planner validates metadata and selects a contiguous, non-overlapping model-compatible route. Remaining work is live failover/health-based selection across competing providers.
+Historical problem: `RemoteSequential` sorted every discovered node and could execute overlaps. The current route planner validates metadata and selects a complete contiguous, non-overlapping subset with dynamic programming, leaving extra overlap as standby capacity. Remaining work is live failover/health-based selection across competing providers.
 
 ### Target Design
 
@@ -77,7 +76,7 @@ It should:
   - last node ends at `num_layers`
   - each node's `layer_start` equals previous node's `layer_end`
 
-For a first implementation, choose the longest valid next span. Later, add latency and health scoring.
+The current implementation minimizes complete-route hop count with deterministic span ordering. Later, add latency and health scoring without sacrificing route completeness.
 
 ## Phase 2: Architecture Adapters
 
@@ -210,7 +209,7 @@ Keep one backend process equal to one serving participant for the current protot
 
 Goal: make the UI reflect actual distributed readiness.
 
-### Add
+### Implemented foundation
 
 - readiness badge for selected model
 - route preview before inference
@@ -275,18 +274,18 @@ Goal: create a path toward token-based incentives for devices that serve useful 
 
 ### Add
 
-- contribution accounting for served layer requests
-- signed node identity and request receipts
-- proof-of-work or proof-of-service design for completed inference hops
-- anti-spam and anti-fake-work rules
-- token/reward ledger design
-- payout rules based on reliability, latency, served model, and resource cost
+- contribution accounting for selected served layer requests
+- Ed25519 app identity plus signed generator, worker, and acceptance receipts
+- BLAKE3 commitments for completed inference hops
+- replay, self-dealing, route, revision, timestamp, and position-count validation
+- project-owned FastAPI and SQLite WAL receipt/credit ledger
+- versioned integer rewards based on useful positions, layers, and model compute weight
 
-This phase should wait until core inference, health checks, and route correctness are reliable. Incentives before correctness would reward untrusted or useless work.
+The implementation defaults clients to off and settlement to shadow. Live two-device receipt evidence and operator review remain required before credit mode is approved. Transfers, claims, withdrawals, and model-access gates are intentionally absent.
 
 ### 2026-07-06 Sprint 06 Decision
 
-Initial incentives are simulated accounting only. The backend records model-aware and contribution-aware serving metrics for local nodes: peer identity, model, layer range, layers served, device, successful requests, failed requests, token positions served, latency totals, average latency, and last success/error timestamps. Token UI, balances, claims, and reward settlement stay disabled until route correctness, health checks, anti-abuse checks, and receipt/proof design are validated. Real incentives are deferred to Sprint 13.
+Sprint 06 introduced simulated counters. Sprint 13 retains those local diagnostics and adds signed useful-work receipts plus a read-only off-chain credit ledger. Credits never bypass Hugging Face authorization and do not yet transfer or pay out.
 
 ## Phase 11: API Access for Served Models
 
@@ -326,7 +325,7 @@ This is intentionally last because training is harder than inference. It require
 7. Add stable session routing and distributed KV cache.
 8. Harden public swarm operations, protocol/version compatibility, and bootstrap rotation.
 9. Add API-key access for inferenced models.
-10. Implement Sprint 13 receipts, anti-abuse checks, incentives, and settlement.
+10. Validate Sprint 13 receipts and settlement in shadow mode, then review credit-mode activation.
 11. Consider distributed training/fine-tuning resource requests last.
 
 ## Definition of Done for Correct Inference

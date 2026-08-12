@@ -31,11 +31,24 @@ import sys
 import time
 import traceback
 from typing import Optional
+from uuid import uuid4
  
 import hivemind
 import torch
 from hivemind.moe import get_experts
 from hivemind.utils.logging import get_logger
+
+from client.coverage import select_route_spans
+from incentives.identity import verify_signature
+from incentives.protocol import (
+    PROTOCOL_VERSION,
+    create_generator_acceptance,
+    create_work_request,
+    decode_envelope,
+    encode_envelope,
+    validate_worker_receipt,
+)
+from incentives.runtime import get_incentive_mode, get_receipt_submitter, get_runtime_identity
  
 logger = get_logger(__name__)
  
@@ -152,6 +165,17 @@ class RemoteSequential:
         self.model_name = model_name
         self._replica_cursors: dict[tuple[int, int], int] = {}
         self._last_forward_metrics: dict = {}
+        self._incentive_mode = get_incentive_mode()
+        self._incentive_identity = (
+            get_runtime_identity() if self._incentive_mode != "off" else None
+        )
+        self._receipt_submitter = (
+            get_receipt_submitter() if self._incentive_mode != "off" else None
+        )
+        self._receipt_session_id: Optional[str] = None
+
+    def set_receipt_session(self, session_id: Optional[str]) -> None:
+        self._receipt_session_id = session_id
 
     def _validate_node_metadata(self, info: dict, peer_id: str = "unknown") -> dict:
         required = {"peer_id", "layer_start", "layer_end", "model_name", "rpc_uid"}
@@ -201,6 +225,30 @@ class RemoteSequential:
         rpc_running = bool(info.get("rpc_running", True))
         running = bool(info.get("running", layers_loaded and rpc_running))
 
+        receipt_protocol = info.get("receipt_protocol")
+        receipt_rpc_uid = info.get("receipt_rpc_uid")
+        app_public_key = info.get("app_public_key")
+        identity_binding = info.get("identity_binding")
+        if receipt_protocol is not None:
+            if receipt_protocol != PROTOCOL_VERSION:
+                raise ValueError(f"Node {metadata_peer_id[:8]} has unsupported receipt protocol")
+            if not all(isinstance(value, str) and value.strip() for value in (receipt_rpc_uid, app_public_key)):
+                raise ValueError(f"Node {metadata_peer_id[:8]} has incomplete receipt capability")
+            if not isinstance(identity_binding, dict):
+                raise ValueError(f"Node {metadata_peer_id[:8]} has no signed identity binding")
+            binding_payload = identity_binding.get("payload")
+            binding_signature = identity_binding.get("signature")
+            if not isinstance(binding_payload, dict) or not isinstance(binding_signature, str):
+                raise ValueError(f"Node {metadata_peer_id[:8]} has malformed identity binding")
+            if (
+                binding_payload.get("peer_id") != metadata_peer_id
+                or binding_payload.get("app_public_key") != app_public_key
+                or binding_payload.get("protocol_version") != PROTOCOL_VERSION
+                or abs(time.time() - float(binding_payload.get("bound_at", 0))) > 300
+                or not verify_signature(app_public_key, binding_payload, binding_signature)
+            ):
+                raise ValueError(f"Node {metadata_peer_id[:8]} has invalid identity binding")
+
         return {
             **info,
             "peer_id": metadata_peer_id,
@@ -224,7 +272,7 @@ class RemoteSequential:
         )
 
     def _plan_route(self, nodes: list[dict]) -> list[dict]:
-        """Order nodes by layer start and enforce a contiguous, non-overlapping route."""
+        """Choose a complete subset of spans and one replica for every selected span."""
         if not nodes:
             raise ValueError("No nodes available for routing")
 
@@ -233,8 +281,10 @@ class RemoteSequential:
             span = (int(node["layer_start"]), int(node["layer_end"]))
             nodes_by_span.setdefault(span, []).append(node)
 
+        selected_spans = select_route_spans(nodes, self.num_layers)
         ordered_nodes: list[dict] = []
-        for span, replicas in sorted(nodes_by_span.items()):
+        for span in selected_spans:
+            replicas = nodes_by_span[span]
             ordered_replicas = sorted(
                 replicas,
                 key=lambda n: (
@@ -246,34 +296,6 @@ class RemoteSequential:
             cursor = self._replica_cursors.get(span, 0) % len(ordered_replicas)
             ordered_nodes.append(ordered_replicas[cursor])
             self._replica_cursors[span] = (cursor + 1) % len(ordered_replicas)
-
-        prev_end = 0
-        for node in ordered_nodes:
-            layer_start = int(node["layer_start"])
-            layer_end = int(node["layer_end"])
-            peer_id = str(node.get("peer_id", "unknown"))
-
-            if layer_end <= layer_start:
-                raise ValueError(
-                    f"Invalid layer range for peer {peer_id}: {layer_start}-{layer_end}"
-                )
-            if layer_start != prev_end:
-                raise ValueError(
-                    f"Route is not contiguous: expected next layer_start={prev_end}, "
-                    f"got {layer_start} for peer {peer_id}"
-                )
-            if layer_end > self.num_layers:
-                raise ValueError(
-                    f"Route exceeds model depth: peer {peer_id} wants layers {layer_start}-{layer_end}, "
-                    f"but model has {self.num_layers} layers"
-                )
-            prev_end = layer_end
-
-        if prev_end != self.num_layers:
-            raise ValueError(
-                f"Route ends at layer {prev_end} but expected {self.num_layers}"
-            )
-
         return ordered_nodes
 
     def validate_route(self, nodes: Optional[list[dict]] = None) -> list[dict]:
@@ -296,12 +318,14 @@ class RemoteSequential:
             )
 
         coverage = self._check_coverage(serving_nodes)
-        if not coverage["complete"]:
-            raise RuntimeError(
-                f"Incomplete layer coverage — missing: {coverage['missing']}"
-            )
-
-        ordered_nodes = self._plan_route(serving_nodes)
+        try:
+            ordered_nodes = self._plan_route(serving_nodes)
+        except ValueError as exc:
+            if not coverage["complete"]:
+                raise RuntimeError(
+                    f"Incomplete layer coverage — missing: {coverage['missing']}"
+                ) from exc
+            raise RuntimeError(str(exc)) from exc
         route_str = " -> ".join(
             f"layers {n['layer_start']}–{n['layer_end']} @ {_peer_short(n['peer_id'])}"
             for n in ordered_nodes
@@ -319,6 +343,7 @@ class RemoteSequential:
         hidden_states:  torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids:   Optional[torch.Tensor] = None,
+        session_id: Optional[str] = None,
     ) -> tuple[torch.Tensor, list[str]]:
         if hidden_states.dim() != 3:
             raise ValueError(
@@ -367,6 +392,15 @@ class RemoteSequential:
         )
         route_started_at = time.perf_counter()
         ordered_nodes = self.validate_route(nodes)
+        active_session_id = session_id or self._receipt_session_id or str(uuid4())
+        receipt_route = [
+            {
+                "peer_id": str(item["peer_id"]),
+                "layer_start": int(item["layer_start"]),
+                "layer_end": int(item["layer_end"]),
+            }
+            for item in ordered_nodes
+        ]
         route_validation_ms = (time.perf_counter() - route_started_at) * 1000
         logger.info(
             f"[forward] Step 2/3 ✓ — route validated for {len(ordered_nodes)} node(s)"
@@ -403,11 +437,12 @@ class RemoteSequential:
  
             t_hop         = time.perf_counter()
             hidden_states = self._call_node(
-                rpc_uid=rpc_uid,
-                peer_id=peer_id,
+                node_info=node_info,
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
-                position_ids=position_ids
+                position_ids=position_ids,
+                session_id=active_session_id,
+                route=receipt_route,
             )
             hop_ms = (time.perf_counter() - t_hop) * 1000
             hop_metrics.append(
@@ -461,15 +496,31 @@ class RemoteSequential:
 
     def _call_node(
         self,
-        rpc_uid:       str,
-        peer_id:       str,
+        node_info: dict,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids:   Optional[torch.Tensor] = None,
+        session_id: str = "",
+        route: Optional[list[dict]] = None,
     ) -> torch.Tensor:
+        rpc_uid = str(node_info["rpc_uid"])
+        peer_id = str(node_info["peer_id"])
         last_error = None
         for attempt in range(MAX_RETRIES + 1):
             try:
+                if (
+                    self._incentive_mode != "off"
+                    and node_info.get("receipt_protocol") == PROTOCOL_VERSION
+                    and node_info.get("receipt_rpc_uid")
+                ):
+                    return self._rpc_forward_with_receipt(
+                        node_info=node_info,
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        session_id=session_id,
+                        route=route or [],
+                    )
                 return self._rpc_forward(
                     rpc_uid, peer_id, hidden_states,
                     attention_mask=attention_mask,
@@ -486,6 +537,65 @@ class RemoteSequential:
             f"Node {peer_id[:8]} failed after {MAX_RETRIES + 1} attempts. "
             f"Last error: {last_error}"
         )
+
+    def _rpc_forward_with_receipt(
+        self,
+        *,
+        node_info: dict,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor],
+        session_id: str,
+        route: list[dict],
+    ) -> torch.Tensor:
+        if self._incentive_identity is None or self._receipt_submitter is None:
+            raise RuntimeError("Incentive runtime is not initialized")
+        if hidden_states.shape[0] != 1:
+            raise RuntimeError("Receipt protocol version 1 supports generator batch size 1")
+        receipt_uid = str(node_info["receipt_rpc_uid"])
+        experts = get_experts(self.dht, [receipt_uid])
+        if not experts or experts[0] is None:
+            raise RuntimeError(f"Receipt expert uid={receipt_uid} not found in DHT")
+
+        request = create_work_request(
+            identity=self._incentive_identity,
+            session_id=session_id,
+            model_name=self.model_name or str(node_info["model_name"]),
+            model_revision=str(node_info.get("model_revision", "registry")),
+            route=route,
+            peer_id=str(node_info["peer_id"]),
+            layer_start=int(node_info["layer_start"]),
+            layer_end=int(node_info["layer_end"]),
+            hidden_states=hidden_states,
+        )
+        output = experts[0].forward(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            receipt_request=encode_envelope(request, rows=hidden_states.shape[0]),
+        )
+        if not isinstance(output, tuple) or len(output) != 2:
+            raise RuntimeError("Receipt-capable expert returned an invalid response")
+        hidden_output, encoded_receipt = output
+        if encoded_receipt.dim() != 2 or encoded_receipt.shape[0] < 1:
+            raise RuntimeError("Receipt-capable expert returned malformed metadata")
+        worker_receipt = decode_envelope(encoded_receipt[0])
+        validate_worker_receipt(
+            envelope=worker_receipt,
+            request_envelope=request,
+            worker_public_key=str(node_info["app_public_key"]),
+            peer_id=str(node_info["peer_id"]),
+            output=hidden_output,
+        )
+        acceptance = create_generator_acceptance(
+            identity=self._incentive_identity,
+            worker_receipt=worker_receipt,
+            route=route,
+        )
+        self._receipt_submitter.submit(
+            {"worker_receipt": worker_receipt, "generator_acceptance": acceptance}
+        )
+        return hidden_output
 
     def validate_reachable_route(self) -> list[dict]:
         """Validate coverage and prove that every selected expert can answer RPC metadata."""

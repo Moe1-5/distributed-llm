@@ -24,6 +24,7 @@
 | Petals comparison                         | `docs/PETALS_COMPARISON.md`               |
 | Network reachability and relay review      | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` |
 | Windows managed WSL packaging        | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` |
+| Coverage-aware serving and incentives      | `docs/COVERAGE_AND_INCENTIVES.md`          |
 | Errors and debugging                      | `docs/ERRORS_AND_DEBUGGING.md`            |
 | Validation plan                           | `docs/VALIDATION_AND_TEST_PLAN.md`        |
 | Architectural decision history            | `docs/decisions.md`                       |
@@ -68,6 +69,7 @@
 | `tasks/sprints/sprint-14-performance-and-visibility.md`       | Active sprint for runtime/generation performance metrics, Monitoring visibility, chat templates, and context-aware streamed decoding. |
 | `tasks/sprints/sprint-15-windows-managed-wsl-packaging.md`    | Active future sprint plan for Windows Electron packaging with a managed WSL 2 backend runtime. |
 | `tasks/sprints/sprint-16-vps-relay-and-live-inference-validation.md` | Active sprint for diagnosing the live AutoRelay reservation failure and proving VPS-relayed two-device inference. |
+| `tasks/sprints/sprint-17-coverage-aware-layer-allocation.md` | Active sprint for useful layer recommendations, overlap-safe route subset selection, and two-device coverage validation. |
 | `tasks/archive/sprint-10-gated-model-local-import.md`          | Completed sprint for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
 | `tasks/archive/sprint-11-instruction-ready-model-expansion.md` | Completed sprint for instruction-ready/chat-ready model registry expansion, tuning labels, local-import contracts, and live TinyLlama generation validation. |
 | `tasks/archive/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Completed sprint for public-model auth isolation, failed-start cleanup, model cache cleanup, local expert routing, and safetensors/bin-index gated import validation. |
@@ -97,6 +99,7 @@
 | `docs/PETALS_COMPARISON.md`        | Comparison with Petals and project-owned public swarm direction. |
 | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Review proposal for Petals-style direct reachability, automatic relay fallback, VPS infrastructure, security, and production validation. |
 | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, state locations, launcher contract, and smoke-test plan. |
+| `docs/COVERAGE_AND_INCENTIVES.md` | Layer-serving recommendation contract, useful-work receipts, settlement deployment, and rollout modes. |
 | `docs/ERRORS_AND_DEBUGGING.md`     | Known errors, symptoms, and debugging guidance.           |
 | `docs/VALIDATION_AND_TEST_PLAN.md` | Validation phase gates before trusting inference or adding advanced features. |
 | `docs/architecture.md`             | Starter-system architecture summary adapted to this repo. |
@@ -112,6 +115,8 @@
 | `backend/colab_worker.py` | Headless remote worker entry point with browser OAuth support for Colab and GPU hosts. |
 | `backend/api/`           | FastAPI app, root `.env` loading, settings/token endpoints, Hugging Face OAuth/download helpers, and local model import registry. |
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
+| `backend/client/coverage.py` | Pure coverage segments, complete-route selection, revisions, and layer recommendations. |
+| `backend/incentives/`    | Ed25519 identities, BLAKE3 receipt protocol, asynchronous submission, and VPS SQLite settlement app. |
 | `backend/node/`          | Serving node, layer loading, direct/relay transport, Hivemind RPC, and GPU monitoring. |
 | `backend/node/reachability.py` | Petals-derived independent direct-reachability probe used before relay fallback. |
 | `backend/node/relay_compat.py` | Hivemind 1.1.12 compatibility shim that selects configured trusted relays as static AutoRelay candidates. |
@@ -124,6 +129,8 @@
 | `backend/uv.lock`        | Python dependency lockfile.                                                          |
 | `backend/tests/test_gpu_monitor.py` | Focused runtime resource-monitor metric and failure-path tests.                       |
 | `backend/tests/test_bootstrap_relay.py` | Focused public bootstrap relay and reachability-argument tests.                    |
+| `backend/tests/test_coverage_planning.py` | Route subset, recommendation, revision, and allocation-conflict tests. |
+| `backend/tests/test_incentives.py` | Useful-work signature, anti-abuse, durability, concurrency, and ledger tests. |
 
 ---
 
@@ -136,7 +143,7 @@
 | `frontend/src/preload/`                 | Electron preload bridge.                      |
 | `frontend/src/renderer/`                | React renderer application.                   |
 | `frontend/src/renderer/src/api/`        | HTTP and WebSocket API client.                |
-| `frontend/src/renderer/src/pages/`      | Dashboard, Network, Chat, Monitoring, and Settings pages. |
+| `frontend/src/renderer/src/pages/`      | Dashboard, Network, Chat, Monitoring, Incentives, and Settings pages. |
 | `frontend/src/renderer/src/components/` | Shared renderer components.                   |
 | `frontend/src/renderer/src/assets/`     | CSS and static renderer assets.               |
 

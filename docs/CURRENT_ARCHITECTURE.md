@@ -2,26 +2,27 @@
 
 ## System Shape
 
-DistribLLM is an Electron desktop client backed by a local FastAPI process. The backend can host one or more non-overlapping layer slices for the same model and DHT prefix, run one generator, expose monitoring/status APIs, and manage local Hugging Face authentication and model imports.
+DistribLLM is an Electron desktop client backed by a local FastAPI process. The backend can host one or more non-overlapping local layer slices for the same model and DHT prefix, run one generator, expose monitoring/status APIs, manage local Hugging Face authentication and model imports, and optionally produce useful-work receipts for selected inference hops.
 
 The target network is a project-owned public/discoverable swarm. External devices join through DistribLLM bootstrap peers, but `use_ipfs=False` keeps the system isolated from public Petals/IPFS infrastructure.
 
 ## Runtime Roles
 
 - Bootstrap node: stable discovery entry point only; never serves transformer layers.
-- Serving node: owns a contiguous model layer range and exposes it through Hivemind RPC.
+- Serving node: owns a contiguous model layer range and exposes legacy plus optional receipt-capable Hivemind RPC.
 - Generator client: keeps tokenizer, embeddings, final normalization, and LM head locally, then routes hidden states through serving nodes.
 - Electron/FastAPI client: controls local serving, generator startup, inference, monitoring, settings, OAuth, and managed model downloads.
 - Headless worker: `backend/colab_worker.py` runs a serving node on Colab or another GPU host without Electron.
 
 ## Frontend
 
-The renderer has five pages:
+The renderer has six pages:
 
 - Nodes: local hardware state and discovered/local nodes.
 - Network: serve layers, manage local replicas, connect Hugging Face, download/import gated models, and start the generator.
 - Inference: prompt streaming, readiness, route trace, and cancellation.
 - Monitoring: route coverage, peers, and accounting/health information.
+- Incentives: app identity, settlement status, verified credits, receipt outcomes, and local useful-work counters.
 - Settings: backend and Hugging Face connection/local-model state.
 
 Bootstrap configuration is intentionally hidden from normal product workflow. The backend URL defaults to `http://127.0.0.1:8000`; Vite overrides use `VITE_API_BASE_URL` and `VITE_WS_BASE_URL`.
@@ -79,11 +80,13 @@ Current layer-loading limitation: Transformers constructs the complete model in 
 
 ## Routing and Generation
 
-`RemoteSequential` validates DHT metadata, filters by model, builds a contiguous non-overlapping route, rejects gaps/incompatible ranges, and calls selected RPC experts in layer order.
+`RemoteSequential` validates DHT metadata, filters by model, and uses dynamic programming to select a complete contiguous non-overlapping subset. It minimizes hop count, round-robins exact replicas, ignores unselected overlap as standby capacity, and calls only the selected experts in layer order. The serving-plan API ranks missing coverage for a requested contribution size and protects starts with a coverage revision.
 
 When serving and generating on the same machine, generator startup directly seeds matching local node multiaddresses alongside configured bootstrap peers. Generator peers enable relay dialing. Readiness resolves every selected expert and probes RPC metadata so DHT coverage or a claimed relay address alone cannot produce a false-ready state.
 
 `DistributedGenerator` loads local model components and performs autoregressive generation through that route. It supports exact generation controls, stop requests, route readiness, next-token parity probes, generated-output comparisons, and JSON trace artifacts. Generator status also exposes startup/load duration, current route-probe duration, latest time to first token, total generation duration, token throughput, and per-hop RPC latency aggregates. These measurements are observational and do not alter route selection.
+
+When incentives are in shadow or credit mode, compatible peers use a separate receipt expert. Ed25519-signed generator requests and worker receipts commit to route, model revision, layer range, tensor input/output, session, nonce, position count, and timestamps. A generator countersigns accepted work and submits it asynchronously to the project VPS settlement service. SQLite WAL storage rejects replay, tampering, self-dealing, incomplete routes, invalid revisions, and position overclaims. Credit mode remains gated behind live shadow validation.
 
 The current data plane is:
 
@@ -99,8 +102,8 @@ There is no distributed KV cache, stable session routing, failover, or concurren
 
 ## Current Validation State
 
-- Backend regression suite: 117 tests and 19 subtests passing as of 2026-08-12.
-- Frontend TypeScript typecheck and Python compilation pass with the direct/relay transport changes.
+- Backend regression suite: 149 tests and 19 subtests passing as of 2026-08-12.
+- Frontend TypeScript typecheck, lint, production build, and Python compilation pass.
 - Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
 - Hugging Face device OAuth and real gated Llama 2 download have been exercised.
 - A Windows/WSL participant obtained a complete circuit address through the public VPS relay in 1.63 seconds, and a second same-host Hivemind peer completed an OPT-125M expert metadata RPC using only that circuit address. Tensor forwarding, direct two-device routing, and relayed two-device inference remain to be validated live.
@@ -112,4 +115,4 @@ There is no distributed KV cache, stable session routing, failover, or concurren
 - VPS workers need enough RAM for full-model construction and reachable worker RPC ports or relay support.
 - Python 3.12 is the supported runtime; Hivemind/Pydantic compatibility is unreliable on Python 3.14.
 - Bootstrap reachability proves discovery transport only, not model-worker RPC reachability.
-- Real incentives, API keys, failover, anti-abuse proofs, and distributed training remain future work.
+- Live receipt-capable two-device validation, credit-mode approval, API keys, failover, stronger Sybil resistance, and distributed training remain future work.

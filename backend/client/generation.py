@@ -16,6 +16,7 @@ Remote components (P2P network via RemoteSequential):
 import copy
 import time
 from typing import AsyncGenerator, Optional
+from uuid import uuid4
 
 import torch
 import torch.nn as nn
@@ -241,6 +242,10 @@ class DistributedGenerator:
         generated_token_count = 0
         route_validation_ms_total = 0.0
         hop_totals: dict[tuple[str, int, int], dict] = {}
+        generation_session_id = str(uuid4())
+        set_receipt_session = getattr(self.sequential, "set_receipt_session", None)
+        if callable(set_receipt_session):
+            set_receipt_session(generation_session_id)
         cfg = self._get_gen_config()
         logger.info(
             "[gen] starting generation prompt=%r max_new_tokens=%s temperature=%s top_p=%s",
@@ -591,6 +596,9 @@ class DistributedGenerator:
             attention_mask=distributed_attention_mask,
             position_ids=distributed_position_ids,
         )
+        set_receipt_session = getattr(self.sequential, "set_receipt_session", None)
+        if callable(set_receipt_session):
+            set_receipt_session(str(uuid4()))
         hidden_states, node_trace = self.sequential.forward(
             hidden_states=hidden_states,
             attention_mask=distributed_attention_mask,
@@ -731,6 +739,10 @@ class DistributedGenerator:
         steps: list[dict] = []
         node_trace: list[str] = []
         decoded_output = ""
+        generation_session_id = str(uuid4())
+        set_receipt_session = getattr(self.sequential, "set_receipt_session", None)
+        if callable(set_receipt_session):
+            set_receipt_session(generation_session_id)
 
         for step in range(max_new_tokens):
             position_ids = torch.arange(
