@@ -38,3 +38,18 @@ The 2026-08-13 CPU pass used Python 3.12.3, Hivemind 1.1.12, PyTorch 2.10.0, and
 - All explicit shutdown calls completed and no `p2pd` process remained.
 
 After successful shutdown, the initial pass emitted destructor-time `no current event loop` messages and one pending control-client task. That pass was not patched or rerun in place. A later dedicated cleanup branch now closes Hivemind's DHT-cached replicated P2P control client before DHT shutdown. A fresh split pass retained exact inference/parity, reported `remote_expert_p2p_stopped: true`, left no `p2pd` process, and exited without destructor tracebacks or pending tasks.
+
+## Local Failover Probe
+
+`backend/local_failover_probe.py` is the process-level prerequisite for Sprint 21. It starts two independent full-range Hivemind experts, performs one forward through the selected expert, stops that expert, and requires a second forward to restart from the original activation tensor through the complete replica. It verifies a two-attempt maximum, different accepted peer, output equivalence, no worker-side failed accounting, and complete process cleanup.
+
+From `backend/`:
+
+```bash
+uv run --python 3.12 python -m local_failover_probe \
+  --output ~/distribllm-evidence/local-failover-opt-125m.json
+```
+
+This probe exercises real local expert disappearance and replacement, but it does not prove circuit-relay behavior. Sprint 21 still requires the controlled two-device failure injection through the project VPS relay.
+
+The 2026-08-13 process-level pass used Python 3.12.3, Hivemind 1.1.12, and PyTorch 2.10.0. It completed in 4.858 seconds. The selected full-range expert completed the first four-position forward, was stopped, and then produced two bounded pre-execution dial failures. Route attempt two used the other full-range peer, produced an exactly matching tensor, and completed without worker-side failed accounting. Both nodes, the client DHT, the cached remote-expert P2P client, and the bootstrap shut down successfully.

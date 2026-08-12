@@ -48,6 +48,8 @@
 | Continuous provider health                | `backend/client/health.py`                |
 | Provider health tests                     | `backend/tests/test_provider_health.py`   |
 | Route failover tests                      | `backend/tests/test_route_failover.py`    |
+| Real local Hivemind failover probe        | `backend/local_failover_probe.py`         |
+| Local failover probe tests                | `backend/tests/test_local_failover_probe.py` |
 | Distributed generation                    | `backend/client/generation.py`            |
 | Frontend API client                       | `frontend/src/renderer/src/api/client.ts` |
 | Frontend pages                            | `frontend/src/renderer/src/pages/`        |

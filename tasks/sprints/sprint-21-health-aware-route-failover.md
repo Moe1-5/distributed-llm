@@ -93,3 +93,10 @@ This sprint consumes trustworthy provider health from Sprint 19 and bounded RPC 
 - Incentive safety: pending receipts from failed attempts are discarded and only the accepted complete attempt is submitted.
 - Visibility: generator readiness and Monitoring expose active, alternate, standby, degraded, transport, revision, attempt-count, and failover-reason state.
 - Verification: focused planner, health, useful-work, and failure-injection suites pass. The physical two-device relay failure-injection criterion remains open and this sprint stays active until the user explicitly closes it.
+
+### 2026-08-13 - Prove failover with real local Hivemind processes
+
+- What changed: added `local_failover_probe.py`, which starts two independent full-range expert processes, caches both routes in one generation session, turns off the selected expert, and requires the replacement forward to restart from the original activation through the complete replica.
+- Result: the OPT-125M CPU pass completed in 4.858 seconds. The stopped provider failed with a classified pre-execution dial error, route attempt two selected the other peer, and the output tensor matched exactly.
+- Accounting and cleanup: each worker recorded one successful four-position request and zero failed requests; both nodes, the client DHT, cached remote-expert P2P client, and bootstrap stopped successfully.
+- Remaining gate: this proves process-level failover over loopback. The physical two-device failure injection through the project VPS relay remains required.
