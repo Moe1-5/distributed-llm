@@ -10,7 +10,7 @@
 
 The Sprint 14 implementation could detect that a WSL worker was not directly reachable and select relay mode, but the first public test did not receive a visible `/p2p-circuit/` address within 60 seconds. Investigation found that Hivemind's bundled daemon was left on the multi-candidate relay-discovery path despite having one explicit trusted relay, and project polling reused cached startup addresses.
 
-The participant now selects the configured trusted relay statically and requests fresh visible addresses. A public Windows/WSL probe obtained a complete circuit address through the project VPS in 1.63 seconds. Relay reservation is proven; independent expert RPC and two-device inference remain to be validated.
+The participant now selects the configured trusted relay statically and requests fresh visible addresses. A public Windows/WSL probe obtained a complete circuit address through the project VPS in 1.63 seconds, and an independent peer completed the real expert metadata RPC through that circuit. Relay reservation and metadata traffic are proven; tensor inference across two physical devices remains to be validated.
 
 ## Confirmed Live Evidence
 
