@@ -18,8 +18,8 @@ Sprints 10 and 11 completed gated-model local import and instruction-ready model
 
 ## Prerequisites
 
-- [ ] Direct HuggingFace versus distributed parity is validated for the target demo/transport model.
-- [ ] Local multi-node split inference is proven with complete compatible layer coverage.
+- [x] Direct HuggingFace versus distributed parity is validated for the target demo/transport model.
+- [x] Local multi-node split inference is proven with complete compatible layer coverage.
 - [ ] Real multi-machine inference is proven across separate devices.
 - [x] Gated-model local import is reliable enough that model access does not depend on pasted tokens.
 - [x] Route health checks exist for selected nodes before inference starts.
@@ -108,3 +108,10 @@ Sprints 10 and 11 completed gated-model local import and instruction-ready model
 - What changed: added a sanitized acceptance collector and validator for local route ownership, adjacent selected ranges, actual replica-aware hop timing, relay/direct transport, generation output, shadow receipt deltas, settlement drain, and optional standby before/after non-payment counters; added an operator runbook and regression coverage.
 - Why: the remaining incentive gate must be reviewable from structured evidence produced by the real APIs instead of screenshots or cumulative counters that could belong to an earlier inference.
 - Status: 165 backend tests plus 19 subtests pass, including 11 focused evidence tests; Python compilation and `git diff --check` pass. The tool is ready on `feature/two-device-acceptance-evidence`, but separate physical devices, live VPS shadow settlement/restart evidence, and approval before credit mode remain open.
+
+### 2026-08-13 - Prove real local two-peer split inference and parity
+
+- What changed: added a reusable isolated local split probe; started two real Hivemind serving peers for OPT-125M ranges `0-6` and `6-12`, a separate generator peer, deterministic Hugging Face parity checks, worker accounting evidence, private JSON output, and bounded explicit cleanup.
+- Why: Sprint 13 still carried an obsolete local multi-node blocker from the former single-node backend even though later lifecycle work added multiple local peers. Incentive rollout needs a current real RPC proof that selected adjacent providers jointly execute one correct model route.
+- Verification: the CPU pass completed in 10.404 seconds with two distinct peer IDs, exact adjacent coverage, direct/distributed next-token ID `5`, zero max and mean logit difference, exact two-token greedy output ` the most`, three successful requests and 19 positions per worker, zero worker failures, completed explicit shutdown calls, and no remaining `p2pd` process. The full backend suite passes with 169 tests and 22 subtests.
+- Status: direct parity and local multi-node split prerequisites are now proven. Hivemind still emitted late remote-control destructor warnings and one pending task after successful cleanup; this is documented without a same-pass fix or rerun. Real separate-device inference, live VPS shadow review/restart, and approval before credit mode remain open.

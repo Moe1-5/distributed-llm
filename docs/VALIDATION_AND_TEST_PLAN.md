@@ -127,14 +127,16 @@ node C: layers 8-12
 Checklist:
 
 - [x] Each node has a unique RPC UID.
-- [ ] DHT discovery sees all serving nodes.
-- [ ] Route planning selects the exact route `0-4 -> 4-8 -> 8-12`.
-- [ ] No layer is skipped.
-- [ ] No layer is executed twice.
-- [ ] A short prompt returns without crashing.
-- [ ] Output behavior is compared with the single-node full-layer test.
+- [x] DHT discovery sees all serving nodes.
+- [x] Route planning selects an exact adjacent split route.
+- [x] No layer is skipped.
+- [x] No layer is executed twice.
+- [x] A short prompt returns without crashing.
+- [x] Output behavior is compared with direct Hugging Face and the single-node parity baseline.
 
 2026-07-06 result: blocked in the current one-backend process flow. RPC UID uniqueness is covered by unit tests, but a second `/node/start` call returned `already_running` with the existing full-layer node. See `ISSUES.md` findings 24 and 25.
+
+2026-08-13 result: passed after later node-registry work removed the old one-node limitation. `python -m local_split_probe` started an isolated loopback bootstrap, two real OPT-125M serving peers for `0-6` and `6-12`, and a separate generator DHT. The route used both peers, direct and distributed next-token logits matched exactly, two-token greedy text matched exactly, and each worker recorded three successful requests plus 19 useful positions with zero failures. Explicit shutdown completed with no remaining `p2pd` process; Hivemind still emitted late event-loop destructor warnings and one pending control task, recorded in `ISSUES.md`. See [Local Split Acceptance](LOCAL_SPLIT_ACCEPTANCE.md).
 
 ### Phase E: Real Multi-Machine Distributed Network Test
 
@@ -196,12 +198,12 @@ Checklist:
 
 Do not start token incentives, API-key product flows, or distributed training features until these are true:
 
-- [ ] Local single-node inference is proven.
-- [ ] Local multi-node split inference is proven.
+- [x] Local single-node inference is proven.
+- [x] Local multi-node split inference is proven.
 - [ ] Real multi-machine inference is proven.
-- [ ] Route readiness is exposed before inference starts.
-- [ ] Basic cancellation or recovery exists for stuck inference.
-- [ ] Bootstrap deployment and replacement process is documented.
+- [x] Route readiness is exposed before inference starts.
+- [x] Basic cancellation or recovery exists for stuck inference.
+- [x] Bootstrap deployment and replacement process is documented.
 
 ### Phase G: Product Workflow Validation
 

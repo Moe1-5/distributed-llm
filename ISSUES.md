@@ -579,6 +579,8 @@ Node/RPC shutdown completed, but Hivemind destructors later reported no current 
 
 **2026-07-13 fix and verification:** generator startup now adds matching local node multiaddresses as direct initial peers, and readiness probes expert RPC metadata. The corrected live test passed routing for three prompts through TinyLlama layers `0-22`; this transport issue is fixed for same-machine serving/generation with a VPS bootstrap.
 
+**2026-08-13 local split cleanup finding:** the isolated real OPT-125M `0-6 -> 6-12` probe completed route validation, parity, generation, accounting, and every explicit node/DHT shutdown call. No `p2pd` process remained. Hivemind nevertheless emitted destructor-time `no current event loop` messages and one pending `ControlClient` write task. Installed Hivemind 1.1.12 creates a replicated P2P client in each `get_experts` call; the production sequential route does not currently expose or explicitly shut down those short-lived remote-expert P2P handles. Functional local split acceptance passed, but clean remote-expert control-task ownership remains an open cleanup issue. Per the system-test protocol, no fix or rerun was attempted during this pass.
+
 ## 12. TinyLlama chat route returns an empty response for raw prompts
 
 **Observed after RPC routing was fixed:**
