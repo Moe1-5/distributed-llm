@@ -184,6 +184,12 @@ Check:
 
 The `/models` and `/generator/status` responses include route reasons, coverage, and trace information. Registry support alone does not mean a model is runnable.
 
+## Provider Present but RPC Health Degraded
+
+Monitoring presents DHT presence, transport verification, and expert RPC health separately. A provider can still have a current advertisement while its metadata expert is timing out or unreachable. Under defaults, one failed probe keeps a previously healthy route available, two consecutive failures mark it degraded, four mark it offline, and two successful probes are required for recovery.
+
+Inspect `/generator/status` health providers for the failure reason, last probe/success/failure timestamps, latency, role, and health revision. Tune `DISTRIBLLM_HEALTH_*` only after checking relay and worker logs; shortening intervals increases DHT/RPC control traffic. Network's Stop Generator action unloads the monitor and client DHT, while Chat's stop action only cancels the active inference request.
+
 ## RPC Node Fails After Retries
 
 Possible causes:

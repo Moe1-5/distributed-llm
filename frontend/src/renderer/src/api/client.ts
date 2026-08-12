@@ -13,6 +13,7 @@ const REQUEST_TIMEOUT_MS = 8_000
 
 export interface NodeInfo {
   peer_id: string
+  rpc_uid?: string
   node_id?: string
   model_name: string
   layer_start: number
@@ -193,6 +194,43 @@ export interface GeneratorStatus {
   reasons: string[]
   node_trace: string[]
   performance: GeneratorPerformance | null
+  health: ProviderHealthStatus | null
+}
+
+export interface ProviderHealth {
+  peer_id: string
+  rpc_uid: string
+  model_name: string
+  model_revision: string
+  layer_start: number
+  layer_end: number
+  state: 'checking' | 'healthy' | 'degraded' | 'offline'
+  role: 'selected' | 'standby'
+  dht_present: boolean
+  protocol_compatible: boolean
+  transport_verified: boolean | null
+  consecutive_successes: number
+  consecutive_failures: number
+  last_probe_at: number | null
+  last_success_at: number | null
+  last_failure_at: number | null
+  latency_ms: number | null
+  reason: string | null
+  next_probe_at: number
+}
+
+export interface ProviderHealthStatus {
+  enabled: boolean
+  monitor_running?: boolean
+  route_ready: boolean
+  health_revision: string
+  detection_window_seconds?: number
+  active_probes?: number
+  last_discovery_error?: string | null
+  reasons: string[]
+  providers: ProviderHealth[]
+  selected_providers?: ProviderHealth[]
+  standby_providers?: ProviderHealth[]
 }
 
 export interface HopPerformance {
@@ -583,6 +621,7 @@ export const api = {
   startGeneratorAsync: (params: GeneratorStartParams) =>
     post<LifecycleJob>('/generator/start-async', params),
   stopGenerator: () => post<{ status: string }>('/generator/stop'),
+  unloadGenerator: () => post<{ status: string }>('/generator/unload'),
   getGeneratorStatus: () => get<GeneratorStatus>('/generator/status'),
   getLifecycleJob: (jobId: string) =>
     get<LifecycleJob>(`/lifecycle/jobs/${encodeURIComponent(jobId)}`),

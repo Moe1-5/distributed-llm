@@ -137,6 +137,17 @@ export default function Monitoring(): React.JSX.Element {
   const routeTrace = state.generator?.node_trace ?? []
   const generatorPerformance = state.generator?.performance
   const lastGeneration = generatorPerformance?.last_generation
+  const providerHealth = state.generator?.health?.providers ?? []
+  const healthByProvider = useMemo(
+    () =>
+      new Map(
+        providerHealth.map((health) => [
+          `${health.peer_id}:${health.rpc_uid}`,
+          health
+        ])
+      ),
+    [providerHealth]
+  )
 
   const coverage = useMemo(() => {
     if (!selectedModel) {
@@ -585,6 +596,33 @@ export default function Monitoring(): React.JSX.Element {
                         TRANSPORT UNVERIFIED
                       </span>
                     )}
+                    {(() => {
+                      const health = healthByProvider.get(`${node.peer_id}:${node.rpc_uid ?? ''}`)
+                      if (!health) {
+                        return (
+                          <span className="rounded border border-border px-2 py-0.5 font-mono text-[10px] text-text-dim">
+                            RPC HEALTH UNKNOWN
+                          </span>
+                        )
+                      }
+                      const stateClass =
+                        health.state === 'healthy'
+                          ? 'border-green/20 bg-green/5 text-green'
+                          : health.state === 'checking'
+                            ? 'border-border text-text-dim'
+                            : health.state === 'degraded'
+                              ? 'border-amber/30 bg-amber/10 text-amber'
+                              : 'border-red/20 bg-red/5 text-red'
+                      return (
+                        <span
+                          className={`rounded border px-2 py-0.5 font-mono text-[10px] uppercase ${stateClass}`}
+                          title={health.reason ?? undefined}
+                        >
+                          RPC {health.state}
+                          {health.latency_ms !== null ? ` / ${health.latency_ms.toFixed(0)}ms` : ''}
+                        </span>
+                      )
+                    })()}
                   </div>
                 </div>
               ))}

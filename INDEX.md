@@ -42,6 +42,8 @@
 | Selective worker layer loading            | `backend/node/block_loader.py`            |
 | Selective layer loading tests             | `backend/tests/test_selective_layer_loading.py` |
 | Remote layer routing                      | `backend/client/sequential.py`            |
+| Continuous provider health                | `backend/client/health.py`                |
+| Provider health tests                     | `backend/tests/test_provider_health.py`   |
 | Distributed generation                    | `backend/client/generation.py`            |
 | Frontend API client                       | `frontend/src/renderer/src/api/client.ts` |
 | Frontend pages                            | `frontend/src/renderer/src/pages/`        |
@@ -76,7 +78,7 @@
 | `tasks/sprints/sprint-16-vps-relay-and-live-inference-validation.md` | Active sprint for diagnosing the live AutoRelay reservation failure and proving VPS-relayed two-device inference. |
 | `tasks/sprints/sprint-17-coverage-aware-serving.md` | Active sprint for adjacent-range route planning, live coverage recommendations, and serving/inference workflow guidance. |
 | `tasks/sprints/sprint-18-memory-efficient-selective-layer-loading.md` | Active implemented sprint for architecture-aware partial worker loading, memory evidence, cleanup, and parity. |
-| `tasks/sprints/sprint-19-continuous-provider-health.md` | Proposed sprint for provider health states, background probes, and stale-readiness invalidation. |
+| `tasks/sprints/sprint-19-continuous-provider-health.md` | Active implemented sprint for provider health states, background probes, and stale-readiness invalidation. |
 | `tasks/sprints/sprint-20-rpc-resource-safety.md` | Proposed sprint for typed expert RPC limits, validation, bounded admission, and safety counters. |
 | `tasks/sprints/sprint-21-health-aware-route-failover.md` | Proposed sprint for health-aware complete routes, bounded failover, and accounting-safe retry behavior. |
 | `tasks/sprints/sprint-22-relay-tensor-rpc-stability.md` | Active sprint for relayed tensor RPC diagnostics, bounded attempts, route reuse, and live inference acceptance. |

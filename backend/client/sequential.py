@@ -37,9 +37,17 @@ import hivemind
 import torch
 from hivemind.moe import get_experts
 from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
+from hivemind.proto import runtime_pb2
 from hivemind.utils.logging import get_logger
 
 from client.coverage import route_requirement_ranges, select_route
+from client.health import (
+    ProviderHealthConfig,
+    ProviderHealthMonitor,
+    ProviderHealthRegistry,
+    ProviderKey,
+    get_provider_health_config,
+)
 from client.rpc_policy import (
     RPCAttemptPolicy,
     classify_rpc_error,
@@ -175,6 +183,7 @@ class RemoteSequential:
         model_name: Optional[str] = None,
         useful_work_runtime: Optional[UsefulWorkRuntime] = None,
         rpc_attempt_policy: Optional[RPCAttemptPolicy] = None,
+        health_config: Optional[ProviderHealthConfig] = None,
     ):
         if dht is None:
             raise ValueError("dht must not be None")
@@ -189,10 +198,151 @@ class RemoteSequential:
         self.model_name = model_name
         self.useful_work_runtime = useful_work_runtime or get_useful_work_runtime()
         self.rpc_attempt_policy = rpc_attempt_policy or get_rpc_attempt_policy()
+        self.health_config = health_config or get_provider_health_config()
+        self.health_registry = ProviderHealthRegistry(self.health_config)
+        self.health_monitor: Optional[ProviderHealthMonitor] = None
         self._replica_cursors: dict[tuple[int, int], int] = {}
         self._last_forward_metrics: dict = {}
         self._session_id: Optional[str] = None
         self._session_route: Optional[list[dict]] = None
+
+    def start_health_monitor(self) -> None:
+        if self.health_monitor is not None and self.health_monitor.running:
+            return
+        self.health_monitor = ProviderHealthMonitor(
+            config=self.health_config,
+            registry=self.health_registry,
+            discover=self._scan_node_metadata,
+            classify=self._classify_health_roles,
+            probe=self._probe_provider,
+        )
+        self.health_monitor.start()
+
+    def stop_health_monitor(self, timeout: float = 2.0) -> bool:
+        monitor = self.health_monitor
+        if monitor is None:
+            return True
+        stopped = monitor.stop(timeout=timeout)
+        if not stopped:
+            logger.warning("Provider health monitor did not stop all active probes in time")
+        self.health_monitor = None
+        return stopped
+
+    def _classify_health_roles(self, nodes: list[dict]) -> tuple[list[dict], list[dict]]:
+        serving_nodes = [node for node in nodes if self._is_serving_node(node)]
+        return select_route(
+            serving_nodes,
+            self.num_layers,
+            self._replica_cursors,
+            advance_replicas=False,
+        )
+
+    def _probe_provider(self, node: dict) -> None:
+        deadline = time.monotonic() + self.health_config.probe_timeout_seconds
+        lookup = get_experts(
+            self.dht,
+            [str(node["rpc_uid"])],
+            return_future=True,
+        )
+        try:
+            experts = lookup.result(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception:
+            lookup.cancel()
+            raise
+        expert = experts[0] if experts else None
+        if expert is None:
+            raise RuntimeError(f"Expert {node['rpc_uid']} was not found")
+        rpc_info = RemoteExpertWorker.run_coroutine(
+            expert.stub.rpc_info(runtime_pb2.ExpertUID(uid=expert.uid)),
+            return_future=True,
+        )
+        try:
+            rpc_info.result(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception:
+            rpc_info.cancel()
+            raise
+
+    def get_health_readiness(self) -> dict:
+        monitor = self.health_monitor
+        if monitor is None or not monitor.running:
+            return {
+                "enabled": False,
+                "route_ready": False,
+                "reasons": ["Provider health monitor is not running."],
+                "selected_route": [],
+                "standby_route": [],
+                **self.health_registry.snapshot(),
+            }
+
+        nodes = monitor.latest_nodes()
+        selected, standby = self._classify_health_roles(nodes)
+        health = monitor.snapshot()
+        health_by_key = {
+            ProviderKey.from_node(provider): provider
+            for provider in health["providers"]
+            if provider.get("rpc_uid") != "invalid"
+        }
+        reasons: list[str] = []
+        if not selected:
+            requirements = route_requirement_ranges(nodes, self.num_layers)
+            formatted = ", ".join(
+                f"{item['start']}-{item['end']}" for item in requirements
+            ) or "a complete adjacent provider route"
+            reasons.append(f"No complete adjacent route; needs layers {formatted}.")
+
+        selected_health: list[dict] = []
+        for node in selected:
+            provider = health_by_key.get(ProviderKey.from_node(node))
+            if provider is None:
+                provider = {
+                    **ProviderKey.from_node(node).__dict__,
+                    "state": "checking",
+                    "reason": "Awaiting first RPC health probe.",
+                    "dht_present": True,
+                    "protocol_compatible": True,
+                    "role": "selected",
+                }
+            selected_health.append(provider)
+            if provider.get("state") != "healthy":
+                reasons.append(
+                    f"Provider {str(node['peer_id'])[:8]} is "
+                    f"{provider.get('state', 'checking')}: "
+                    f"{provider.get('reason') or 'RPC health is not current.'}"
+                )
+
+        standby_health = [
+            health_by_key.get(ProviderKey.from_node(node), {
+                **ProviderKey.from_node(node).__dict__,
+                "state": "checking",
+                "reason": "Awaiting first RPC health probe.",
+                "role": "standby",
+            })
+            for node in standby
+        ]
+        return {
+            **health,
+            "enabled": True,
+            "route_ready": bool(selected) and not reasons,
+            "reasons": reasons,
+            "selected_route": selected,
+            "standby_route": standby,
+            "selected_providers": selected_health,
+            "standby_providers": standby_health,
+        }
+
+    def _assert_route_health(self, route: list[dict]) -> None:
+        monitor = self.health_monitor
+        if monitor is None or not monitor.running:
+            return
+        failures: list[str] = []
+        for node in route:
+            health = self.health_registry.get(ProviderKey.from_node(node))
+            if health is None or health.get("state") != "healthy":
+                state = health.get("state", "checking") if health else "checking"
+                reason = health.get("reason") if health else "No health record yet."
+                failures.append(f"{str(node['peer_id'])[:8]}={state}: {reason}")
+        if failures:
+            raise RuntimeError("Selected route health is not ready: " + "; ".join(failures))
 
     def _validate_node_metadata(self, info: dict, peer_id: str = "unknown") -> dict:
         required = {"peer_id", "layer_start", "layer_end", "model_name", "rpc_uid"}
@@ -473,6 +623,7 @@ class RemoteSequential:
             if self._session_id is not None:
                 self._session_route = [dict(node) for node in ordered_nodes]
 
+        self._assert_route_health(ordered_nodes)
         receipt_route = self._receipt_route(ordered_nodes)
         if not route_reused:
             logger.info(
@@ -649,6 +800,12 @@ class RemoteSequential:
                         peer_id[:8],
                         elapsed_seconds,
                     )
+                if node_info is not None:
+                    self.health_registry.record_success(
+                        ProviderKey.from_node(node_info),
+                        now=time.time(),
+                        latency_ms=elapsed_seconds * 1000,
+                    )
                 return result
             except Exception as e:
                 last_error = e
@@ -674,15 +831,27 @@ class RemoteSequential:
                         time.sleep(backoff)
                 else:
                     break
-        raise RuntimeError(
+        terminal_error = RuntimeError(
             f"RPC request {request_id} to node {peer_id[:8]} failed after "
             f"{attempted}/{policy.max_attempts} attempt(s) "
             f"({classify_rpc_error(last_error) if last_error else 'unknown'}). "
             f"Last error: {last_error}"
         )
+        if node_info is not None:
+            self.health_registry.record_failure(
+                ProviderKey.from_node(node_info),
+                now=time.time(),
+                reason=str(terminal_error),
+            )
+        raise terminal_error
 
     def validate_reachable_route(self) -> list[dict]:
         """Validate coverage and prove that every selected expert can answer RPC metadata."""
+        if self.health_monitor is not None and self.health_monitor.running:
+            readiness = self.get_health_readiness()
+            if not readiness["route_ready"]:
+                raise RuntimeError("; ".join(readiness["reasons"]))
+            return [dict(node) for node in readiness["selected_route"]]
         route = self.validate_route()
         rpc_uids = [str(node["rpc_uid"]) for node in route]
         experts = get_experts(self.dht, rpc_uids)
@@ -813,16 +982,28 @@ class RemoteSequential:
 
     def _discover_nodes(self) -> list[dict]:
         """Two-level DHT scan: members list → per-node metadata."""
-        nodes = []
-
         try:
-            result = self.dht.get(f"{self.dht_prefix}.members", latest=True)
-            if result is None or not isinstance(result.value, list):
-                return []
-            peer_ids: list[str] = result.value
-        except Exception as e:
-            logger.warning(f"DHT members lookup failed: {e}")
+            nodes, errors = self._scan_node_metadata()
+        except Exception as exc:
+            logger.warning("DHT members lookup failed: %s", exc)
             return []
+        for error in errors:
+            logger.warning(
+                "Failed to fetch or validate metadata for %s: %s",
+                str(error.get("peer_id", "unknown"))[:8],
+                error.get("reason", "invalid metadata"),
+            )
+        logger.info(f"Discovered {len(nodes)} node(s) on '{self.dht_prefix}'")
+        return nodes
+
+    def _scan_node_metadata(self) -> tuple[list[dict], list[dict]]:
+        """Return validated providers and distinct protocol-advertisement errors."""
+        nodes: list[dict] = []
+        errors: list[dict] = []
+        result = self.dht.get(f"{self.dht_prefix}.members", latest=True)
+        if result is None or not isinstance(result.value, list):
+            return nodes, errors
+        peer_ids: list[str] = result.value
 
         for peer_id in peer_ids:
             try:
@@ -835,11 +1016,16 @@ class RemoteSequential:
                 info = self._validate_node_metadata(result.value, str(peer_id))
                 nodes.append(info)
 
-            except Exception as e:
-                logger.warning(f"Failed to fetch or validate metadata for {peer_id[:8]}: {e}")
-
-        logger.info(f"Discovered {len(nodes)} node(s) on '{self.dht_prefix}'")
-        return nodes
+            except Exception as exc:
+                errors.append(
+                    {
+                        "peer_id": str(peer_id),
+                        "model_name": self.model_name or "unknown",
+                        "kind": "protocol_incompatible",
+                        "reason": str(exc),
+                    }
+                )
+        return nodes, errors
 
     # ------------------------------------------------------------------
     # Coverage check

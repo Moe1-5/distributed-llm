@@ -619,7 +619,7 @@ def _shutdown_client_dht(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global gpu_monitor
+    global gpu_monitor, generator
     _validate_environment()
     gpu_monitor = GPUMonitor(interval=2.0)
     gpu_monitor.start()
@@ -629,6 +629,8 @@ async def lifespan(app: FastAPI):
     _lifecycle_jobs.cancel_all()
     if gpu_monitor is not None: gpu_monitor.stop()
     node_shutdown_results = _shutdown_local_nodes()
+    _cleanup_failed_generator(generator)
+    generator = None
     client_shutdown_result = _shutdown_client_dht()
     logger.info(
         "Shutdown cleanup status | local_nodes=%s client_dht=%s",
@@ -1832,6 +1834,8 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         req.dht_prefix,
     )
     try:
+        _cleanup_failed_generator(generator)
+        generator = None
         _shutdown_client_dht()
 
         client_dht = hivemind.DHT(**_generator_dht_kwargs(peers))
@@ -1859,6 +1863,9 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         await loop.run_in_executor(None, generator.load)
         if not generator.is_loaded():
             raise RuntimeError("generator.load() completed but is_loaded() is False")
+        start_health_monitor = getattr(generator.sequential, "start_health_monitor", None)
+        if callable(start_health_monitor):
+            start_health_monitor()
 
         startup_duration_ms = (time.perf_counter() - startup_started_at) * 1000
         set_startup_duration = getattr(generator, "set_startup_duration_ms", None)
@@ -1941,16 +1948,26 @@ async def get_generator_status() -> dict:
             "reasons": ["Generator not loaded."],
             "node_trace": [],
             "performance": None,
+            "health": None,
         }
 
     reasons: list[str] = []
     node_trace: list[str] = []
     route_ready = False
+    health: Optional[dict] = None
 
     route_validation_started_at = time.perf_counter()
     try:
-        route = await asyncio.to_thread(generator.sequential.validate_reachable_route)
-        route_ready = True
+        health_getter = getattr(generator.sequential, "get_health_readiness", None)
+        if callable(health_getter):
+            health = await asyncio.to_thread(health_getter)
+        if health is not None and health.get("enabled"):
+            route = health.get("selected_route", [])
+            route_ready = bool(health.get("route_ready"))
+            reasons.extend(str(reason) for reason in health.get("reasons", []))
+        else:
+            route = await asyncio.to_thread(generator.sequential.validate_reachable_route)
+            route_ready = True
         node_trace = _format_route_trace(route)
     except Exception as e:
         reasons.append(str(e))
@@ -1976,6 +1993,7 @@ async def get_generator_status() -> dict:
         "reasons": reasons,
         "node_trace": node_trace,
         "performance": performance,
+        "health": health,
     }
 
 
@@ -1985,6 +2003,20 @@ async def stop_generator() -> dict:
         return {"status": "not_running"}
     generator.request_stop()
     return {"status": "stop_requested"}
+
+
+@app.post("/generator/unload")
+async def unload_generator() -> dict:
+    """Stop the generator lifecycle, then release its DHT transport."""
+    global generator
+    if generator is None:
+        return {"status": "not_running"}
+    candidate = generator
+    generator = None
+    candidate.request_stop()
+    await asyncio.to_thread(candidate.unload)
+    network = await asyncio.to_thread(_shutdown_client_dht)
+    return {"status": "unloaded", "network": network}
 
 
 @app.post("/generator/parity/next-token")

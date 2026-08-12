@@ -306,6 +306,9 @@ class DistributedGenerator:
 
     def unload(self) -> None:
         """Release local model components after failed startup or explicit teardown."""
+        stop_health_monitor = getattr(self.sequential, "stop_health_monitor", None)
+        if callable(stop_health_monitor):
+            stop_health_monitor()
         self._loaded = False
         self._stop_requested = True
         self.tokenizer = None

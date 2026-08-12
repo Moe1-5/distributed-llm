@@ -92,7 +92,9 @@ On the cached TinyLlama checkpoint, a measured one-layer CPU float32 load comple
 
 When incentives are in shadow or credit mode, selected nodes may advertise a separate receipt expert with signed Ed25519 presence. The generator signs the complete route and BLAKE3 input commitment, validates the worker's signed response commitment, and countersigns accepted output. Legacy fallback is allowed only when the advertised receipt expert is absent before execution; ambiguous failures stop without duplicate work or credit. A project-owned FastAPI service validates pairs and stores an append-only SQLite WAL ledger; credits remain read-only and non-transferable.
 
-When serving and generating on the same machine, generator startup directly seeds matching local node multiaddresses alongside configured bootstrap peers. Generator peers enable relay dialing. Readiness resolves every selected expert and probes RPC metadata so DHT coverage or a claimed relay address alone cannot produce a false-ready state.
+When serving and generating on the same machine, generator startup directly seeds matching local node multiaddresses alongside configured bootstrap peers. Generator peers enable relay dialing. A lifecycle-owned health monitor discovers DHT advertisements every two seconds by default, probes selected experts every five seconds and standbys every fifteen, and caches independent DHT, transport, protocol, and RPC-health signals. Generator status reads that snapshot without launching another blocking probe.
+
+Provider health moves through checking, healthy, degraded, and offline. One transient failure does not change a healthy route; two consecutive failures invalidate readiness, four mark the provider offline, and two successes are required to recover. The health revision changes only when route-relevant health changes. Generator unload stops the monitor before closing the cached remote-expert P2P client and DHT.
 
 `DistributedGenerator` loads local model components and performs autoregressive generation through that route. One immutable route snapshot is discovered and validated per generation session instead of once per token. Base models preserve raw completion prompts, while chat and instruct models apply the publisher tokenizer chat template once with a generation prompt. Stream chunks are derived from cumulative tokenizer decoding so concatenating them preserves spaces and matches the final decoded sequence. The generator also supports exact generation controls, stop requests, route readiness, next-token parity probes, generated-output comparisons, and JSON trace artifacts. Generator status exposes startup/load duration, current route-probe duration, latest time to first token, total generation duration, token throughput, and per-hop RPC latency aggregates.
 
@@ -108,11 +110,11 @@ token ids
   -> token selection
 ```
 
-There is no distributed KV cache, health-aware failover, or concurrent generator registry yet. The selected route is stable for a generation session, but each token still processes the full sequence, so compute throughput remains prototype-grade.
+There is no distributed KV cache, health-aware failover, or concurrent generator registry yet. Continuous health invalidates a degraded selected route but deliberately does not choose a standby; Sprint 21 owns that behavior. The selected route is stable for a generation session, but each token still processes the full sequence, so compute throughput remains prototype-grade.
 
 ## Current Validation State
 
-- Backend regression suite: 204 tests and 26 subtests passing as of 2026-08-13, including selective layer parity and an independent-peer Hivemind receipt RPC with an activation larger than 128 KiB and a shadow-settlement round trip.
+- Backend regression suite: 216 tests and 26 subtests passing as of 2026-08-13, including cancellable provider-health probes, selective layer parity, and an independent-peer Hivemind receipt RPC with an activation larger than 128 KiB and a shadow-settlement round trip.
 - Frontend TypeScript checks, production build, 17 managed-launcher tests, Python compilation, and Windows package audit pass.
 - Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
 - Hugging Face device OAuth and real gated Llama 2 download have been exercised.

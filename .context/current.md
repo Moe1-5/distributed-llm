@@ -36,5 +36,5 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 17 implements adjacent-range route selection, capacity-aware serving plans, stale/redundancy conflicts, selected/standby route visibility, and the inference-to-serving gap workflow on `feature/coverage-aware-serving`; local acceptance passes and two-device validation remains open.
 - Sprint 13 has signed settlement, real local split parity, and clean cached remote-expert P2P teardown on `feature/remote-expert-p2p-cleanup`; only separate-device, live VPS shadow/restart, and credit-approval gates remain.
 - Live relay discovery and generator startup pass, but tensor forwards reset and retry; Sprint 22 owns correlated diagnostics and bounded completion.
-- Sprint 18 selective safetensors loading is implemented with a measured TinyLlama peak-RSS reduction from 4.73 GB to 230 MB; Sprints 19 through 21 remain the next approved health, RPC safety, and failover work.
+- Sprints 18 and 19 implement selective worker loading plus continuous provider health; Sprints 20 and 21 remain the next approved RPC safety and failover work.
 - Runtime commit `7c75b84` produced an audited Windows portable executable; physical relay/direct acceptance remains open.

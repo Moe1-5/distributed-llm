@@ -26,6 +26,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `backend/node/rpc_server.py`: legacy Hivemind expert plus optional receipt expert, unique RPC UIDs, and bounded server shutdown helpers.
 - `backend/node/gpu_monitor.py`: CPU, RAM, GPU, and VRAM sampling.
 - `backend/client/sequential.py`: DHT metadata validation, coverage-aware route planning, legacy/receipt RPC lookup and fail-open retry, settlement submission, and route traces.
+- `backend/client/health.py`: typed provider health state, DHT/protocol/transport signals, revision snapshots, and lifecycle-owned bounded metadata probes.
 - `backend/client/generation.py`: tokenizer/local components, architecture preparation, distributed autoregressive generation, sampling controls, cancellation, unload cleanup, parity probes, and trace generation.
 - `backend/client/distributed_model.py`: reserved model-level facade; currently not the primary runtime path.
 - `backend/models/architecture_adapter.py`: explicit OPT and Llama-family adapter behavior used by generation/handler paths.

@@ -870,9 +870,9 @@ export default function Network(): React.JSX.Element {
     setGenLoading(true)
 
     try {
-      const res = await api.stopGenerator()
-      if (res.status === 'stop_requested') {
-        log('Generator stop requested', 'success')
+      const res = await api.unloadGenerator()
+      if (res.status === 'unloaded') {
+        log('Generator stopped and local resources released', 'success')
       } else {
         log(`Generator status: ${res.status}`, 'info')
       }
