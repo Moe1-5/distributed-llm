@@ -9,6 +9,7 @@
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react'
+import { applyIndependently } from '../api/independentRefresh'
 import { api, createStreamSocket, type GeneratorStatus } from '../api/client'
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,7 @@ export default function Chat(): React.JSX.Element {
   const socketRef = useRef<ReturnType<typeof createStreamSocket> | null>(null)
   const mountedRef = useRef(true)
   const readinessIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const readinessInFlightRef = useRef(false)
 
   // ---------------------------------------------------------------------------
   // Cleanup on unmount
@@ -80,17 +82,29 @@ export default function Chat(): React.JSX.Element {
   }, [])
 
   const refreshReadiness = useCallback(async () => {
+    if (readinessInFlightRef.current) return
+    readinessInFlightRef.current = true
     try {
-      const [, generator] = await Promise.all([api.getStatus(), api.getGeneratorStatus()])
-      if (!mountedRef.current) return
-      setGeneratorStatus(generator)
-      setBackendState('online')
-      setReadinessError(null)
-    } catch (err) {
-      if (!mountedRef.current) return
-      setBackendState('offline')
-      setGeneratorStatus(null)
-      setReadinessError(err instanceof Error ? err.message : 'Backend readiness check failed')
+      const statusRequest = applyIndependently(api.getStatus(), () => {
+        if (!mountedRef.current) return
+        setBackendState('online')
+        setReadinessError(null)
+      }, (err) => {
+        if (!mountedRef.current) return
+        setBackendState('offline')
+        setReadinessError(err instanceof Error ? err.message : 'Backend readiness check failed')
+      })
+      const generatorRequest = applyIndependently(api.getGeneratorStatus(), (generator) => {
+        if (!mountedRef.current) return
+        setGeneratorStatus(generator)
+      }, (err) => {
+        if (!mountedRef.current) return
+        setGeneratorStatus(null)
+        setReadinessError(err instanceof Error ? err.message : 'Generator readiness check failed')
+      })
+      await Promise.allSettled([statusRequest, generatorRequest])
+    } finally {
+      readinessInFlightRef.current = false
     }
   }, [])
 

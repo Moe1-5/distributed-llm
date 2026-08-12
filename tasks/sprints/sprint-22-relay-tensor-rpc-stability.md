@@ -45,9 +45,9 @@ This sprint owns the immediate inference blocker. It must distinguish worker exe
 
 ## Acceptance Criteria
 
-- [ ] Every tensor RPC attempt has correlated client and worker diagnostics.
+- [x] Every tensor RPC attempt has correlated client and worker diagnostics.
 - [x] Retry count and backoff are finite, validated, and visible in the terminal error.
-- [ ] Cancellation stops additional attempts promptly.
+- [x] Cancellation stops additional attempts promptly.
 - [x] A representative activation larger than 128 KiB crosses a real Hivemind RPC locally.
 - [x] Failed or uncertain attempts create no accepted useful-work settlement.
 - [ ] Two physical devices complete inference through the VPS relay without a retry loop.
@@ -67,3 +67,16 @@ This sprint owns the immediate inference blocker. It must distinguish worker exe
 - What changed: added validated RPC attempt policy and failure classification, stopped ambiguous reset retries, restricted receipt fallback to pre-execution absence, reused one route per generation session, added request/worker timing evidence, restored dialing-only generator startup, and enabled float-sixteen wire compression only for legacy inference.
 - Why: live relay calls reset after transferring data, while repeated blind attempts could duplicate completed work; route discovery and uncompressed activations also added avoidable latency and traffic.
 - Status: 195 backend tests plus 22 subtests pass, including a real exact Hivemind receipt activation larger than 128 KiB and compression restoration coverage. A correlated physical two-device relay generation remains the acceptance gate; cancellable RPC execution timeout remains owned by Sprint 20 because Hivemind's synchronous expert call cannot be safely abandoned without leaving remote work running.
+
+### 2026-08-13 - Make generation cancellation prompt and accounting-safe
+
+- What changed: moved synchronous Hivemind route forwards off the FastAPI event loop and threaded one cancellation event through same-peer retries, retry backoff, route attempts, and hops.
+- Semantics: an already-dispatched remote kernel is allowed to finish, but its result and pending receipts are discarded after cancellation. No additional retry, alternate route, or downstream hop starts.
+- Evidence: controlled tests interrupt a five-second retry backoff after one call and keep the event loop responsive. The real local split probe completed 26.522 milliseconds after a stop request during active route work, generated no token, and did not call the second hop.
+- Remaining gate: correlated generator and worker diagnostics plus complete inference still require the two-device VPS relay run.
+
+### 2026-08-13 - Correlate legacy tensor attempts without changing the RPC schema
+
+- What changed: successful and failed generator attempts now log request ID, hop, peer, RPC UID, attempt budget, range, tensor shape, byte count, and duration. Legacy workers log the matching RPC UID, range, shape, bytes, duration, and exception state around execution.
+- Why: ordinary non-receipt inference cannot carry application metadata without changing the established expert tensor schema, but the shared RPC UID and non-secret tensor metadata provide a deterministic join across generator and worker logs.
+- Verification: the full backend suite passes with 250 tests and 54 subtests. A physical relay generation remains the only transport acceptance gate.

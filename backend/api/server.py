@@ -2024,7 +2024,8 @@ async def compare_generator_next_token(req: NextTokenParityRequest) -> dict:
     if generator is None or not generator.is_loaded():
         raise HTTPException(status_code=503, detail="Generator not ready.")
     try:
-        return generator.compare_next_token_logits(
+        return await asyncio.to_thread(
+            generator.compare_next_token_logits,
             prompt=req.prompt,
             atol=req.atol,
             rtol=req.rtol,
@@ -2058,7 +2059,8 @@ async def trace_generator(req: GenerationTraceRequest) -> dict:
     if generator is None or not generator.is_loaded():
         raise HTTPException(status_code=503, detail="Generator not ready.")
     try:
-        trace = generator.trace_generation(
+        trace = await asyncio.to_thread(
+            generator.trace_generation,
             prompt=req.prompt,
             max_new_tokens=req.max_new_tokens,
             temperature=req.temperature,

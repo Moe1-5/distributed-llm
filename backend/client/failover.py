@@ -43,6 +43,10 @@ class RouteAttemptError(RuntimeError):
         self.__cause__ = cause
 
 
+class RouteCancellationError(RuntimeError):
+    """Raised when local cancellation prevents further route work."""
+
+
 def get_route_failover_config() -> RouteFailoverConfig:
     return RouteFailoverConfig(
         max_attempts=int(os.getenv("DISTRIBLLM_ROUTE_MAX_ATTEMPTS", "2")),

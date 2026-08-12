@@ -119,12 +119,18 @@ class _HandlerModule(nn.Module):
     try to serialize the full model weights over the network.
     """
 
-    def __init__(self, handler: InferenceHandler, safety: RPCSafetyController):
+    def __init__(
+        self,
+        handler: InferenceHandler,
+        safety: RPCSafetyController,
+        rpc_uid: str = "unknown",
+    ):
         super().__init__()
         if not handler.is_loaded():
             raise RuntimeError("Handler must be loaded before wrapping")
         self._handler = handler
         self._safety = safety
+        self._rpc_uid = rpc_uid
         self._supports_deadline = "deadline" in inspect.signature(handler.forward).parameters
 
     def forward(
@@ -151,15 +157,19 @@ class _HandlerModule(nn.Module):
             output = self._safety.execute(hidden_states, execute)
         except Exception:
             logger.exception(
-                "Expert forward failed | layers=%s-%s shape=%s",
+                "Expert forward failed | rpc_uid=%s layers=%s-%s shape=%s bytes=%s",
+                self._rpc_uid,
                 self._handler.layer_start,
                 self._handler.layer_end,
                 tuple(hidden_states.shape),
+                hidden_states.numel() * hidden_states.element_size(),
             )
             raise
         elapsed_ms = (time.perf_counter() - started_at) * 1000
         logger.info(
-            "Expert forward complete | layers=%s-%s shape=%s bytes=%s elapsed_ms=%.1f",
+            "Expert forward complete | rpc_uid=%s layers=%s-%s shape=%s bytes=%s "
+            "elapsed_ms=%.1f",
+            self._rpc_uid,
             self._handler.layer_start,
             self._handler.layer_end,
             tuple(hidden_states.shape),
@@ -398,7 +408,7 @@ class RPCServer:
 
             logger.info(f"Starting RPC | uid={self._uid} | hidden_size={hidden_size}")
 
-            module = _HandlerModule(self.handler, self.safety_controller)
+            module = _HandlerModule(self.handler, self.safety_controller, self._uid)
             # ── Tensor schemas ────────────────────────────────────────────────
             # args_schema   → positional args to forward() after self
             # kwargs_schema → keyword args; hivemind stores the keys as

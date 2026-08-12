@@ -31,7 +31,7 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 17 implements adjacent-range route selection, capacity-aware serving plans, stale/redundancy conflicts, selected/standby route visibility, and the inference-to-serving gap workflow on `feature/coverage-aware-serving`; local acceptance passes and two-device validation remains open.
 - Sprint 13 has signed settlement, real local split parity, and clean cached remote-expert P2P teardown on `feature/remote-expert-p2p-cleanup`; only separate-device, live VPS shadow/restart, and credit-approval gates remain.
 - Sprint 22 prevents the generator relay-daemon panic, classifies RPC certainty, bounds retries, reuses sessions, and compresses legacy activation tensors; physical relay inference remains open.
-- Sprint 23 implements asynchronous lifecycle jobs, prompt stop/unload paths, bounded status calls, and responsive frontend controls.
+- Sprint 23 implements asynchronous jobs, prompt cancellation, a bounded warm component cache, and measured local startup/generation baselines.
 - Sprint 18 selectively materializes only served safetensor layers with strict fallback and measured TinyLlama memory/startup evidence.
 - Sprint 19 continuously probes DHT/protocol/transport/RPC health with hysteresis, deadlines, bounded concurrency, and clean lifecycle ownership.
 - Sprint 20 enforces tensor/metadata limits, bounded admission, cooperative deadlines, safe counters, and receipt accounting after successful output.

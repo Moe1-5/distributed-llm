@@ -6,6 +6,7 @@
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
 const WS_URL = import.meta.env.VITE_WS_BASE_URL ?? BASE_URL.replace(/^http/, 'ws')
 const REQUEST_TIMEOUT_MS = 8_000
+const FAST_REQUEST_TIMEOUT_MS = 1_500
 
 // ---------------------------------------------------------------------------
 // Types
@@ -325,6 +326,10 @@ export interface GenerationPerformance {
 export interface GeneratorPerformance {
   startup_duration_ms: number | null
   load_duration_ms: number | null
+  load_kind?: 'not_loaded' | 'cold_model_load' | 'warm_component_cache'
+  cold_load_duration_ms?: number | null
+  warm_load_duration_ms?: number | null
+  component_cache_entries?: number
   route_validation_ms?: number | null
   last_generation: GenerationPerformance | null
 }
@@ -549,14 +554,18 @@ function generationOptionsPayload(options: GenerationOptions): Record<string, un
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-async function fetchWithDeadline(path: string, init?: RequestInit): Promise<Response> {
+async function fetchWithDeadline(
+  path: string,
+  init?: RequestInit,
+  timeoutMs = REQUEST_TIMEOUT_MS
+): Promise<Response> {
   const controller = new AbortController()
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fetch(`${BASE_URL}${path}`, { ...init, signal: controller.signal })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error(`${init?.method ?? 'GET'} ${path} timed out after 8 seconds`)
+      throw new Error(`${init?.method ?? 'GET'} ${path} timed out after ${timeoutMs} ms`)
     }
     throw error
   } finally {
@@ -564,8 +573,8 @@ async function fetchWithDeadline(path: string, init?: RequestInit): Promise<Resp
   }
 }
 
-async function get<T>(path: string): Promise<T> {
-  const res = await fetchWithDeadline(path)
+async function get<T>(path: string, timeoutMs?: number): Promise<T> {
+  const res = await fetchWithDeadline(path, undefined, timeoutMs)
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`)
   return res.json() as Promise<T>
 }
@@ -637,8 +646,8 @@ async function del<T>(path: string): Promise<T> {
 
 export const api = {
   // Status
-  getStatus: () => get<NetworkStatus>('/status'),
-  getStats: () => get<Stats>('/stats'),
+  getStatus: () => get<NetworkStatus>('/status', FAST_REQUEST_TIMEOUT_MS),
+  getStats: () => get<Stats>('/stats', FAST_REQUEST_TIMEOUT_MS),
   getNodes: () => get<{ nodes: NodeInfo[]; error?: string; warning?: string }>('/nodes'),
   getLocalNodes: () => get<{ nodes: NodeInfo[] }>('/nodes/local'),
   getIncentives: () => get<IncentivesStatus>('/incentives/accounting'),
@@ -655,7 +664,7 @@ export const api = {
       models: ModelInfo[]
       token_available: boolean
       default_peers: string[]
-    }>('/models/catalog'),
+    }>('/models/catalog', FAST_REQUEST_TIMEOUT_MS),
   getServingPlan: (modelId: string, layerCount: number) =>
     get<ServingPlan>(
       `/models/${encodeURIComponent(modelId)}/serving-plan?layer_count=${encodeURIComponent(layerCount)}`

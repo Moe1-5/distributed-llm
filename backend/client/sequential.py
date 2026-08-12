@@ -30,6 +30,7 @@ appears to be running.
 import sys
 import time
 import traceback
+from threading import Event
 from typing import Optional
 from uuid import uuid4
  
@@ -48,6 +49,7 @@ from client.coverage import (
 )
 from client.failover import (
     RouteAttemptError,
+    RouteCancellationError,
     RouteFailoverConfig,
     get_route_failover_config,
 )
@@ -732,6 +734,7 @@ class RemoteSequential:
         position_ids: Optional[torch.Tensor],
         request_id: str,
         input_bytes: int,
+        cancel_event: Optional[Event],
     ) -> tuple[torch.Tensor, list[str], list[dict], list[dict]]:
         hidden_states = initial_hidden_states
         receipt_route = self._receipt_route(route)
@@ -739,6 +742,7 @@ class RemoteSequential:
         hop_metrics: list[dict] = []
         pending_receipts: list[dict] = []
         for hop_idx, node_info in enumerate(route):
+            self._raise_if_cancelled(cancel_event)
             peer_id = node_info["peer_id"]
             layer_start = node_info["layer_start"]
             layer_end = node_info["layer_end"]
@@ -760,6 +764,7 @@ class RemoteSequential:
                 pending_receipts=pending_receipts,
                 request_id=request_id,
                 hop_index=hop_idx,
+                cancel_event=cancel_event,
             )
             hop_ms = (time.perf_counter() - t_hop) * 1000
             hop_metrics.append(
@@ -777,6 +782,25 @@ class RemoteSequential:
             node_trace.append(f"{peer_id[:8]}… (layers {layer_start}→{layer_end})")
         return hidden_states, node_trace, hop_metrics, pending_receipts
 
+    @staticmethod
+    def _raise_if_cancelled(cancel_event: Optional[Event]) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RouteCancellationError(
+                "Generation was cancelled; no additional route work was started."
+            )
+
+    @staticmethod
+    def _wait_backoff(seconds: float, cancel_event: Optional[Event]) -> None:
+        if seconds <= 0:
+            return
+        if cancel_event is not None:
+            if cancel_event.wait(seconds):
+                raise RouteCancellationError(
+                    "Generation was cancelled during retry backoff."
+                )
+            return
+        time.sleep(seconds)
+
     # ------------------------------------------------------------------
     # Forward pass
     # ------------------------------------------------------------------
@@ -786,12 +810,14 @@ class RemoteSequential:
         hidden_states:  torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids:   Optional[torch.Tensor] = None,
+        cancel_event: Optional[Event] = None,
     ) -> tuple[torch.Tensor, list[str]]:
         if hidden_states.dim() != 3:
             raise ValueError(
                 f"hidden_states must be [batch, seq_len, hidden_size], got {hidden_states.shape}"
             )
  
+        self._raise_if_cancelled(cancel_event)
         t_start = time.perf_counter()
         input_bytes = sum(
             tensor.numel() * tensor.element_size()
@@ -836,6 +862,7 @@ class RemoteSequential:
             attempt_count < self.failover_config.max_attempts
             and candidate_index < len(routes)
         ):
+            self._raise_if_cancelled(cancel_event)
             candidate = routes[candidate_index]
             candidate_index += 1
             route = [dict(node) for node in candidate["route"]]
@@ -862,8 +889,18 @@ class RemoteSequential:
                         position_ids=position_ids,
                         request_id=request_id,
                         input_bytes=input_bytes,
+                        cancel_event=cancel_event,
                     )
                 )
+                self._raise_if_cancelled(cancel_event)
+            except RouteCancellationError:
+                self._last_failover = {
+                    "attempt_count": attempt_count,
+                    "failed_over": False,
+                    "reasons": failed_attempts,
+                    "cancelled": True,
+                }
+                raise
             except RouteAttemptError as exc:
                 failed_at = time.time()
                 self._route_quarantine[provider_identity(exc.node)] = failed_at
@@ -892,8 +929,7 @@ class RemoteSequential:
                 if attempt_count >= self.failover_config.max_attempts:
                     break
                 backoff = self.failover_config.backoff_for_attempt(attempt_count)
-                if backoff:
-                    time.sleep(backoff)
+                self._wait_backoff(backoff, cancel_event)
                 continue
             accepted_route = route
             for submission in pending_receipts:
@@ -985,12 +1021,14 @@ class RemoteSequential:
         pending_receipts: Optional[list[dict]] = None,
         request_id: Optional[str] = None,
         hop_index: int = 0,
+        cancel_event: Optional[Event] = None,
     ) -> torch.Tensor:
         request_id = request_id or str(uuid4())
         policy = self.rpc_attempt_policy
         last_error: Optional[Exception] = None
         attempted = 0
         for attempt in range(policy.max_attempts):
+            self._raise_if_cancelled(cancel_event)
             attempted = attempt + 1
             attempt_started_at = time.perf_counter()
             try:
@@ -1046,18 +1084,36 @@ class RemoteSequential:
                         now=time.time(),
                         latency_ms=elapsed_seconds * 1000,
                     )
+                logger.info(
+                    "request=%s hop=%s peer=%s rpc_uid=%s attempt=%s/%s "
+                    "layers=%s-%s shape=%s bytes=%s elapsed_ms=%.1f status=complete",
+                    request_id,
+                    hop_index + 1,
+                    peer_id[:8],
+                    rpc_uid,
+                    attempted,
+                    policy.max_attempts,
+                    node_info.get("layer_start", "unknown") if node_info else "unknown",
+                    node_info.get("layer_end", "unknown") if node_info else "unknown",
+                    tuple(hidden_states.shape),
+                    hidden_states.numel() * hidden_states.element_size(),
+                    elapsed_seconds * 1000,
+                )
                 return result
             except Exception as e:
+                if isinstance(e, RouteCancellationError):
+                    raise
                 last_error = e
                 elapsed_ms = (time.perf_counter() - attempt_started_at) * 1000
                 failure_class = classify_rpc_error(e)
                 retryable = is_retryable_rpc_error(e) and attempted < policy.max_attempts
                 logger.warning(
-                    "request=%s hop=%s peer=%s attempt=%s/%s elapsed_ms=%.1f "
+                    "request=%s hop=%s peer=%s rpc_uid=%s attempt=%s/%s elapsed_ms=%.1f "
                     "failure=%s retry=%s error=%s",
                     request_id,
                     hop_index + 1,
                     peer_id[:8],
+                    rpc_uid,
                     attempted,
                     policy.max_attempts,
                     elapsed_ms,
@@ -1067,8 +1123,7 @@ class RemoteSequential:
                 )
                 if retryable:
                     backoff = policy.backoff_seconds(attempted)
-                    if backoff:
-                        time.sleep(backoff)
+                    self._wait_backoff(backoff, cancel_event)
                 else:
                     break
         terminal_message = (

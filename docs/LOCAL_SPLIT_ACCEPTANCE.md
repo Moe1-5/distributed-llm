@@ -39,6 +39,8 @@ The 2026-08-13 CPU pass used Python 3.12.3, Hivemind 1.1.12, PyTorch 2.10.0, and
 
 After successful shutdown, the initial pass emitted destructor-time `no current event loop` messages and one pending control-client task. That pass was not patched or rerun in place. A later dedicated cleanup branch now closes Hivemind's DHT-cached replicated P2P control client before DHT shutdown. A fresh split pass retained exact inference/parity, reported `remote_expert_p2p_stopped: true`, left no `p2pd` process, and exited without destructor tracebacks or pending tasks.
 
+The 2026-08-13 responsive-generation pass retained exact OPT-125M parity and measured the ordinary local CPU path. Cold generator component load was 193.557 milliseconds; after unload placed the pruned local component shell in the bounded CPU cache, warm load was 0.196 milliseconds. First-token latency was 84.750 milliseconds, two-token generation completed in 179.568 milliseconds at 11.138 tokens per second, and route validation consumed 0.252 milliseconds across the request. A stop requested during an active route completed in 26.522 milliseconds with zero generated tokens and no second hop. These loopback numbers are a regression baseline, not a prediction of relay or larger-model performance.
+
 ## Local Failover Probe
 
 `backend/local_failover_probe.py` is the process-level prerequisite for Sprint 21. It starts two independent full-range Hivemind experts, performs one forward through the selected expert, stops that expert, and requires a second forward to restart from the original activation tensor through the complete replica. It verifies a two-attempt maximum, different accepted peer, output equivalence, no worker-side failed accounting, and complete process cleanup.

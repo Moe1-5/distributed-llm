@@ -240,6 +240,7 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
             local_model_path=model_path,
         )
         generator.load()
+        cold_start = generator.get_performance_snapshot()
 
         parity = generator.compare_next_token_logits(
             prompt=options.prompt,
@@ -253,6 +254,52 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
                 do_sample=False,
             )
         )
+        generator.unload()
+        warm_generator = DistributedGenerator(
+            model_name=model_name,
+            sequential=sequential,
+            device="cpu",
+            dtype=torch.float32,
+            local_model_path=model_path,
+        )
+        warm_generator.load()
+        warm_start = warm_generator.get_performance_snapshot()
+        generator = warm_generator
+
+        async def cancellation_baseline() -> dict[str, Any]:
+            started_at = time.perf_counter()
+
+            async def consume() -> list[dict[str, Any]]:
+                return [
+                    chunk
+                    async for chunk in generator.generate_stream(
+                        prompt=options.prompt,
+                        max_new_tokens=64,
+                        do_sample=False,
+                    )
+                ]
+
+            task = asyncio.create_task(consume())
+            await asyncio.sleep(0.01)
+            requested_at = time.perf_counter()
+            generator.request_stop()
+            chunks = await asyncio.wait_for(task, timeout=5)
+            completed = next(
+                (chunk for chunk in chunks if chunk.get("done") is True),
+                {},
+            )
+            return {
+                "request_to_completion_ms": (
+                    time.perf_counter() - requested_at
+                ) * 1000,
+                "total_ms": (time.perf_counter() - started_at) * 1000,
+                "stopped": bool((completed.get("metrics") or {}).get("stopped")),
+                "generated_tokens": int(
+                    (completed.get("metrics") or {}).get("generated_tokens", 0)
+                ),
+            }
+
+        cancellation = asyncio.run(cancellation_baseline())
         route_evidence = _route_evidence(route)
         accounting = [_accounting_evidence(node) for node in nodes]
         expected_ranges = [(0, options.split_layer), (options.split_layer, total_layers)]
@@ -316,7 +363,13 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
                     "distributed_response",
                     "direct_generated_token_ids",
                     "node_trace",
+                    "performance",
                 )
+            },
+            "performance": {
+                "cold_start": cold_start,
+                "warm_start": warm_start,
+                "cancellation": cancellation,
             },
             "accounting": accounting,
             "elapsed_seconds": time.perf_counter() - started_at,

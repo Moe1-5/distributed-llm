@@ -1,9 +1,17 @@
 import unittest
+import threading
+import time
+import sys
+from pathlib import Path
 
 import torch
 
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND_DIR))
+
 from client.coverage import plan_health_aware_routes
 from client.failover import RouteAttemptError, RouteFailoverConfig
+from client.failover import RouteCancellationError
 from client.sequential import RemoteSequential
 
 
@@ -250,6 +258,40 @@ class RouteFailoverTests(unittest.TestCase):
         instance.forward(torch.zeros(1, 1, 2))
         self.assertEqual(discoveries, 1)
         self.assertEqual(calls, ["a", "a", "b"])
+
+    def test_cancellation_interrupts_backoff_and_prevents_more_attempts(self) -> None:
+        nodes = [provider("a", 0, 4), provider("b", 0, 4)]
+        instance = self.sequential(nodes)
+        instance.rpc_attempt_policy = type(
+            "Policy",
+            (),
+            {
+                "max_attempts": 2,
+                "slow_request_warning_seconds": 30,
+                "backoff_seconds": staticmethod(lambda _attempt: 5.0),
+            },
+        )()
+        cancel_event = threading.Event()
+        calls: list[str] = []
+
+        def rpc_forward(*args, **kwargs):
+            calls.append(str(args[1]))
+            raise RuntimeError("expert not found")
+
+        instance._rpc_forward = rpc_forward
+
+        def cancel() -> None:
+            time.sleep(0.05)
+            cancel_event.set()
+
+        thread = threading.Thread(target=cancel)
+        thread.start()
+        started_at = time.monotonic()
+        with self.assertRaises(RouteCancellationError):
+            instance.forward(torch.zeros(1, 1, 2), cancel_event=cancel_event)
+        thread.join()
+        self.assertLess(time.monotonic() - started_at, 1.0)
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

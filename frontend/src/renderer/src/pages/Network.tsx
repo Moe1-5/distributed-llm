@@ -9,8 +9,9 @@
  *   - Generator start uses model's num_layers from server — no manual input
  */
 
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../api/client'
+import { applyIndependently } from '../api/independentRefresh'
 import type {
   HuggingFaceConnection,
   HuggingFaceDeviceFlow,
@@ -175,6 +176,8 @@ export default function Network(): React.JSX.Element {
   const [genProgress, setGenProgress] = useState('starting')
   const [genJobId, setGenJobId] = useState<string | null>(null)
   const [genReady, setGenReady] = useState(false)
+  const servingPlanPromiseRef = useRef<Promise<ServingPlan | null> | null>(null)
+  const inferencePlanPromiseRef = useRef<Promise<void> | null>(null)
 
   // Status badges
   const [backendOk, setBackendOk] = useState(false)
@@ -193,27 +196,14 @@ export default function Network(): React.JSX.Element {
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
+    let active = true
     const loadInitial = async (): Promise<void> => {
-      try {
-        const [modelsResult, statusResult, hfResult] = await Promise.allSettled([
-          api.getModelCatalog(),
-          api.getStatus(),
-          api.getHuggingFaceConnection()
-        ])
-
-        if (modelsResult.status === 'fulfilled') setModels(modelsResult.value.models)
-        if (statusResult.status === 'fulfilled') {
-          setLocalImports(statusResult.value.local_models ?? [])
-          setBackendOk(true)
-          setGpuAvailable(statusResult.value.gpu_available)
-          setNodeRunning(statusResult.value.node_running)
-          setGenReady(statusResult.value.generator_ready)
-        }
-        if (hfResult.status === 'fulfilled') setHfConnection(hfResult.value)
-
-        // Auto-select first model
-        if (modelsResult.status === 'fulfilled' && modelsResult.value.models.length > 0) {
-          const first = modelsResult.value.models[0]
+      const modelsRequest = applyIndependently(api.getModelCatalog(), (result) => {
+        if (!active) return
+        setModels(result.models)
+        setModelsLoading(false)
+        if (result.models.length > 0) {
+          const first = result.models[0]
           setServeModel(first.id)
           setInferModel(first.id)
           const initialLayerCount = Math.max(1, Math.ceil(first.num_layers / 2))
@@ -221,16 +211,29 @@ export default function Network(): React.JSX.Element {
           setLayerStart(0)
           setLayerEnd(initialLayerCount)
         }
-
-        if (statusResult.status === 'rejected') throw statusResult.reason
-      } catch {
-        setBackendOk(false)
-      } finally {
-        setModelsLoading(false)
-      }
+      }, () => {
+        if (active) setModelsLoading(false)
+      })
+      const statusRequest = applyIndependently(api.getStatus(), (status) => {
+        if (!active) return
+        setLocalImports(status.local_models ?? [])
+        setBackendOk(true)
+        setGpuAvailable(status.gpu_available)
+        setNodeRunning(status.node_running)
+        setGenReady(status.generator_ready)
+      }, () => {
+        if (active) setBackendOk(false)
+      })
+      const hfRequest = applyIndependently(api.getHuggingFaceConnection(), (connection) => {
+        if (active) setHfConnection(connection)
+      })
+      await Promise.allSettled([modelsRequest, statusRequest, hfRequest])
     }
 
     void loadInitial()
+    return () => {
+      active = false
+    }
   }, [])
 
   // ---------------------------------------------------------------------------
@@ -286,31 +289,49 @@ export default function Network(): React.JSX.Element {
 
   const refreshServingPlan = useCallback(async (): Promise<ServingPlan | null> => {
     if (!serveModel || !selectedServeModel) return null
-    const boundedCount = Math.min(Math.max(1, layerCount), selectedServeModel.num_layers)
-    setServingPlanLoading(true)
-    try {
-      const plan = await api.getServingPlan(serveModel, boundedCount)
-      setServingPlan(plan)
-      if (servingMode === 'recommended') {
-        setLayerStart(plan.recommendation.layer_start)
-        setLayerEnd(plan.recommendation.layer_end)
+    if (servingPlanPromiseRef.current) await servingPlanPromiseRef.current
+    const request = (async (): Promise<ServingPlan | null> => {
+      const boundedCount = Math.min(Math.max(1, layerCount), selectedServeModel.num_layers)
+      setServingPlanLoading(true)
+      try {
+        const plan = await api.getServingPlan(serveModel, boundedCount)
+        setServingPlan(plan)
+        if (servingMode === 'recommended') {
+          setLayerStart(plan.recommendation.layer_start)
+          setLayerEnd(plan.recommendation.layer_end)
+        }
+        return plan
+      } catch (err) {
+        log(err instanceof Error ? err.message : 'Could not refresh layer coverage', 'error')
+        return null
+      } finally {
+        setServingPlanLoading(false)
       }
-      return plan
-    } catch (err) {
-      log(err instanceof Error ? err.message : 'Could not refresh layer coverage', 'error')
-      return null
+    })()
+    servingPlanPromiseRef.current = request
+    try {
+      return await request
     } finally {
-      setServingPlanLoading(false)
+      if (servingPlanPromiseRef.current === request) servingPlanPromiseRef.current = null
     }
   }, [layerCount, log, selectedServeModel, serveModel, servingMode])
 
   const refreshInferencePlan = useCallback(async (): Promise<void> => {
     if (!inferModel || !selectedInferModel) return
-    const capacity = Math.max(1, Math.ceil(selectedInferModel.num_layers / 2))
+    if (inferencePlanPromiseRef.current) await inferencePlanPromiseRef.current
+    const request = (async (): Promise<void> => {
+      const capacity = Math.max(1, Math.ceil(selectedInferModel.num_layers / 2))
+      try {
+        setInferencePlan(await api.getServingPlan(inferModel, capacity))
+      } catch {
+        setInferencePlan(null)
+      }
+    })()
+    inferencePlanPromiseRef.current = request
     try {
-      setInferencePlan(await api.getServingPlan(inferModel, capacity))
-    } catch {
-      setInferencePlan(null)
+      await request
+    } finally {
+      if (inferencePlanPromiseRef.current === request) inferencePlanPromiseRef.current = null
     }
   }, [inferModel, selectedInferModel])
 

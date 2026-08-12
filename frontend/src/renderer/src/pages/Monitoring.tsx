@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, type GeneratorStatus, type ModelInfo, type NodeInfo, type Stats } from '../api/client'
+import { applyIndependently } from '../api/independentRefresh'
 
 interface MonitoringState {
   generator: GeneratorStatus | null
@@ -83,41 +84,45 @@ export default function Monitoring(): React.JSX.Element {
   const refresh = useCallback(async () => {
     if (refreshInFlightRef.current) return
     refreshInFlightRef.current = true
-    try {
-      const [generatorResult, modelsResult, nodesResult, statsResult] = await Promise.allSettled([
-        api.getGeneratorStatus(),
-        api.getModels(),
-        api.getNodes(),
-        api.getStats()
-      ])
-
-      setState((prev) => {
-        const generator =
-          generatorResult.status === 'fulfilled' ? generatorResult.value : prev.generator
-        const models = modelsResult.status === 'fulfilled' ? modelsResult.value.models : prev.models
-        const nodes = nodesResult.status === 'fulfilled' ? nodesResult.value.nodes ?? [] : prev.nodes
-        const stats = statsResult.status === 'fulfilled' ? statsResult.value : prev.stats
-        const selectedModel =
-          prev.selectedModel || generator?.model_name || models[0]?.id || ''
-        const failures = [generatorResult, modelsResult, nodesResult, statsResult].filter(
-          (result) => result.status === 'rejected'
-        )
-
-        return {
-          generator,
-          models,
-          nodes,
-          stats,
-          selectedModel,
-          lastUpdated: new Date(),
-          lastError: failures.length > 0 ? `${failures.length} monitor request(s) timed out` : null
-        }
-      })
-    } catch (err) {
+    setState((prev) => ({ ...prev, lastError: null }))
+    let failures = 0
+    const failed = (): void => {
+      failures += 1
       setState((prev) => ({
         ...prev,
-        lastError: err instanceof Error ? err.message : 'Network monitor refresh failed'
+        lastError: `${failures} monitor request(s) timed out`
       }))
+    }
+    const requests = [
+      applyIndependently(api.getGeneratorStatus(), (generator) => {
+        setState((prev) => ({
+          ...prev,
+          generator,
+          selectedModel: prev.selectedModel || generator.model_name || '',
+          lastUpdated: new Date()
+        }))
+      }, failed),
+      applyIndependently(api.getModels(), (result) => {
+        setState((prev) => ({
+          ...prev,
+          models: result.models,
+          selectedModel: prev.selectedModel || result.models[0]?.id || '',
+          lastUpdated: new Date()
+        }))
+      }, failed),
+      applyIndependently(api.getNodes(), (result) => {
+        setState((prev) => ({
+          ...prev,
+          nodes: result.nodes ?? [],
+          lastUpdated: new Date()
+        }))
+      }, failed),
+      applyIndependently(api.getStats(), (stats) => {
+        setState((prev) => ({ ...prev, stats, lastUpdated: new Date() }))
+      }, failed)
+    ]
+    try {
+      await Promise.allSettled(requests)
     } finally {
       refreshInFlightRef.current = false
     }

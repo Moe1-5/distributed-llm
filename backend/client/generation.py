@@ -13,9 +13,13 @@ Remote components (P2P network via RemoteSequential):
     - All transformer decoder layers
 """
 
+import asyncio
 import copy
+import inspect
+import threading
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import AsyncGenerator, Optional
 from uuid import uuid4
 
@@ -25,9 +29,26 @@ from hivemind.utils.logging import get_logger
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from constants import SUPPORTED_MODELS, DEFAULT_GEN_CONFIG
 from client.sequential import RemoteSequential
+from client.failover import RouteCancellationError
 from models.architecture_adapter import get_architecture_adapter
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _LocalComponentBundle:
+    tokenizer: object
+    model_shell: nn.Module
+    embed_tokens: nn.Embedding
+    position_embeddings: Optional[nn.Embedding]
+    norm: nn.Module
+    lm_head: nn.Linear
+    architecture_adapter: object
+
+
+_COMPONENT_CACHE_LOCK = threading.RLock()
+_COMPONENT_CACHE: dict[tuple[str, str, str], _LocalComponentBundle] = {}
+_COMPONENT_CACHE_LIMIT = 1
 
 
 class _ContextAwareTextDecoder:
@@ -115,9 +136,17 @@ class DistributedGenerator:
         self.lm_head:      Optional[nn.Linear]     = None
         self.architecture_adapter = None
         self._loaded_model: Optional[nn.Module] = None
+        self._reference_model: Optional[nn.Module] = None
+        self._reference_lock = threading.RLock()
+        self._model_shell_pruned = False
+        self._component_cache_key: Optional[tuple[str, str, str]] = None
         self._loaded = False
         self._stop_requested = False
+        self._stop_event = threading.Event()
         self._load_duration_ms: Optional[float] = None
+        self._load_kind = "not_loaded"
+        self._cold_load_duration_ms: Optional[float] = None
+        self._warm_load_duration_ms: Optional[float] = None
         self._startup_duration_ms: Optional[float] = None
         self._last_generation_metrics: Optional[dict] = None
 
@@ -219,6 +248,18 @@ class DistributedGenerator:
         )
         local_kwargs = {"local_files_only": True} if self.local_model_path else {}
 
+        cache_key = (self.model_name, str(source), str(self.dtype))
+        self._component_cache_key = cache_key
+        cached = self._take_cached_components(cache_key)
+        if cached is not None:
+            self._install_component_bundle(cached)
+            self._loaded = True
+            self._load_kind = "warm_component_cache"
+            self._load_duration_ms = (time.perf_counter() - started_at) * 1000
+            self._warm_load_duration_ms = self._load_duration_ms
+            logger.info("Local components restored from CPU cache in %.1fms.", self._load_duration_ms)
+            return
+
         self.tokenizer = AutoTokenizer.from_pretrained(source, **token_kwargs, **local_kwargs)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -256,12 +297,14 @@ class DistributedGenerator:
             component.requires_grad_(False)
 
         self._validate_loaded_components()
-
-        del model
+        self._prune_transformer_blocks(self._loaded_model)
+        self._model_shell_pruned = True
         torch.cuda.empty_cache()
 
         self._loaded = True
+        self._load_kind = "cold_model_load"
         self._load_duration_ms = (time.perf_counter() - started_at) * 1000
+        self._cold_load_duration_ms = self._load_duration_ms
         logger.info(
             "Local components loaded in %.1fms.",
             self._load_duration_ms,
@@ -274,8 +317,102 @@ class DistributedGenerator:
         return {
             "startup_duration_ms": self._startup_duration_ms,
             "load_duration_ms": self._load_duration_ms,
+            "load_kind": self._load_kind,
+            "cold_load_duration_ms": self._cold_load_duration_ms,
+            "warm_load_duration_ms": self._warm_load_duration_ms,
+            "component_cache_entries": self.component_cache_size(),
             "last_generation": copy.deepcopy(self._last_generation_metrics),
         }
+
+    @staticmethod
+    def component_cache_size() -> int:
+        with _COMPONENT_CACHE_LOCK:
+            return len(_COMPONENT_CACHE)
+
+    @staticmethod
+    def clear_component_cache() -> None:
+        with _COMPONENT_CACHE_LOCK:
+            _COMPONENT_CACHE.clear()
+
+    @staticmethod
+    def _prune_transformer_blocks(model: nn.Module) -> None:
+        decoder = getattr(getattr(model, "model", None), "decoder", None)
+        if decoder is not None and hasattr(decoder, "layers"):
+            decoder.layers = nn.ModuleList()
+            return
+        inner_model = getattr(model, "model", None)
+        if inner_model is not None and hasattr(inner_model, "layers"):
+            inner_model.layers = nn.ModuleList()
+            return
+        raise ValueError(
+            f"Cannot prune transformer blocks from {type(model).__name__}"
+        )
+
+    def _component_bundle(self) -> _LocalComponentBundle:
+        if any(
+            component is None
+            for component in (
+                self.tokenizer,
+                self._loaded_model,
+                self.embed_tokens,
+                self.norm,
+                self.lm_head,
+                self.architecture_adapter,
+            )
+        ):
+            raise RuntimeError("Cannot cache incomplete local generator components")
+        return _LocalComponentBundle(
+            tokenizer=self.tokenizer,
+            model_shell=self._loaded_model,
+            embed_tokens=self.embed_tokens,
+            position_embeddings=self.position_embeddings,
+            norm=self.norm,
+            lm_head=self.lm_head,
+            architecture_adapter=self.architecture_adapter,
+        )
+
+    def _store_cached_components(self, key: tuple[str, str, str]) -> None:
+        bundle = self._component_bundle()
+        for component in (
+            bundle.model_shell,
+            bundle.embed_tokens,
+            bundle.position_embeddings,
+            bundle.norm,
+            bundle.lm_head,
+        ):
+            if component is not None:
+                component.to("cpu")
+        with _COMPONENT_CACHE_LOCK:
+            _COMPONENT_CACHE.pop(key, None)
+            _COMPONENT_CACHE[key] = bundle
+            while len(_COMPONENT_CACHE) > _COMPONENT_CACHE_LIMIT:
+                oldest = next(iter(_COMPONENT_CACHE))
+                _COMPONENT_CACHE.pop(oldest, None)
+
+    @staticmethod
+    def _take_cached_components(
+        key: tuple[str, str, str],
+    ) -> Optional[_LocalComponentBundle]:
+        with _COMPONENT_CACHE_LOCK:
+            return _COMPONENT_CACHE.pop(key, None)
+
+    def _install_component_bundle(self, bundle: _LocalComponentBundle) -> None:
+        self.tokenizer = bundle.tokenizer
+        self._loaded_model = bundle.model_shell
+        self.embed_tokens = bundle.embed_tokens
+        self.position_embeddings = bundle.position_embeddings
+        self.norm = bundle.norm
+        self.lm_head = bundle.lm_head
+        self.architecture_adapter = bundle.architecture_adapter
+        self._model_shell_pruned = True
+        components = [self._loaded_model, self.embed_tokens, self.norm, self.lm_head]
+        if self.position_embeddings is not None:
+            components.append(self.position_embeddings)
+        for component in components:
+            component.to(self.device)
+            component.eval()
+            component.requires_grad_(False)
+        self._validate_loaded_components()
 
     def _validate_loaded_components(self) -> None:
         missing = []
@@ -310,7 +447,12 @@ class DistributedGenerator:
         if callable(stop_health_monitor):
             stop_health_monitor()
         self._loaded = False
-        self._stop_requested = True
+        self.request_stop()
+        if self._model_shell_pruned and self._component_cache_key is not None:
+            try:
+                self._store_cached_components(self._component_cache_key)
+            except RuntimeError:
+                logger.warning("Could not preserve incomplete generator component cache")
         self.tokenizer = None
         self.embed_tokens = None
         self.position_embeddings = None
@@ -318,6 +460,10 @@ class DistributedGenerator:
         self.lm_head = None
         self.architecture_adapter = None
         self._loaded_model = None
+        with self._reference_lock:
+            self._release_reference_model()
+        self._model_shell_pruned = False
+        self._component_cache_key = None
         self._last_generation_metrics = None
         torch.cuda.empty_cache()
 
@@ -426,11 +572,15 @@ class DistributedGenerator:
                     position_ids=position_ids,
                 )
 
-                hidden_states, trace = self.sequential.forward(
-                    hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                )
+                try:
+                    hidden_states, trace = await self._forward_async(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                    )
+                except RouteCancellationError:
+                    logger.info("[gen] cancellation stopped active route work")
+                    break
 
                 forward_metrics_getter = getattr(
                     self.sequential,
@@ -609,7 +759,8 @@ class DistributedGenerator:
         )
         do_sample = do_sample if do_sample is not None else False
 
-        direct_response, direct_generated_ids = self._generate_direct_text(
+        direct_response, direct_generated_ids = await asyncio.to_thread(
+            self._generate_direct_text,
             prompt=prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -621,6 +772,7 @@ class DistributedGenerator:
 
         distributed_response = ""
         node_trace: list[str] = []
+        generation_metrics: Optional[dict] = None
         async for chunk in self.generate_stream(
             prompt=prompt,
             max_new_tokens=max_new_tokens,
@@ -634,6 +786,7 @@ class DistributedGenerator:
                 distributed_response += chunk["token"]
             elif "done" in chunk:
                 node_trace = chunk.get("node_trace", [])
+                generation_metrics = chunk.get("metrics")
             elif "error" in chunk:
                 raise RuntimeError(chunk["error"])
 
@@ -656,6 +809,7 @@ class DistributedGenerator:
             "distributed_response_contains_replacement_char": "\ufffd"
             in distributed_response,
             "node_trace": node_trace,
+            "performance": copy.deepcopy(generation_metrics),
             "interpretation": (
                 "Exact text match is meaningful for greedy generation. "
                 "Sampled generation can diverge without proving a route bug."
@@ -679,24 +833,28 @@ class DistributedGenerator:
             raise RuntimeError("Generator not loaded; call load() first")
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
-        if self._loaded_model is None:
-            raise RuntimeError("Direct HuggingFace reference model is not loaded")
-
-        reference_device = self._prepare_reference_model_for_parity()
-        input_ids = self._encode_prompt(prompt, device=reference_device)
-        attention_mask = torch.ones(
-            input_ids.shape,
-            device=reference_device,
-            dtype=torch.long,
-        )
-        reference_input_ids = input_ids.to(reference_device)
-
-        with torch.no_grad():
-            reference_output = self._loaded_model(
-                input_ids=reference_input_ids,
-                attention_mask=attention_mask,
+        with self._reference_lock:
+            reference_model = self._get_reference_model()
+            reference_device = self._prepare_reference_model_for_parity()
+            input_ids = self._encode_prompt(prompt, device=reference_device)
+            attention_mask = torch.ones(
+                input_ids.shape,
+                device=reference_device,
+                dtype=torch.long,
             )
-            reference_logits = reference_output.logits[:, -1, :].detach().cpu().float()
+            reference_input_ids = input_ids.to(reference_device)
+
+            try:
+                with torch.no_grad():
+                    reference_output = reference_model(
+                        input_ids=reference_input_ids,
+                        attention_mask=attention_mask,
+                    )
+                    reference_logits = (
+                        reference_output.logits[:, -1, :].detach().cpu().float()
+                    )
+            finally:
+                self._release_reference_model()
 
         distributed_input_ids = input_ids.to(self.device)
         distributed_attention_mask = torch.ones(
@@ -785,36 +943,41 @@ class DistributedGenerator:
         repetition_penalty: float,
         do_sample: bool,
     ) -> tuple[str, list[int]]:
-        reference_device = self._prepare_reference_model_for_parity()
-        input_ids = self._encode_prompt(prompt, device=reference_device)
-        attention_mask = torch.ones(
-            input_ids.shape,
-            device=reference_device,
-            dtype=torch.long,
-        )
-
-        generate_kwargs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "max_new_tokens": max_new_tokens,
-            "do_sample": do_sample,
-            "repetition_penalty": repetition_penalty,
-        }
-        if getattr(self.tokenizer, "pad_token_id", None) is not None:
-            generate_kwargs["pad_token_id"] = self.tokenizer.pad_token_id
-        if getattr(self.tokenizer, "eos_token_id", None) is not None:
-            generate_kwargs["eos_token_id"] = self.tokenizer.eos_token_id
-        if do_sample:
-            generate_kwargs.update(
-                {
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "top_k": top_k,
-                }
+        with self._reference_lock:
+            reference_model = self._get_reference_model()
+            reference_device = self._prepare_reference_model_for_parity()
+            input_ids = self._encode_prompt(prompt, device=reference_device)
+            attention_mask = torch.ones(
+                input_ids.shape,
+                device=reference_device,
+                dtype=torch.long,
             )
 
-        with torch.no_grad():
-            output_ids = self._loaded_model.generate(**generate_kwargs)
+            generate_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "max_new_tokens": max_new_tokens,
+                "do_sample": do_sample,
+                "repetition_penalty": repetition_penalty,
+            }
+            if getattr(self.tokenizer, "pad_token_id", None) is not None:
+                generate_kwargs["pad_token_id"] = self.tokenizer.pad_token_id
+            if getattr(self.tokenizer, "eos_token_id", None) is not None:
+                generate_kwargs["eos_token_id"] = self.tokenizer.eos_token_id
+            if do_sample:
+                generate_kwargs.update(
+                    {
+                        "temperature": temperature,
+                        "top_p": top_p,
+                        "top_k": top_k,
+                    }
+                )
+
+            try:
+                with torch.no_grad():
+                    output_ids = reference_model.generate(**generate_kwargs)
+            finally:
+                self._release_reference_model()
 
         generated_ids = output_ids[0][input_ids.shape[1] :].detach().cpu().tolist()
         generated_ids = [int(token_id) for token_id in generated_ids]
@@ -1045,13 +1208,67 @@ class DistributedGenerator:
 
         return hidden_states
 
+    async def _forward_async(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[str]]:
+        forward = self.sequential.forward
+        parameters = inspect.signature(forward).parameters.values()
+        supports_cancel = any(
+            parameter.name == "cancel_event"
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        kwargs = {
+            "hidden_states": hidden_states,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+        }
+        if supports_cancel:
+            kwargs["cancel_event"] = self._stop_event
+        return await asyncio.to_thread(forward, **kwargs)
+
     def _prepare_reference_model_for_parity(self) -> torch.device:
-        if self._loaded_model is None:
+        model = self._get_reference_model()
+        if model is None:
             raise RuntimeError("Direct HuggingFace reference model is not loaded")
         reference_device = torch.device(self.device)
-        self._loaded_model.to(reference_device)
-        self._loaded_model.eval()
+        model.to(reference_device)
+        model.eval()
         return reference_device
+
+    def _get_reference_model(self) -> nn.Module:
+        if self._reference_model is not None:
+            return self._reference_model
+        if self._loaded_model is not None and not self._model_shell_pruned:
+            return self._loaded_model
+        source = self.local_model_path or self.model_name
+        token_kwargs = (
+            {"token": self.hf_token}
+            if self.hf_token and not self.local_model_path
+            else ({"token": False} if not self.local_model_path else {})
+        )
+        local_kwargs = {"local_files_only": True} if self.local_model_path else {}
+        self._reference_model = AutoModelForCausalLM.from_pretrained(
+            source,
+            torch_dtype=self.dtype,
+            low_cpu_mem_usage=True,
+            device_map="cpu",
+            **token_kwargs,
+            **local_kwargs,
+        )
+        self._reference_model.eval()
+        return self._reference_model
+
+    def _release_reference_model(self) -> None:
+        if self._reference_model is None:
+            return
+        self._reference_model.to("cpu")
+        self._reference_model = None
+        torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
     # Sampling
@@ -1155,6 +1372,8 @@ class DistributedGenerator:
 
     def request_stop(self) -> None:
         self._stop_requested = True
+        self._stop_event.set()
 
     def clear_stop(self) -> None:
         self._stop_requested = False
+        self._stop_event.clear()

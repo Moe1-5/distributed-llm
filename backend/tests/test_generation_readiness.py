@@ -15,6 +15,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 from client.generation import DistributedGenerator
+from client.failover import RouteCancellationError
 from client.rpc_policy import RPCAttemptPolicy, get_rpc_attempt_policy
 from client.sequential import RemoteSequential
 from hivemind.compression import deserialize_torch_tensor, serialize_torch_tensor
@@ -2041,6 +2042,48 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "hidden size mismatch"):
             generator._validate_loaded_components()
 
+    def test_generator_unload_caches_pruned_components_for_warm_restart(self) -> None:
+        from transformers import OPTConfig, OPTForCausalLM
+
+        class DummyTokenizer:
+            pad_token = None
+            eos_token = "</s>"
+            eos_token_id = 2
+
+        model = OPTForCausalLM(
+            OPTConfig(
+                vocab_size=20,
+                hidden_size=8,
+                word_embed_proj_dim=8,
+                ffn_dim=16,
+                num_hidden_layers=2,
+                num_attention_heads=2,
+                max_position_embeddings=16,
+            )
+        )
+        DistributedGenerator.clear_component_cache()
+        first = DistributedGenerator("facebook/opt-125m", sequential=object())
+        second = DistributedGenerator("facebook/opt-125m", sequential=object())
+
+        with patch.dict(SUPPORTED_MODELS["facebook/opt-125m"], {"hidden_size": 8}), patch("client.generation.AutoTokenizer.from_pretrained", return_value=DummyTokenizer()) as tokenizer_load, patch(
+            "client.generation.AutoModelForCausalLM.from_pretrained",
+            return_value=model,
+        ) as model_load:
+            first.load()
+            self.assertEqual(first._load_kind, "cold_model_load")
+            self.assertEqual(len(first._loaded_model.model.decoder.layers), 0)
+            first.unload()
+            self.assertEqual(DistributedGenerator.component_cache_size(), 1)
+
+            second.load()
+            self.assertEqual(second._load_kind, "warm_component_cache")
+            self.assertEqual(tokenizer_load.call_count, 1)
+            self.assertEqual(model_load.call_count, 1)
+            self.assertEqual(DistributedGenerator.component_cache_size(), 0)
+            second.unload()
+
+        DistributedGenerator.clear_component_cache()
+
     def test_generate_stream_initializes_position_ids_for_hidden_state_preparation(self) -> None:
         class DummyTokenizer:
             eos_token_id = 0
@@ -2311,6 +2354,72 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(result[0]["metrics"]["generated_tokens"], 0)
         self.assertTrue(result[0]["metrics"]["stopped"])
 
+    def test_generate_stream_keeps_event_loop_responsive_during_route_cancellation(self) -> None:
+        class DummyTokenizer:
+            eos_token_id = 0
+
+            def encode(self, prompt: str, return_tensors: str = "pt") -> torch.Tensor:
+                return torch.tensor([[1, 2]])
+
+            def decode(self, token_ids: torch.Tensor, skip_special_tokens: bool = True) -> str:
+                return "x"
+
+        class BlockingSequential:
+            def forward(
+                self,
+                hidden_states: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+                position_ids: torch.Tensor | None = None,
+                cancel_event=None,
+            ) -> tuple[torch.Tensor, list[str]]:
+                self.started.set()
+                while not cancel_event.wait(0.01):
+                    pass
+                raise RouteCancellationError("cancelled")
+
+            def __init__(self) -> None:
+                import threading
+
+                self.started = threading.Event()
+
+        sequential = BlockingSequential()
+        generator = DistributedGenerator(
+            "facebook/opt-125m",
+            sequential=sequential,
+            device="cpu",
+        )
+        generator._loaded = True
+        generator.tokenizer = DummyTokenizer()
+        generator.embed_tokens = nn.Embedding(10, 4)
+        generator.position_embeddings = nn.Embedding(8, 4)
+        generator.norm = nn.Identity()
+        generator.lm_head = nn.Linear(4, 10)
+
+        async def run_generation() -> tuple[list[dict], float]:
+            async def collect() -> list[dict]:
+                return [
+                    item
+                    async for item in generator.generate_stream(
+                        "hello",
+                        max_new_tokens=4,
+                    )
+                ]
+
+            task = asyncio.create_task(collect())
+            started_at = time.monotonic()
+            while not sequential.started.is_set():
+                await asyncio.sleep(0.005)
+            generator.request_stop()
+            result = await asyncio.wait_for(task, timeout=0.5)
+            return result, time.monotonic() - started_at
+
+        result, elapsed = asyncio.run(run_generation())
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]["done"])
+        self.assertTrue(result[0]["metrics"]["stopped"])
+        self.assertEqual(result[0]["metrics"]["generated_tokens"], 0)
+
     def test_sample_uses_argmax_when_do_sample_is_false(self) -> None:
         generator = DistributedGenerator("facebook/opt-125m", sequential=object())
 
@@ -2480,6 +2589,59 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertTrue(result["exact_text_match"])
         self.assertFalse(result["generation_config"]["do_sample"])
         self.assertEqual(result["node_trace"], ["peer… (layers 0→1)"])
+
+    def test_direct_reference_generation_is_serialized(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+
+        class DummyTokenizer:
+            eos_token_id = 0
+            pad_token_id = 0
+
+            def encode(self, prompt: str, return_tensors: str = "pt") -> torch.Tensor:
+                return torch.tensor([[1, 2]])
+
+            def decode(self, token_ids, skip_special_tokens: bool = True) -> str:
+                return "c"
+
+        class ContendedModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.active = 0
+                self.max_active = 0
+                self.guard = threading.Lock()
+
+            def generate(self, **kwargs):
+                with self.guard:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                time.sleep(0.03)
+                with self.guard:
+                    self.active -= 1
+                return torch.tensor([[1, 2, 3]])
+
+        model = ContendedModel()
+        generator = DistributedGenerator("facebook/opt-125m", sequential=object())
+        generator._loaded = True
+        generator.tokenizer = DummyTokenizer()
+        generator._loaded_model = model
+
+        def generate() -> tuple[str, list[int]]:
+            return generator._generate_direct_text(
+                "hello",
+                max_new_tokens=1,
+                temperature=1.0,
+                top_p=1.0,
+                top_k=0,
+                repetition_penalty=1.0,
+                do_sample=False,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: generate(), range(2)))
+
+        self.assertEqual(results, [("c", [3]), ("c", [3])])
+        self.assertEqual(model.max_active, 1)
 
     def test_compare_generated_output_endpoint_uses_loaded_generator(self) -> None:
         from api import server as api_server
