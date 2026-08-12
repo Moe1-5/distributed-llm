@@ -2,17 +2,26 @@
 
 This plan turns the current prototype into a reliable Petals-inspired distributed inference system for this project's own public/discoverable swarm. The network should be open enough for external devices to join and contribute resources, but isolated from public Petals/IPFS infrastructure by project-owned bootstrap nodes, DHT namespaces, metadata contracts, model registry, and routing rules.
 
-## Current Position - 2026-08-12
+## Current Position - 2026-08-13
 
 Phases 0 through 3 have substantial implemented foundations: structured readiness, contiguous route planning, cancellation, OPT/Llama-family adapter behavior, parity/trace tooling, multi-node local registries, monitoring, Hugging Face OAuth downloads, validated gated local imports, and instruction-ready model metadata. These areas still require broader live multi-machine validation; their presence in earlier roadmap phases no longer means they are wholly unimplemented.
 
 Current active validation work:
 
 - Sprint 13: signed useful-work receipts, read-only accounting, and shadow/credit settlement are implemented; live two-device shadow evidence and credit approval remain open.
-- Sprint 14: chat/instruct templates, context-aware streaming, local lifecycle separation, and performance contracts are implemented; live TinyLlama and two-device baselines remain open.
-- Sprint 15: the Electron main-process managed WSL launcher, health states, persisted relay configuration, first-run Settings controls, safe PID shutdown, and focused launcher tests are implemented; managed-distro import and clean-Windows package validation remain open.
-- Sprint 16: persistent VPS relay service and validation tooling are implemented; live restart, direct transport, tensor forwarding, and two-device inference remain open.
+- Sprint 14: chat/instruct templates, context-aware streaming, local lifecycle separation, performance contracts, and a local TinyLlama baseline are implemented; two-device baselines remain open.
+- Sprint 15: the Electron main-process managed WSL launcher, health states, persisted relay configuration, first-run Settings controls, safe PID shutdown, package auditing, and sanitized acceptance reporting are implemented; clean-Windows and two-device package validation remain open.
+- Sprint 16: persistent VPS relay service, validation tooling, public circuit reservation, expert metadata RPC, and a cross-sprint evidence manifest are implemented; the bound live two-device run remains open.
 - Sprint 17: coverage-aware routing, serving recommendations, stale-plan checks, and route/standby visibility are implemented; two-device acceptance remains open.
+
+Proposed work that can proceed without treating the live two-device evidence as complete:
+
+- Sprint 18: replace full-model worker construction with architecture-aware selective layer loading and measured memory reduction.
+- Sprint 19: maintain continuous provider RPC health and invalidate stale readiness.
+- Sprint 20: enforce typed resource, payload, concurrency, and timeout limits at the public expert RPC boundary.
+- Sprint 21: consume accepted health and RPC semantics for bounded health-aware route failover.
+
+These four sprint documents are proposals awaiting user review. Session/key-value cache routing, API keys, transferable incentives, and distributed training remain deferred.
 
 ## Phase 0: Stabilize the Current Prototype
 
@@ -321,14 +330,15 @@ This is intentionally last because training is harder than inference. It require
 1. Complete live TinyLlama and gated Llama 2 startup/inference validation.
 2. Prove a real multi-machine contiguous route through a public VPS bootstrap.
 3. Add reliable worker RPC reachability through fixed ports, relay, or an overlay network.
-4. Reduce peak full-model CPU memory during layer-slice loading.
+4. Implement Sprint 18 selective worker loading and record peak-memory evidence.
 5. Expand architecture parity evidence for every user-facing model.
-6. Add health probes, scoring, and route failover.
-7. Add stable session routing and distributed KV cache.
-8. Harden public swarm operations, protocol/version compatibility, and bootstrap rotation.
-9. Add API-key access for inferenced models.
-10. Validate Sprint 13 receipts and shadow settlement across two devices before approving credit mode.
-11. Consider distributed training/fine-tuning resource requests last.
+6. Implement Sprint 19 continuous health and Sprint 20 RPC resource safety.
+7. Implement Sprint 21 health-aware route failover after Sprints 19 and 20 are accepted.
+8. Add stable session routing and distributed KV cache.
+9. Harden public swarm operations, protocol/version compatibility, and bootstrap rotation.
+10. Add API-key access for inferenced models.
+11. Validate Sprint 13 receipts and shadow settlement across two devices before approving credit mode.
+12. Consider distributed training/fine-tuning resource requests last.
 
 ## Definition of Done for Correct Inference
 

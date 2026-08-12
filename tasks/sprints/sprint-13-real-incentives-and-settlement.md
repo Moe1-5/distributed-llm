@@ -122,3 +122,9 @@ Sprints 10 and 11 completed gated-model local import and instruction-ready model
 - Why: successful split and TinyLlama runs left a `ControlClient` write task for destructor-time cleanup because Hivemind 1.1.12 does not close its cached replica in `DHT.shutdown()`.
 - Verification: 175 backend tests plus 22 subtests pass. A fresh real OPT-125M `0-6 -> 6-12` pass preserved exact logits and greedy text, served three requests and 19 positions on each peer with zero failures, reported every cleanup flag true, left no `p2pd` process, and emitted no destructor traceback or pending-task message.
 - Status: the local remote-expert cleanup finding is resolved on `feature/remote-expert-p2p-cleanup`. Sprint 13 remains open only for separate-device inference, live VPS shadow/restart review, and explicit approval before credit mode.
+
+### 2026-08-13 - Register dependency-ordered future sprint proposals
+
+- What changed: added proposal-only Sprints 18 through 21 for selective worker loading, continuous provider health, expert RPC resource safety, and health-aware route failover; updated active sprint routing, indexes, current state, and implementation roadmap.
+- Why: these engineering tracks can be reviewed and implemented on feature branches while Sprint 13 and Sprints 14 through 17 wait for the physical two-device acceptance run.
+- Status: planning documents are ready for user review on `feature/future-sprint-plans`. No runtime implementation started, and no existing sprint was closed.

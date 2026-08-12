@@ -10,6 +10,10 @@
 | Sprint 15 | `tasks/sprints/sprint-15-windows-managed-wsl-packaging.md` | Package the Windows Electron app while isolating the Linux-dependent backend inside a managed WSL 2 runtime. |
 | Sprint 16 | `tasks/sprints/sprint-16-vps-relay-and-live-inference-validation.md` | Verify the VPS circuit relay, expert RPC reachability, and two-device Windows/WSL distributed inference. |
 | Sprint 17 | `tasks/sprints/sprint-17-coverage-aware-serving.md` | Select complete adjacent layer routes and recommend useful serving ranges from live coverage. |
+| Sprint 18 | `tasks/sprints/sprint-18-memory-efficient-selective-layer-loading.md` | Load only a worker's required layer slice and prove lower peak memory without changing generator semantics. |
+| Sprint 19 | `tasks/sprints/sprint-19-continuous-provider-health.md` | Continuously probe provider RPC health and invalidate stale route readiness. |
+| Sprint 20 | `tasks/sprints/sprint-20-rpc-resource-safety.md` | Bound and validate public expert RPC work before model execution. |
+| Sprint 21 | `tasks/sprints/sprint-21-health-aware-route-failover.md` | Select healthy complete routes and fail over through bounded, accounting-safe attempts. |
 
 ## Completed Sprints
 
