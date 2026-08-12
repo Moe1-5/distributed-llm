@@ -104,7 +104,7 @@ There is no distributed KV cache, stable session routing, failover, or concurren
 
 ## Current Validation State
 
-- Backend regression suite: 153 tests and 19 subtests passing as of 2026-08-12.
+- Backend regression suite: 154 tests and 19 subtests passing as of 2026-08-12, including an independent-peer Hivemind receipt RPC and shadow-settlement round trip.
 - Frontend TypeScript typecheck and Python compilation pass with the direct/relay transport changes.
 - Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
 - Hugging Face device OAuth and real gated Llama 2 download have been exercised.

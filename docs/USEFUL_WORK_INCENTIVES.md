@@ -51,4 +51,4 @@ Check service health with `systemctl status distribllm-settlement`, policy with 
 
 ## Remaining Acceptance
 
-Local tests prove signatures, canonicalization, BLAKE3 commitments, countersignatures, replay and self-dealing rejection, policy bounds, concurrent writes, pagination, restart durability, rollout modes, and legacy inference compatibility. Two separate devices must still prove receipt-capable inference through the VPS relay, shadow submission, settlement restart continuity, and zero credit for standby or failed work before credit mode is approved.
+Local tests prove signatures, canonicalization, BLAKE3 commitments, countersignatures, replay and self-dealing rejection, policy bounds, concurrent writes, pagination, restart durability, rollout modes, and legacy inference compatibility. A real independent client-mode Hivemind peer also forwards a variable-length tensor through the receipt expert and settles the accepted signed response. Two separate devices must still prove receipt-capable inference through the VPS relay, shadow submission, settlement restart continuity, and zero credit for standby or failed work before credit mode is approved.

@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 
 import torch
+import torch.nn as nn
+import hivemind
 from fastapi.testclient import TestClient
+from hivemind.moe import get_experts
+from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -276,6 +280,116 @@ class IdentityAndProtocolTests(unittest.TestCase):
             successful_runtime.submissions,
             [{"peer_id": "head-peer"}, {"peer_id": "tail-peer"}],
         )
+
+    def test_real_hivemind_receipt_rpc_settles_verified_work(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = load_application_identity(root / "rpc-worker.json")
+            generator = load_application_identity(root / "rpc-generator.json")
+
+            class Handler:
+                model_name = "facebook/opt-125m"
+                layer_start = 0
+                layer_end = 12
+                device = "cpu"
+                layers = nn.ModuleList([nn.Linear(8, 8, bias=False)])
+
+                def is_loaded(self) -> bool:
+                    return True
+
+                def forward(self, hidden_states, **kwargs):
+                    return hidden_states + 1
+
+            dht = hivemind.DHT(
+                start=True,
+                use_ipfs=False,
+                host_maddrs=["/ip4/127.0.0.1/tcp/0"],
+            )
+            rpc = RPCServer(
+                Handler(),
+                dht,
+                "receiptintegration",
+                incentives_config=IncentivesConfig("shadow", "", "main"),
+                application_identity=worker,
+            )
+            client_dht = None
+            expert = None
+            try:
+                rpc.start()
+                worker_peer = str(dht.peer_id)
+                capability = rpc.get_receipt_capability(worker_peer)
+                self.assertIsNotNone(capability)
+                client_dht = hivemind.DHT(
+                    start=True,
+                    use_ipfs=False,
+                    client_mode=True,
+                    initial_peers=dht.get_visible_maddrs(),
+                    host_maddrs=["/ip4/127.0.0.1/tcp/0"],
+                )
+                generator_peer = str(client_dht.peer_id)
+                route = [
+                    {
+                        "peer_id": worker_peer,
+                        "application_public_key": worker.public_key,
+                        "rpc_uid": capability["receipt_rpc_uid"],
+                        "layer_start": 0,
+                        "layer_end": 12,
+                    }
+                ]
+                hidden = torch.arange(24, dtype=torch.float32).reshape(1, 3, 8)
+                request = create_inference_request(
+                    generator,
+                    generator_peer_id=generator_peer,
+                    session_id="integration-session",
+                    model_name="facebook/opt-125m",
+                    model_revision="main",
+                    route=route,
+                    worker=route[0],
+                    hidden_states=hidden,
+                    position_count=3,
+                    request_id="integration-request",
+                )
+                expert = get_experts(
+                    client_dht,
+                    [capability["receipt_rpc_uid"]],
+                )[0]
+                self.assertIsNotNone(expert)
+
+                output, metadata_tensor = expert.forward(
+                    hidden,
+                    encode_metadata_tensor(request),
+                    attention_mask=torch.ones((1, 3), dtype=torch.bool),
+                    position_ids=torch.arange(3).unsqueeze(0),
+                )
+                metadata = decode_metadata_tensor(metadata_tensor)
+                acceptance = accept_worker_receipt(
+                    generator,
+                    request,
+                    metadata["worker_receipt"],
+                    output,
+                    generator_peer_id=generator_peer,
+                )
+                submission = build_submission(
+                    worker_receipt=metadata["worker_receipt"],
+                    generator_acceptance=acceptance,
+                    worker_presence=metadata["worker_presence"],
+                    generator_presence=generator.presence(generator_peer),
+                    route=route,
+                )
+                store = SettlementStore(root / "integration.sqlite3")
+                verified = validate_submission(submission, store.active_policy())
+                result = store.append(verified, "shadow", int(time.time()))
+
+                self.assertTrue(torch.equal(output, hidden + 1))
+                self.assertEqual(result["status"], "shadow_accepted")
+                self.assertEqual(result["reward_units"], 36)
+            finally:
+                if expert is not None:
+                    RemoteExpertWorker.run_coroutine(expert.p2p.shutdown())
+                if client_dht is not None:
+                    client_dht.shutdown()
+                rpc.stop()
+                dht.shutdown()
 
 
 class SettlementTests(unittest.TestCase):

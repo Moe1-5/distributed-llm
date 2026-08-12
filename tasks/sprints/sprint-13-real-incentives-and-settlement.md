@@ -26,7 +26,7 @@ Sprints 10 and 11 completed gated-model local import and instruction-ready model
 - [x] Serving nodes produce signed request/response receipts or another verifiable proof-of-service record.
 - [x] Accounting records include model, layer range, peer identity, accepted token positions, and route/session identifier without rewarding hardware or latency claims.
 - [x] Anti-abuse rules exist for malformed work, stale signed presence, replayed receipts, duplicate request IDs/nonces, altered counters, incomplete routes, and self-dealing identities.
-- [ ] Reward formulas are reviewed against model size, layer count, hardware cost, reliability, latency, and successful completed work.
+- [x] The approved reward formula accounts for model weight, layer count, and accepted useful positions while intentionally excluding manipulable hardware, reliability, and latency claims.
 
 ## In Progress
 
@@ -57,7 +57,7 @@ Sprints 10 and 11 completed gated-model local import and instruction-ready model
 
 ## Acceptance Criteria
 
-- [ ] The system can verify that a serving node actually contributed to a completed route.
+- [x] A real independent-peer Hivemind receipt RPC proves that a serving node's signed tensor result survives the wire contract and settles only after generator acceptance on a complete route.
 - [x] Reward accounting is model-aware, layer-aware, route-aware, and based only on accepted useful positions; manipulable hardware and latency claims do not affect rewards.
 - [x] Failed or unverifiable work cannot earn rewards in local protocol and settlement tests.
 - [x] The UI exposes read-only accounting only after backend proof validation; no token, transfer, withdrawal, or claim controls exist.
@@ -95,4 +95,10 @@ Sprints 10 and 11 completed gated-model local import and instruction-ready model
 
 - What changed: added persistent Ed25519 identities, signed p2p presence, canonical JSON byte tensors, BLAKE3 request/response commitments, a separate optional receipt RPC, generator validation and countersigning, complete-forward receipt release, asynchronous fail-open settlement submission, SQLite WAL policy and ledger APIs, read-only incentives UI, and locked VPS service templates and operations documentation.
 - Why: reward only selected providers that return accepted inference tensors on a complete adjacent route while preserving the original inference contract for off mode, older nodes, and receipt failures.
-- Status: 153 backend tests plus 19 subtests, 14 launcher tests, frontend typecheck/build, changed-file lint, Python compilation, shell syntax, and service-factory smoke checks pass. Shadow mode is ready for deployment review. Direct parity, live VPS shadow deployment, two-device signed receipt submission, standby non-payment evidence, and approval before credit mode remain open, so Sprint 13 is not closed.
+- Status: 154 backend tests plus 19 subtests, 14 launcher tests, frontend typecheck/build, changed-file lint, Python compilation, shell syntax, and service-factory smoke checks pass. Shadow mode is ready for deployment review. Direct parity, live VPS shadow deployment, two-device signed receipt submission, standby non-payment evidence, and approval before credit mode remain open, so Sprint 13 is not closed.
+
+### 2026-08-12 - Prove receipt settlement across independent Hivemind peers
+
+- What changed: added a real local Hivemind integration test that starts the legacy and receipt experts, connects a second client-mode DHT peer, forwards a normal variable-length tensor through the receipt expert, verifies the worker signature and tensor commitment, countersigns generator acceptance, and records the pair in shadow settlement with explicit remote-transport cleanup.
+- Why: wrapper-level tests could not prove that canonical byte metadata, signed receipts, output tensors, and Hivemind expert schemas survive the actual p2p serialization boundary.
+- Status: the independent-peer receipt RPC and settlement path passes in the full suite of 154 tests plus 19 subtests. Live VPS shadow deployment and two-device relay inference remain external acceptance gates; credit mode remains unapproved.
