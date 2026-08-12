@@ -33,11 +33,11 @@ The live TinyLlama route now completes correctly, but the application does not e
 - [x] Record per-hop RPC latency without changing route selection behavior.
 - [x] Add fixed serving P2P ports, reachable announce-address configuration, direct probing, and relay fallback for real multi-device routes.
 - [ ] Deploy the relay-capable bootstrap and validate direct and relayed two-device inference.
-- [ ] Separate local node lifecycle cards from all-peer Monitoring visibility.
-- [ ] Apply model-aware tokenizer chat templates in production chat/instruct requests.
-- [ ] Make streamed text deltas reconstruct the tokenizer's context-aware full decode.
-- [ ] Add regression tests for chat formatting, stream spacing, metric contracts, and unavailable hardware.
-- [ ] Update architecture, flow, validation, and troubleshooting documentation after the contracts settle.
+- [x] Separate local node lifecycle cards from all-peer Monitoring visibility.
+- [x] Apply model-aware tokenizer chat templates in production chat/instruct requests.
+- [x] Make streamed text deltas reconstruct the tokenizer's context-aware full decode.
+- [x] Add regression tests for chat formatting, stream spacing, metric contracts, and unavailable hardware.
+- [x] Update architecture, flow, validation, and troubleshooting documentation after the contracts settle.
 - [ ] Run a live TinyLlama performance smoke pass and record baseline measurements.
 
 ## Deferred To Later Sprint
@@ -51,10 +51,10 @@ The live TinyLlama route now completes correctly, but the application does not e
 
 - [x] Monitoring displays fresh machine, backend-process, GPU, route, and generation measurements with clear units.
 - [x] The backend exposes time to first token, total duration, generated token count, and tokens per second for completed generation.
-- [ ] Chat/instruct prompts use the selected model's tokenizer chat template exactly once.
-- [ ] Concatenated stream fragments match full generated-sequence decoding, including spaces.
-- [ ] Missing GPU or platform-specific metrics are reported as unavailable, not misleading zeros.
-- [ ] Automated tests cover the performance contract and both live TinyLlama output findings.
+- [x] Chat/instruct prompts use the selected model's tokenizer chat template exactly once.
+- [x] Concatenated stream fragments match full generated-sequence decoding, including spaces.
+- [x] Missing GPU or platform-specific metrics are reported as unavailable, not misleading zeros.
+- [x] Automated tests cover the performance contract and both live TinyLlama output findings.
 - [ ] A live distributed TinyLlama pass records a reproducible performance baseline.
 
 ---
@@ -108,3 +108,9 @@ The live TinyLlama route now completes correctly, but the application does not e
 - What changed: added observational timing snapshots for generator startup and model load, readiness-route validation, time to first token, total generation duration, generated token count, tokens per second, and aggregated RPC latency for each selected layer hop; completion payloads and generator status expose the metrics, and Monitoring renders the latest values without changing route selection.
 - Why: the upcoming two-device inference test needs enough evidence to distinguish model loading, route validation, relay RPC, and token-generation costs instead of reporting only whether generation eventually succeeded.
 - Status: all 117 backend tests plus 19 subtests, changed Python compilation, both frontend TypeScript checks, the production Electron/Vite build, and `git diff --check` pass. Chat-template application, context-aware stream decoding, and a live TinyLlama performance baseline remain open.
+
+### 2026-08-12 - Complete local output correctness and visibility contracts
+
+- What changed: chat and instruct models now apply their tokenizer chat template once, base models preserve raw prompts, streamed deltas come from cumulative decoding, `/nodes/local` isolates lifecycle controls from all-peer Monitoring, and focused regressions plus architecture/flow documentation cover the contracts.
+- Why: production prompts must match model training format, streamed text must preserve tokenizer spacing, and remote peers must never appear as locally controllable nodes.
+- Status: 122 backend tests plus 19 subtests, frontend type checks, lint, production build, and `git diff --check` pass; only live TinyLlama performance evidence and two-device direct/relay validation remain open.

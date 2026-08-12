@@ -115,13 +115,15 @@ The model registry distinguishes supported models from currently runnable models
 ```text
 Inference page opens /stream WebSocket
   -> validates generator and route readiness
-  -> tokenizes prompt
+  -> applies the publisher chat template once for chat/instruct models, or keeps a raw base-model prompt
+  -> tokenizes the resulting prompt
   -> prepares architecture-specific inputs
   -> sends hidden states through selected RPC route
   -> applies local output components
   -> samples/decodes next token
   -> records first-token, total, throughput, and per-hop RPC timings
-  -> streams token chunks, then route trace and completion metrics
+  -> cumulatively decodes generated token ids and streams stable text deltas
+  -> sends route trace and completion metrics
 ```
 
 The user can request cancellation between token steps. Diagnostic endpoints can compare next-token logits/generated output with direct Hugging Face execution and write redacted JSON traces.
@@ -146,7 +148,7 @@ In automatic network mode, a NAT-separated worker keeps an outbound reservation 
 
 ## 10. Monitoring and Cleanup
 
-- `/status`, `/stats`, `/nodes`, `/models`, and `/generator/status` drive UI readiness and monitoring. Monitoring combines sampled machine/process/GPU metrics with the latest completed generation and aggregated RPC-hop timings.
+- `/nodes/local` supplies process-owned nodes for lifecycle controls, while `/nodes` supplies DHT-discovered and local peers for network-wide Monitoring. `/status`, `/stats`, `/models`, and `/generator/status` drive readiness and performance views. Monitoring combines sampled machine/process/GPU metrics with the latest completed generation and aggregated RPC-hop timings.
 - `/incentives/accounting` reports simulated contribution metrics only.
 - Managed Hugging Face snapshots can be removed with file deletion; arbitrary manual folders are unregistered but not recursively deleted.
 - Backend shutdown uses bounded cleanup for local nodes and the generator DHT.

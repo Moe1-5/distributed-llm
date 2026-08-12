@@ -982,6 +982,12 @@ async def get_nodes() -> dict:
         return {"nodes": [], "error": str(e)}
 
 
+@app.get("/nodes/local")
+async def get_local_nodes() -> dict:
+    """Return only nodes owned by this backend process for lifecycle controls."""
+    return {"nodes": _local_node_infos()}
+
+
 @app.get("/models")
 async def get_models() -> dict:
     """

@@ -11,7 +11,8 @@ Current active validation work:
 - Sprint 10: complete live gated-model startup/generation/offline reuse evidence.
 - Sprint 11: complete TinyLlama/Llama 2 instruction-ready inference evidence.
 - Sprint 12: live-check anonymous public loading and failed-start cleanup after the expired-token fix.
-- Sprint 13: real incentives and settlement remain deferred.
+- Sprint 13: real incentives and settlement remain gated by live multi-device correctness evidence.
+- Sprint 14: chat/instruct templates, context-aware streaming, local lifecycle separation, and performance contracts are implemented; live TinyLlama and two-device baselines remain open.
 
 ## Phase 0: Stabilize the Current Prototype
 
@@ -234,10 +235,10 @@ User review of the Electron screens identified these workflow changes:
 
 Suggested main navigation after this correction:
 
-1. Nodes: local hardware stats, discovered serving nodes, local node stop controls.
+1. Nodes: local hardware stats and lifecycle controls for process-owned serving nodes.
 2. Network: serve layer slices and connect a generator/client to the swarm.
 3. Inference: prompt streaming, route trace, and active generation cancel.
-4. Monitoring: graph/status view for peer health, layer coverage, route state, and latency.
+4. Monitoring: network-wide graph/status view for discovered peer health, layer coverage, route state, and latency.
 5. Settings: Hugging Face connection, imported models, and local configuration.
 
 Implementation should follow validation: first prove the backend can report trustworthy route/readiness state, then bind the UI controls to that state.

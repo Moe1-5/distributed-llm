@@ -18,10 +18,10 @@ The target network is a project-owned public/discoverable swarm. External device
 
 The renderer has five pages:
 
-- Nodes: local hardware state and discovered/local nodes.
+- Nodes: local hardware state and lifecycle controls for nodes owned by this backend process.
 - Network: serve layers, manage local replicas, connect Hugging Face, download/import gated models, and start the generator.
 - Inference: prompt streaming, readiness, route trace, and cancellation.
-- Monitoring: route coverage, peers, and accounting/health information.
+- Monitoring: network-wide route coverage, discovered peers, and performance/health information.
 - Settings: backend and Hugging Face connection/local-model state.
 
 Bootstrap configuration is intentionally hidden from normal product workflow. The backend URL defaults to `http://127.0.0.1:8000`; Vite overrides use `VITE_API_BASE_URL` and `VITE_WS_BASE_URL`.
@@ -83,7 +83,7 @@ Current layer-loading limitation: Transformers constructs the complete model in 
 
 When serving and generating on the same machine, generator startup directly seeds matching local node multiaddresses alongside configured bootstrap peers. Generator peers enable relay dialing. Readiness resolves every selected expert and probes RPC metadata so DHT coverage or a claimed relay address alone cannot produce a false-ready state.
 
-`DistributedGenerator` loads local model components and performs autoregressive generation through that route. It supports exact generation controls, stop requests, route readiness, next-token parity probes, generated-output comparisons, and JSON trace artifacts. Generator status also exposes startup/load duration, current route-probe duration, latest time to first token, total generation duration, token throughput, and per-hop RPC latency aggregates. These measurements are observational and do not alter route selection.
+`DistributedGenerator` loads local model components and performs autoregressive generation through that route. Base models preserve raw completion prompts, while chat and instruct models apply the publisher tokenizer chat template once with a generation prompt. Stream chunks are derived from cumulative tokenizer decoding so concatenating them preserves spaces and matches the final decoded sequence. The generator also supports exact generation controls, stop requests, route readiness, next-token parity probes, generated-output comparisons, and JSON trace artifacts. Generator status exposes startup/load duration, current route-probe duration, latest time to first token, total generation duration, token throughput, and per-hop RPC latency aggregates. These measurements are observational and do not alter route selection.
 
 The current data plane is:
 

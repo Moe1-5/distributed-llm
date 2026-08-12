@@ -256,11 +256,10 @@ export default function Dashboard(): React.JSX.Element {
 
   const fetchNodes = useCallback(async () => {
     try {
-      const res = await api.getNodes()
-      // /nodes returns empty array with a warning when no DHT yet — not an error
+      const res = await api.getLocalNodes()
       setState((prev) => ({ ...prev, nodes: res.nodes ?? [] }))
     } catch {
-      // Node discovery failure is non-fatal — DHT may not be started yet
+      // Local node lookup failure is non-fatal while the backend is starting.
       setState((prev) => ({ ...prev, nodes: [] }))
     }
   }, [])
@@ -275,7 +274,7 @@ export default function Dashboard(): React.JSX.Element {
   }, [])
 
   const refreshLocalNodeState = useCallback(async () => {
-    const [statusRes, nodesRes] = await Promise.all([api.getStatus(), api.getNodes()])
+    const [statusRes, nodesRes] = await Promise.all([api.getStatus(), api.getLocalNodes()])
     setState((prev) => ({
       ...prev,
       status: statusRes,
@@ -379,9 +378,9 @@ export default function Dashboard(): React.JSX.Element {
       {/* Header */}
       <div className="flex flex-shrink-0 items-center justify-between border-b border-border px-7 py-5">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight text-text-primary">Network Nodes</h1>
+          <h1 className="text-xl font-semibold tracking-tight text-text-primary">Local Nodes</h1>
           <p className="mt-0.5 font-mono text-[11px] text-text-secondary">
-            Distributed layer allocation across P2P peers
+            Serving processes and hardware on this machine
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -469,14 +468,14 @@ export default function Dashboard(): React.JSX.Element {
         {/* Node grid */}
         <section>
           <h2 className="mb-3 font-mono text-[10px] tracking-widest text-text-dim uppercase">
-            P2P Nodes
+            Local Serving Nodes
           </h2>
 
           {backend === 'online' && nodes.length === 0 && (
             <div className="rounded-xl border border-border bg-bg-elevated px-5 py-8 text-center">
-              <p className="font-mono text-[12px] text-text-secondary">No nodes discovered yet</p>
+              <p className="font-mono text-[12px] text-text-secondary">No local nodes configured</p>
               <p className="mt-1 font-mono text-[10px] text-text-dim">
-                Start a node on the Network page to see it appear here
+                Start a node on the Network page to manage it here
               </p>
             </div>
           )}

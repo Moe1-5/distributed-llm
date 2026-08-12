@@ -404,6 +404,7 @@ export const api = {
   getStatus: () => get<NetworkStatus>('/status'),
   getStats: () => get<Stats>('/stats'),
   getNodes: () => get<{ nodes: NodeInfo[]; error?: string; warning?: string }>('/nodes'),
+  getLocalNodes: () => get<{ nodes: NodeInfo[] }>('/nodes/local'),
 
   // Models — validated list from server, used for dropdown
   getModels: () =>

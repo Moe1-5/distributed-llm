@@ -124,6 +124,7 @@
 | `backend/uv.lock`        | Python dependency lockfile.                                                          |
 | `backend/tests/test_gpu_monitor.py` | Focused runtime resource-monitor metric and failure-path tests.                       |
 | `backend/tests/test_bootstrap_relay.py` | Focused public bootstrap relay and reachability-argument tests.                    |
+| `backend/tests/test_sprint14_output_and_visibility.py` | Sprint 14 chat-template, context-aware streaming, and local lifecycle visibility regressions. |
 
 ---
 

@@ -34,6 +34,6 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 **Latest Sprint Update**
 
 - Sprints 10 and 11 are closed and archived; Sprint 13 remains planned for real incentives behind substantial correctness and proof prerequisites.
-- Sprint 14 now exposes resource metrics plus generator startup, route, first-token, throughput, and per-hop RPC timing on its side branch; chat-template and streamed-output fixes plus live baselines remain open.
+- Sprint 14 now exposes performance metrics, applies model-aware chat templates, preserves cumulative streamed decoding, and separates local lifecycle controls from all-peer Monitoring; live TinyLlama and two-device baselines remain open.
 - Sprint 15 plans a Windows Electron package with the Linux-dependent backend isolated in managed WSL 2 and relay-backed `auto` mode as the default.
 - Sprint 16 has verified a public VPS circuit reservation from Windows/WSL in 1.63 seconds and an independent-peer OPT-125M expert metadata RPC through that circuit; tensor forwarding and two-device inference remain unproven.

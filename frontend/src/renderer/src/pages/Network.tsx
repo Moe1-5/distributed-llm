@@ -608,7 +608,7 @@ export default function Network(): React.JSX.Element {
         <div>
           <p className="font-mono text-[10px] text-amber">HUGGING FACE ACCESS REQUIRED</p>
           <p className="mt-1 text-[12px] leading-relaxed text-text-secondary">
-            Accept this model's Hugging Face terms first. Then connect your account so DistribLLM
+            Accept this model&apos;s Hugging Face terms first. Then connect your account so DistribLLM
             can download the approved files locally.
           </p>
         </div>

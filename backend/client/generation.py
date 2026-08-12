@@ -28,6 +28,62 @@ from models.architecture_adapter import get_architecture_adapter
 logger = get_logger(__name__)
 
 
+class _ContextAwareTextDecoder:
+    """Emit stable deltas from cumulative tokenizer decoding."""
+
+    def __init__(self, tokenizer: object):
+        self.tokenizer = tokenizer
+        self.token_ids: list[int] = []
+        self.emitted_text = ""
+
+    @staticmethod
+    def _is_cjk_character(character: str) -> bool:
+        codepoint = ord(character)
+        return (
+            0x4E00 <= codepoint <= 0x9FFF
+            or 0x3400 <= codepoint <= 0x4DBF
+            or 0x3040 <= codepoint <= 0x30FF
+            or 0xAC00 <= codepoint <= 0xD7AF
+        )
+
+    def _decode(self) -> str:
+        return self.tokenizer.decode(
+            self.token_ids,
+            skip_special_tokens=True,
+        )
+
+    def _delta_through(self, end: int) -> str:
+        decoded = self._decode()
+        stable_text = decoded[:end]
+        if not stable_text.startswith(self.emitted_text):
+            raise RuntimeError(
+                "Tokenizer changed text that was already streamed; "
+                "cannot produce lossless text deltas."
+            )
+        delta = stable_text[len(self.emitted_text) :]
+        self.emitted_text = stable_text
+        return delta
+
+    def push(self, token_id: int) -> str:
+        self.token_ids.append(int(token_id))
+        decoded = self._decode()
+        if not decoded:
+            return ""
+        if decoded.endswith("\n") or self._is_cjk_character(decoded[-1]):
+            return self._delta_through(len(decoded))
+
+        last_whitespace = max(
+            (index for index, character in enumerate(decoded) if character.isspace()),
+            default=-1,
+        )
+        return self._delta_through(last_whitespace + 1)
+
+    def finish(self) -> str:
+        if not self.token_ids:
+            return ""
+        return self._delta_through(len(self._decode()))
+
+
 class DistributedGenerator:
     def __init__(
         self,
@@ -74,6 +130,45 @@ class DistributedGenerator:
             f"top_k={cfg['top_k']} rep_penalty={cfg['repetition_penalty']}"
         )
         return cfg
+
+    def _encode_prompt(
+        self,
+        prompt: str,
+        device: Optional[torch.device | str] = None,
+    ) -> torch.Tensor:
+        if self.tokenizer is None:
+            raise RuntimeError("Tokenizer is not loaded")
+
+        tuning = SUPPORTED_MODELS.get(self.model_name, {}).get("tuning", "base")
+        if tuning in {"chat", "instruct"}:
+            apply_chat_template = getattr(self.tokenizer, "apply_chat_template", None)
+            if not callable(apply_chat_template):
+                raise RuntimeError(
+                    f"Tokenizer for {self.model_name} has no chat template for {tuning} prompts."
+                )
+            try:
+                input_ids = apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Tokenizer for {self.model_name} has no usable chat template."
+                ) from exc
+        else:
+            input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
+
+        if not isinstance(input_ids, torch.Tensor):
+            input_ids = torch.as_tensor(input_ids, dtype=torch.long)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if input_ids.dim() != 2 or input_ids.shape[0] != 1:
+            raise RuntimeError(
+                f"Expected encoded prompt shape [1, seq_len], got {tuple(input_ids.shape)}"
+            )
+        return input_ids.to(device if device is not None else self.device)
 
     def _validate_generation_inputs(
         self,
@@ -264,8 +359,9 @@ class DistributedGenerator:
 
 
         try:
-            input_ids     = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+            input_ids     = self._encode_prompt(prompt)
             generated_ids = input_ids.clone()
+            stream_decoder = _ContextAwareTextDecoder(self.tokenizer)
             node_trace:   list[str] = []
             logger.debug(
                 "[gen] prompt tokenized to ids shape=%s eos_token_id=%s",
@@ -388,18 +484,18 @@ class DistributedGenerator:
                 generated_token_count += 1
                 if first_token_at is None:
                     first_token_at = time.perf_counter()
-                token_text = self.tokenizer.decode(
-                    next_token_id[0],
-                    skip_special_tokens=True,
-                )
+                generated_ids = torch.cat([generated_ids, next_token_id], dim=1)
+                token_text = stream_decoder.push(int(next_token_id.item()))
                 if token_text:
                     yield {"token": token_text}
-
-                generated_ids = torch.cat([generated_ids, next_token_id], dim=1)
 
                 if next_token_id.item() == self.tokenizer.eos_token_id:
                     logger.debug(f"EOS at step {step}")
                     break
+
+            final_text = stream_decoder.finish()
+            if final_text:
+                yield {"token": final_text}
 
             completed_at = time.perf_counter()
             total_duration_ms = (completed_at - generation_started_at) * 1000
@@ -550,8 +646,8 @@ class DistributedGenerator:
         if self._loaded_model is None:
             raise RuntimeError("Direct HuggingFace reference model is not loaded")
 
-        input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
         reference_device = self._prepare_reference_model_for_parity()
+        input_ids = self._encode_prompt(prompt, device=reference_device)
         attention_mask = torch.ones(
             input_ids.shape,
             device=reference_device,
@@ -654,7 +750,7 @@ class DistributedGenerator:
         do_sample: bool,
     ) -> tuple[str, list[int]]:
         reference_device = self._prepare_reference_model_for_parity()
-        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(reference_device)
+        input_ids = self._encode_prompt(prompt, device=reference_device)
         attention_mask = torch.ones(
             input_ids.shape,
             device=reference_device,
@@ -726,8 +822,9 @@ class DistributedGenerator:
         )
         do_sample = do_sample if do_sample is not None else True
 
-        generated_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+        generated_ids = self._encode_prompt(prompt)
         prompt_token_ids = [int(token_id) for token_id in generated_ids[0].tolist()]
+        generated_token_ids: list[int] = []
         steps: list[dict] = []
         node_trace: list[str] = []
         decoded_output = ""
@@ -793,9 +890,13 @@ class DistributedGenerator:
                 next_token_id[0],
                 skip_special_tokens=True,
             )
-            decoded_output += token_text
             selected_in_top_candidates = token_id in top_indices[0].tolist()
             generated_ids = torch.cat([generated_ids, next_token_id], dim=1)
+            generated_token_ids.append(token_id)
+            decoded_output = self.tokenizer.decode(
+                generated_token_ids,
+                skip_special_tokens=True,
+            )
 
             steps.append(
                 {
