@@ -24,6 +24,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `backend/node/block_loader.py`: architecture-aware selective safetensors planning/materialization, strict tensor validation, load-memory diagnostics, and explicit binary-format fallback policy.
 - `backend/node/handler.py`: validated remote forward execution, architecture adapter integration, dtype/device conversion, and accounting.
 - `backend/node/rpc_server.py`: legacy Hivemind expert plus optional receipt expert, unique RPC UIDs, and bounded server shutdown helpers.
+- `backend/node/rpc_safety.py`: typed public-expert limits, pre-execution tensor/metadata validation, bounded admission, cooperative deadline errors, and multiprocessing-safe counters.
 - `backend/node/gpu_monitor.py`: CPU, RAM, GPU, and VRAM sampling.
 - `backend/client/sequential.py`: DHT metadata validation, coverage-aware route planning, legacy/receipt RPC lookup and fail-open retry, settlement submission, and route traces.
 - `backend/client/health.py`: typed provider health state, DHT/protocol/transport signals, revision snapshots, and lifecycle-owned bounded metadata probes.

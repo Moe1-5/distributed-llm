@@ -40,6 +40,28 @@ export interface NodeInfo {
     peak_rss_delta_bytes: number
     fallback_reason?: string | null
   } | null
+  rpc_safety?: {
+    policy: {
+      max_sequence_length: number
+      max_batch_size: number
+      max_tensor_bytes: number
+      max_metadata_bytes: number
+      max_concurrent_forwards: number
+      max_queued_forwards: number
+      queue_wait_seconds: number
+      execution_timeout_seconds: number
+    }
+    accepted_requests: number
+    completed_requests: number
+    failed_requests: number
+    rejected_requests: number
+    rejected_by_reason: Record<string, number>
+    timed_out_requests: number
+    active_forwards: number
+    peak_active_forwards: number
+    queued_forwards: number
+    peak_queued_forwards: number
+  } | null
 }
 
 export interface LifecycleJob {

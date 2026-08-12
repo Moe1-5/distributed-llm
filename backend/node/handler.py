@@ -13,6 +13,7 @@ import torch.nn as nn
 from hivemind.utils.logging import get_logger
 
 from node.block_loader import load_layers
+from node.rpc_safety import RPCExecutionTimeout
 
 logger = get_logger(__name__)
 
@@ -109,29 +110,34 @@ class InferenceHandler:
         hidden_states:  torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids:   Optional[torch.Tensor] = None,
+        deadline: Optional[float] = None,
+        record_accounting: bool = True,
     ) -> torch.Tensor:
         started_at = time.perf_counter()
         token_positions = 0
         if not self._loaded or self.layers is None:
-            self._record_accounting(
-                success=False,
-                token_positions=0,
-                latency_ms=(time.perf_counter() - started_at) * 1000,
-            )
+            if record_accounting:
+                self._record_accounting(
+                    success=False,
+                    token_positions=0,
+                    latency_ms=(time.perf_counter() - started_at) * 1000,
+                )
             raise RuntimeError("Layers not loaded. Call load() first.")
 
         if hidden_states.dim() != 3:
-            self._record_accounting(
-                success=False,
-                token_positions=0,
-                latency_ms=(time.perf_counter() - started_at) * 1000,
-            )
+            if record_accounting:
+                self._record_accounting(
+                    success=False,
+                    token_positions=0,
+                    latency_ms=(time.perf_counter() - started_at) * 1000,
+                )
             raise ValueError(
                 f"hidden_states must be [batch, seq_len, hidden_size], got {hidden_states.shape}"
             )
         token_positions = int(hidden_states.shape[0] * hidden_states.shape[1])
 
         try:
+            self._check_deadline(deadline)
             hidden_states = hidden_states.to(self.device, dtype=self.dtype)
             position_ids = self._prepare_position_ids(position_ids, hidden_states)
             attention_mask = self._prepare_decoder_attention_mask(
@@ -143,9 +149,11 @@ class InferenceHandler:
                 position_ids,
             )
 
-            with self._lock:
+            self._acquire_execution_lock(deadline)
+            try:
                 with torch.no_grad():
                     for layer in self.layers:
+                        self._check_deadline(deadline)
                         layer_kwargs = {
                             "attention_mask": attention_mask,
                             "position_ids": position_ids,
@@ -158,20 +166,52 @@ class InferenceHandler:
                             **layer_kwargs,
                         )
                         hidden_states = out[0] if isinstance(out, tuple) else out
+                    self._check_deadline(deadline)
+            finally:
+                self._lock.release()
 
-            self._record_accounting(
-                success=True,
-                token_positions=token_positions,
-                latency_ms=(time.perf_counter() - started_at) * 1000,
-            )
+            if record_accounting:
+                self._record_accounting(
+                    success=True,
+                    token_positions=token_positions,
+                    latency_ms=(time.perf_counter() - started_at) * 1000,
+                )
             return hidden_states.cpu()
         except Exception:
-            self._record_accounting(
-                success=False,
-                token_positions=token_positions,
-                latency_ms=(time.perf_counter() - started_at) * 1000,
-            )
+            if record_accounting:
+                self._record_accounting(
+                    success=False,
+                    token_positions=token_positions,
+                    latency_ms=(time.perf_counter() - started_at) * 1000,
+                )
             raise
+
+    @staticmethod
+    def _check_deadline(deadline: Optional[float]) -> None:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise RPCExecutionTimeout(
+                "rpc_safety:execution_timeout: request exceeded its layer deadline"
+            )
+
+    def _acquire_execution_lock(self, deadline: Optional[float]) -> None:
+        if deadline is None:
+            self._lock.acquire()
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._lock.acquire(timeout=remaining):
+            raise RPCExecutionTimeout(
+                "rpc_safety:execution_timeout: request timed out waiting for model execution"
+            )
+
+    def record_external_result(
+        self,
+        *,
+        success: bool,
+        token_positions: int,
+        latency_ms: float,
+    ) -> None:
+        """Commit accounting after a multi-sample receipt batch is fully accepted."""
+        self._record_accounting(success, token_positions, latency_ms)
 
     def _record_accounting(
         self,

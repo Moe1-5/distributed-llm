@@ -141,6 +141,12 @@ Check out the previously recorded commit, rerun the installer, and repeat restar
 - Retain enough service journal history to diagnose relay reservation failures while avoiding participant prompts, tokens, or model data.
 - Treat the JSON status file as operational metadata. It is non-secret but should remain readable only to the service group and administrators.
 
+## Transport Quotas Remain External
+
+Worker RPC safety limits bound model inputs, admission, and execution on participant devices. They do not impose per-peer connection, duration, ingress, egress, or bandwidth quotas on the VPS circuit relay. Those controls remain an infrastructure task: monitor provider traffic and cost, retain relay connection metrics, and apply reviewed host/provider limits only after measuring successful two-device inference. Do not infer a 128 KiB relay quota from a log interval ending at 131,072 bytes; that value can be a flow-control window when an endpoint resets.
+
+Authenticated API access and per-identity relay quotas are also deferred. The current firewall should expose only the required relay port and administrative access, but a firewall port rule is not a bandwidth policy.
+
 ## Remaining Acceptance Gates
 
 The checked-in service, validator, and this runbook are implementation evidence. Sprint 16 remains open until an operator runs the live restart check on the project VPS, an external participant obtains a fresh circuit after that restart, two Windows/WSL devices complete relayed OPT-125M inference across non-overlapping layer ranges, monitoring reports relay mode accurately, and direct mode is tested separately.

@@ -15,15 +15,19 @@ UID format fix:
 
 import threading
 import time
+import inspect
+from queue import Full
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import hivemind
 from hivemind.moe.server import ModuleBackend
+from hivemind.moe.server.task_pool import Task, TaskPool
 from hivemind.proto.runtime_pb2 import CompressionType
 from hivemind.utils.tensor_descr import BatchTensorDescriptor
 from hivemind.utils.logging import get_logger
+from hivemind.utils.mpfuture import MPFuture
 
 from incentives.config import IncentivesConfig, get_incentives_config
 from incentives.identity import ApplicationIdentity, load_application_identity
@@ -35,11 +39,58 @@ from incentives.protocol import (
 )
 from incentives.receipts import create_worker_receipt, verify_inference_request
 from node.handler import InferenceHandler
+from node.rpc_safety import (
+    RPCOverloadedError,
+    RPCSafetyConfig,
+    RPCSafetyController,
+    RPCSafetyError,
+    get_rpc_safety_config,
+)
 
 logger = get_logger(__name__)
 
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 ACTIVATION_COMPRESSION = CompressionType.FLOAT16
+
+
+class _RejectingTaskPool(TaskPool):
+    """Keep Hivemind batching but reject instead of blocking on a full queue."""
+
+    safety_controller: RPCSafetyController
+
+    def submit_task(self, *args: torch.Tensor):
+        task = Task(MPFuture(), args)
+        if self.get_task_size(task) > self.max_batch_size:
+            self.safety_controller.record_transport_rejection("batch")
+            task.future.set_exception(
+                RPCSafetyError(
+                    "batch",
+                    f"task exceeds max batch size {self.max_batch_size}",
+                )
+            )
+            return task.future
+        try:
+            self.tasks.put(task, block=False)
+        except Full:
+            self.safety_controller.record_transport_rejection("overloaded")
+            task.future.set_exception(
+                RPCOverloadedError(
+                    "rpc_safety:overloaded: worker RPC queue capacity is full"
+                )
+            )
+        else:
+            self.undispatched_task_timestamps.put(time.time())
+        return task.future
+
+
+def _install_rejecting_pools(
+    backend: ModuleBackend,
+    safety: RPCSafetyController,
+) -> ModuleBackend:
+    for pool in (backend.forward_pool, backend.backward_pool):
+        pool.__class__ = _RejectingTaskPool
+        pool.safety_controller = safety
+    return backend
 
 
 def _run_with_timeout(name: str, target, timeout: float) -> bool:
@@ -68,11 +119,13 @@ class _HandlerModule(nn.Module):
     try to serialize the full model weights over the network.
     """
 
-    def __init__(self, handler: InferenceHandler):
+    def __init__(self, handler: InferenceHandler, safety: RPCSafetyController):
         super().__init__()
         if not handler.is_loaded():
             raise RuntimeError("Handler must be loaded before wrapping")
         self._handler = handler
+        self._safety = safety
+        self._supports_deadline = "deadline" in inspect.signature(handler.forward).parameters
 
     def forward(
             self,
@@ -81,13 +134,21 @@ class _HandlerModule(nn.Module):
             position_ids: Optional[torch.Tensor] = None,
             ) -> torch.Tensor:
         
-        started_at = time.perf_counter()
-        try:
-            output = self._handler.forward(
+        self._safety.validate(hidden_states, attention_mask, position_ids)
+
+        def execute(deadline: float) -> torch.Tensor:
+            kwargs = dict(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
             )
+            if self._supports_deadline:
+                kwargs["deadline"] = deadline
+            return self._handler.forward(**kwargs)
+
+        started_at = time.perf_counter()
+        try:
+            output = self._safety.execute(hidden_states, execute)
         except Exception:
             logger.exception(
                 "Expert forward failed | layers=%s-%s shape=%s",
@@ -118,6 +179,7 @@ class _ReceiptHandlerModule(nn.Module):
         peer_id: str,
         rpc_uid: str,
         model_revision: str,
+        safety: Optional[RPCSafetyController] = None,
     ) -> None:
         super().__init__()
         self._handler = handler
@@ -125,6 +187,10 @@ class _ReceiptHandlerModule(nn.Module):
         self._peer_id = peer_id
         self._rpc_uid = rpc_uid
         self._model_revision = model_revision
+        self._safety = safety
+        parameters = inspect.signature(handler.forward).parameters
+        self._supports_deadline = "deadline" in parameters
+        self._supports_deferred_accounting = "record_accounting" in parameters
 
     def forward(
         self,
@@ -133,68 +199,94 @@ class _ReceiptHandlerModule(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if hidden_states.shape[0] != receipt_metadata.shape[0]:
-            raise ValueError("Receipt metadata batch does not match hidden states")
-        outputs: list[torch.Tensor] = []
-        receipts: list[torch.Tensor] = []
-        for index in range(hidden_states.shape[0]):
+        if self._safety is None:
+            self._safety = RPCSafetyController(
+                get_rpc_safety_config(),
+                int(hidden_states.shape[-1]),
+            )
+        self._safety.validate(
+            hidden_states,
+            attention_mask,
+            position_ids,
+            receipt_metadata,
+        )
+
+        def execute(deadline: float) -> tuple[torch.Tensor, torch.Tensor]:
+            outputs: list[torch.Tensor] = []
+            receipts: list[torch.Tensor] = []
             started_at = time.perf_counter()
-            sample = hidden_states[index : index + 1]
-            request_document = decode_metadata_tensor(
-                receipt_metadata[index : index + 1]
-            )
-            request = verify_inference_request(
-                request_document,
-                worker_public_key=self._identity.public_key,
-                worker_peer_id=self._peer_id,
-                rpc_uid=self._rpc_uid,
-                layer_start=self._handler.layer_start,
-                layer_end=self._handler.layer_end,
-                hidden_states=sample,
-            )
-            if request["model_name"] != self._handler.model_name:
-                raise ValueError("Inference request model does not match this worker")
-            if request["model_revision"] != self._model_revision:
-                raise ValueError("Inference request revision does not match this worker")
-            output = self._handler.forward(
-                hidden_states=sample,
-                attention_mask=(
-                    attention_mask[index : index + 1]
-                    if attention_mask is not None
-                    else None
-                ),
-                position_ids=(
-                    position_ids[index : index + 1]
-                    if position_ids is not None
-                    else None
-                ),
-            )
-            logger.info(
-                "Receipt expert forward complete | request=%s layers=%s-%s "
-                "shape=%s bytes=%s elapsed_ms=%.1f",
-                request["request_id"],
-                self._handler.layer_start,
-                self._handler.layer_end,
-                tuple(sample.shape),
-                sample.numel() * sample.element_size(),
-                (time.perf_counter() - started_at) * 1000,
-            )
-            receipt = create_worker_receipt(
-                self._identity,
-                request,
-                output,
-                worker_peer_id=self._peer_id,
-            )
-            outputs.append(output)
-            receipts.append(
-                encode_metadata_tensor(
-                    {
-                        "worker_receipt": receipt,
-                        "worker_presence": self._identity.presence(self._peer_id),
-                    }
+            for index in range(hidden_states.shape[0]):
+                sample_started_at = time.perf_counter()
+                sample = hidden_states[index : index + 1]
+                request_document = decode_metadata_tensor(
+                    receipt_metadata[index : index + 1]
                 )
-            )
-        return torch.cat(outputs, dim=0), torch.cat(receipts, dim=0)
+                request = verify_inference_request(
+                    request_document,
+                    worker_public_key=self._identity.public_key,
+                    worker_peer_id=self._peer_id,
+                    rpc_uid=self._rpc_uid,
+                    layer_start=self._handler.layer_start,
+                    layer_end=self._handler.layer_end,
+                    hidden_states=sample,
+                )
+                if request["model_name"] != self._handler.model_name:
+                    raise ValueError("Inference request model does not match this worker")
+                if request["model_revision"] != self._model_revision:
+                    raise ValueError("Inference request revision does not match this worker")
+                kwargs = dict(
+                    hidden_states=sample,
+                    attention_mask=(
+                        attention_mask[index : index + 1]
+                        if attention_mask is not None
+                        else None
+                    ),
+                    position_ids=(
+                        position_ids[index : index + 1]
+                        if position_ids is not None
+                        else None
+                    ),
+                )
+                if self._supports_deadline:
+                    kwargs["deadline"] = deadline
+                if self._supports_deferred_accounting:
+                    kwargs["record_accounting"] = False
+                output = self._handler.forward(**kwargs)
+                logger.info(
+                    "Receipt expert forward complete | request=%s layers=%s-%s "
+                    "shape=%s bytes=%s elapsed_ms=%.1f",
+                    request["request_id"],
+                    self._handler.layer_start,
+                    self._handler.layer_end,
+                    tuple(sample.shape),
+                    sample.numel() * sample.element_size(),
+                    (time.perf_counter() - sample_started_at) * 1000,
+                )
+                receipt = create_worker_receipt(
+                    self._identity,
+                    request,
+                    output,
+                    worker_peer_id=self._peer_id,
+                )
+                outputs.append(output)
+                receipts.append(
+                    encode_metadata_tensor(
+                        {
+                            "worker_receipt": receipt,
+                            "worker_presence": self._identity.presence(self._peer_id),
+                        }
+                    )
+                )
+            result = torch.cat(outputs, dim=0), torch.cat(receipts, dim=0)
+            if self._supports_deferred_accounting:
+                self._handler.record_external_result(
+                    success=True,
+                    token_positions=int(hidden_states.shape[0] * hidden_states.shape[1]),
+                    latency_ms=(time.perf_counter() - started_at) * 1000,
+                )
+            return result
+
+        return self._safety.execute(hidden_states, execute)
 
 
 class RPCServer:
@@ -211,6 +303,7 @@ class RPCServer:
         uid_suffix: Optional[int] = None,
         incentives_config: Optional[IncentivesConfig] = None,
         application_identity: Optional[ApplicationIdentity] = None,
+        safety_config: Optional[RPCSafetyConfig] = None,
     ):
         if not handler.is_loaded():
             raise RuntimeError("RPCServer requires a loaded InferenceHandler")
@@ -224,6 +317,7 @@ class RPCServer:
         self.dht_prefix = dht_prefix
         self.uid_suffix = uid_suffix
         self.incentives_config = incentives_config or get_incentives_config()
+        self.safety_config = safety_config or get_rpc_safety_config()
         self.application_identity = (
             application_identity
             if application_identity is not None
@@ -239,6 +333,7 @@ class RPCServer:
         self._uid:     Optional[str] = None
         self._receipt_uid: Optional[str] = None
         self._lock     = threading.Lock()
+        self.safety_controller: Optional[RPCSafetyController] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -296,10 +391,14 @@ class RPCServer:
                 self.uid_suffix,
             )
             hidden_size = self._get_hidden_size()
+            self.safety_controller = RPCSafetyController(
+                self.safety_config,
+                hidden_size,
+            )
 
             logger.info(f"Starting RPC | uid={self._uid} | hidden_size={hidden_size}")
 
-            module = _HandlerModule(self.handler)
+            module = _HandlerModule(self.handler, self.safety_controller)
             # ── Tensor schemas ────────────────────────────────────────────────
             # args_schema   → positional args to forward() after self
             # kwargs_schema → keyword args; hivemind stores the keys as
@@ -318,16 +417,18 @@ class RPCServer:
             # shape enforcement.
             
             hidden_descriptor = BatchTensorDescriptor(
-                2048,
+                self.safety_config.max_sequence_length,
                 hidden_size,
                 compression=ACTIVATION_COMPRESSION,
             )
 
             # attention_mask is [batch, seq_len] → per-sample shape is (seq_len,)
             # We use (2048,) to match the max sequence length.
-            mask_descriptor   = BatchTensorDescriptor(2048)
+            mask_descriptor = BatchTensorDescriptor(
+                self.safety_config.max_sequence_length
+            )
 
-            backend = ModuleBackend(
+            backend = _install_rejecting_pools(ModuleBackend(
                 name=self._uid,
                 module=module,
                 args_schema=(hidden_descriptor,),
@@ -336,8 +437,9 @@ class RPCServer:
                     "position_ids"  : mask_descriptor,
                 },
                 outputs_schema=(hidden_descriptor,),
-                max_batch_size=4096,
-            )
+                max_batch_size=self.safety_config.max_batch_size,
+                pool_size=self.safety_config.max_queued_forwards,
+            ), self.safety_controller)
             module_backends = {self._uid: backend}
             if self.incentives_config.enabled:
                 if self.application_identity is None:
@@ -353,11 +455,11 @@ class RPCServer:
                     dtype=torch.uint8,
                 )
                 receipt_hidden_descriptor = BatchTensorDescriptor(
-                    2048,
+                    self.safety_config.max_sequence_length,
                     hidden_size,
                     compression=CompressionType.NONE,
                 )
-                receipt_backend = ModuleBackend(
+                receipt_backend = _install_rejecting_pools(ModuleBackend(
                     name=self._receipt_uid,
                     module=_ReceiptHandlerModule(
                         self.handler,
@@ -365,6 +467,7 @@ class RPCServer:
                         str(self.dht.peer_id),
                         self._receipt_uid,
                         self.incentives_config.model_revision,
+                        self.safety_controller,
                     ),
                     args_schema=(receipt_hidden_descriptor, metadata_descriptor),
                     kwargs_schema={
@@ -372,8 +475,9 @@ class RPCServer:
                         "position_ids": mask_descriptor,
                     },
                     outputs_schema=(receipt_hidden_descriptor, metadata_descriptor),
-                    max_batch_size=4096,
-                )
+                    max_batch_size=self.safety_config.max_batch_size,
+                    pool_size=self.safety_config.max_queued_forwards,
+                ), self.safety_controller)
                 module_backends[self._receipt_uid] = receipt_backend
 
             logger.info(
@@ -386,7 +490,11 @@ class RPCServer:
             self._server = hivemind.moe.Server(
                 dht=self.dht,
                 module_backends=module_backends,
-                num_connection_handlers=4,
+                num_connection_handlers=max(
+                    1,
+                    self.safety_config.max_concurrent_forwards
+                    + self.safety_config.max_queued_forwards,
+                ),
                 device=torch.device(self.handler.device),
             )
 
@@ -413,6 +521,11 @@ class RPCServer:
 
     def get_uid(self) -> Optional[str]:
         return self._uid
+
+    def get_safety_snapshot(self) -> Optional[dict]:
+        if self.safety_controller is None:
+            return None
+        return self.safety_controller.snapshot()
 
     def get_receipt_capability(self, peer_id: str) -> Optional[dict]:
         if (

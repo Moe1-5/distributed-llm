@@ -190,6 +190,12 @@ Monitoring presents DHT presence, transport verification, and expert RPC health 
 
 Inspect `/generator/status` health providers for the failure reason, last probe/success/failure timestamps, latency, role, and health revision. Tune `DISTRIBLLM_HEALTH_*` only after checking relay and worker logs; shortening intervals increases DHT/RPC control traffic. Network's Stop Generator action unloads the monitor and client DHT, while Chat's stop action only cancels the active inference request.
 
+## RPC Safety Rejection or Timeout
+
+Worker errors beginning with `rpc_safety:` are pre-execution policy decisions, not model-output failures. `shape`, `batch`, `sequence`, `hidden_size`, `dtype`, `tensor_bytes`, `non_finite`, `mask`, `position_ids`, and `metadata` identify invalid input. `overloaded` means active or Hivemind queue capacity is full; `queue_timeout` means a bounded waiter was not admitted. `execution_timeout` is a cooperative deadline checked between layers.
+
+Monitoring exposes only aggregate counts and policy limits. It never includes prompts, tensor values, receipt documents, identities, or local paths. Increase a limit only when the model context and available worker memory justify it. A timeout cannot interrupt a tensor kernel already executing inside one decoder block, so repeated timeouts also require model/device performance investigation.
+
 ## RPC Node Fails After Retries
 
 Possible causes:

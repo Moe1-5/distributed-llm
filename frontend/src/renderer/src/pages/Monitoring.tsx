@@ -585,6 +585,23 @@ export default function Monitoring(): React.JSX.Element {
                           : 'FULL LOAD FALLBACK'}
                       </span>
                     )}
+                    {node.rpc_safety && (
+                      <span
+                        className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
+                          node.rpc_safety.failed_requests > 0 ||
+                          node.rpc_safety.rejected_requests > 0 ||
+                          node.rpc_safety.timed_out_requests > 0
+                            ? 'border-amber/30 bg-amber/10 text-amber'
+                            : 'border-border text-text-dim'
+                        }`}
+                        title={`Active ${node.rpc_safety.active_forwards}/${node.rpc_safety.policy.max_concurrent_forwards}; queued ${node.rpc_safety.queued_forwards}/${node.rpc_safety.policy.max_queued_forwards}`}
+                      >
+                        RPC {node.rpc_safety.completed_requests} OK /{' '}
+                        {node.rpc_safety.failed_requests} FAILED /{' '}
+                        {node.rpc_safety.rejected_requests} REJECTED /{' '}
+                        {node.rpc_safety.timed_out_requests} TIMEOUT
+                      </span>
+                    )}
                     {node.loading && (
                       <span className="rounded border border-border px-2 py-0.5 font-mono text-[10px] text-text-dim">
                         {(node.loading.loaded_parameter_bytes / 1024 / 1024).toFixed(1)} MB /{' '}

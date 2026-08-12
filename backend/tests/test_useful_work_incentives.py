@@ -394,6 +394,10 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 )
                 self.assertEqual(result["status"], "shadow_accepted")
                 self.assertEqual(result["reward_units"], 600)
+                safety = rpc.get_safety_snapshot()
+                self.assertEqual(safety["accepted_requests"], 1)
+                self.assertEqual(safety["completed_requests"], 1)
+                self.assertEqual(safety["rejected_requests"], 0)
             finally:
                 if expert is not None:
                     RemoteExpertWorker.run_coroutine(expert.p2p.shutdown())

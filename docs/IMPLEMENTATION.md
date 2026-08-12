@@ -18,7 +18,7 @@ Approved work that can proceed without treating the live two-device evidence as 
 
 - Sprint 18: architecture-aware selective safetensors loading, node diagnostics, strict validation, and measured TinyLlama memory reduction are implemented with full regression coverage; physical package integration remains.
 - Sprint 19: continuous provider RPC health, thresholded readiness invalidation, bounded selected/standby probes, and lifecycle cleanup are implemented with full regression coverage; live relay timing remains.
-- Sprint 20: enforce typed resource, payload, concurrency, and timeout limits at the public expert RPC boundary.
+- Sprint 20: typed tensor/metadata validation, nonblocking bounded Hivemind queues, shared safety counters, cooperative deadlines, and transactional receipt accounting are implemented; live relay compatibility remains.
 - Sprint 21: consume accepted health and RPC semantics for bounded health-aware route failover.
 
 Sprints 18 through 21 were approved for implementation. Session/key-value cache routing, API keys, transferable incentives, and distributed training remain deferred.

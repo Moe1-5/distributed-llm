@@ -380,6 +380,8 @@ class Node:
         receipt_capability = (
             capability_getter(peer_id) if callable(capability_getter) else None
         )
+        safety_getter = getattr(self.rpc, "get_safety_snapshot", None)
+        rpc_safety = safety_getter() if callable(safety_getter) else None
         # Write full metadata
         self.dht.store(
             key=f"{self.dht_prefix}.node_info.{peer_id}",
@@ -401,6 +403,7 @@ class Node:
                 "direct_reachability": self.direct_reachability,
                 "transport_verified": self.transport_verified,
                 "loading":       getattr(self.handler, "load_diagnostics", None),
+                "rpc_safety":    rpc_safety,
                 "timestamp":     time.time(),
                 **(receipt_capability or {}),
             },
@@ -465,6 +468,8 @@ class Node:
             if callable(capability_getter) and peer_id is not None
             else None
         )
+        safety_getter = getattr(self.rpc, "get_safety_snapshot", None)
+        rpc_safety = safety_getter() if callable(safety_getter) else None
         return {
             "peer_id":       peer_id,
             "node_id":       self.node_id,
@@ -480,6 +485,7 @@ class Node:
             "direct_reachability": self.direct_reachability,
             "transport_verified": self.transport_verified,
             "loading":       getattr(self.handler, "load_diagnostics", None),
+            "rpc_safety":    rpc_safety,
             "accounting":    self.get_accounting_snapshot(),
             **(receipt_capability or {}),
         }

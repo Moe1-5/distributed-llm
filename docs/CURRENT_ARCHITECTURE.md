@@ -100,6 +100,10 @@ Provider health moves through checking, healthy, degraded, and offline. One tran
 
 Ordinary expert activations use float-sixteen wire compression and restore the source dtype after transport. Receipt protocol version one deliberately uses exact uncompressed tensors so request and response commitments remain verifiable.
 
+The public expert boundary uses one typed RPC safety policy. Default limits are 2,048 positions, batch size four, 256 MiB across inference tensors, 16,380 receipt payload bytes, one active forward, two queued forwards, a 250 ms admission wait, and a 120-second cooperative execution deadline. Hivemind task queues reject without blocking when full. Inputs are checked for shape, model hidden size, dtype, finite values, mask/position consistency, bytes, and metadata framing before model or signature work. Runtime-process-safe counters are announced with node metadata and shown in Monitoring.
+
+Execution deadlines are checked before the handler lock, between decoder blocks, and after the route slice. PyTorch kernels already running inside one block cannot be force-terminated safely. Queued Hivemind cancellations are removed before batching; admitted work relies on cooperative deadlines and never records receipt success until the complete batch and signed response are ready.
+
 The current data plane is:
 
 ```text
@@ -114,7 +118,7 @@ There is no distributed KV cache, health-aware failover, or concurrent generator
 
 ## Current Validation State
 
-- Backend regression suite: 216 tests and 26 subtests passing as of 2026-08-13, including cancellable provider-health probes, selective layer parity, and an independent-peer Hivemind receipt RPC with an activation larger than 128 KiB and a shadow-settlement round trip.
+- Backend regression suite: 233 tests and 54 subtests passing as of 2026-08-13, including adversarial RPC admission, cancellable provider-health probes, selective layer parity, and an independent-peer Hivemind receipt RPC with an activation larger than 128 KiB and a shadow-settlement round trip.
 - Frontend TypeScript checks, production build, 17 managed-launcher tests, Python compilation, and Windows package audit pass.
 - Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
 - Hugging Face device OAuth and real gated Llama 2 download have been exercised.
