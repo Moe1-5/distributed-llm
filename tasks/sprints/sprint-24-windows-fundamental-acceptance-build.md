@@ -72,3 +72,10 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 - Verification: all 17 managed-WSL launcher tests passed, frontend type checks and production build passed, and the package audit found 34 ASAR entries with zero forbidden entries.
 - Artifact: 87,654,070 bytes with SHA-256 `1c52dc54575d99971efdd921c26210493ac90d44449c431070b06c26f590c91e`.
 - Status: this supersedes the earlier local artifacts for physical acceptance. Python/Hivemind runtime binding, relay failover, direct inference, and clean lifecycle evidence still require the two physical Windows devices.
+
+### 2026-08-13 - Bind the responsive-generation acceptance artifact
+
+- What changed: rebuilt `DistribLLM-1.0.0-portable.exe` from runtime commit `a9f6af8817bcacab21bd750cc6f517120c926213` after the cancellation, warm component cache, renderer partial-state, and correlated transport diagnostics were committed.
+- Verification: 250 backend tests plus 54 subtests, frontend type checks and production build, 17 launcher tests, two renderer timing tests, and the package audit pass.
+- Artifact: 87,652,373 bytes with SHA-256 `b5cfe37b29a501f431f1dcad7e6f8bb0b515e2da7dd136d0281b28d80edefd41`; its ASAR contains 36 entries and zero forbidden entries.
+- Status: this artifact supersedes every earlier local executable for physical acceptance. Relay/direct inference and lifecycle evidence on two physical Windows devices remain open.
