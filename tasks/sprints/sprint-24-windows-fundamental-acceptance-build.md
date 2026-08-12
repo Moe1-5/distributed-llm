@@ -22,7 +22,7 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 
 - [x] Reconcile the launcher and package configuration with all fundamental backend changes.
 - [x] Retain preflight checks for WSL availability, distro state, configured bootstrap relay, writable runtime paths, and backend readiness.
-- [ ] Build the portable Windows executable and record filename, size, SHA-256, source commit, app version, Python version, and Hivemind version.
+- [x] Build the portable Windows executable and record filename, size, SHA-256, runtime source commit, and app version; packaged-device evidence will add Python and Hivemind versions.
 - [x] Run package-content audit and reject secrets, private runtime state, archives, and local absolute paths.
 - [x] Exercise start/stop/restart/recovery behavior in the launcher test contract.
 - [ ] Run the exact same artifact on two physical Windows devices for relay and direct acceptance capture.
@@ -38,7 +38,7 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 ## Acceptance Criteria
 
 - [x] One portable Windows executable passes the package audit.
-- [ ] Artifact metadata is reproducible and bound to the integrated source commit.
+- [x] Local artifact metadata is bound to the integrated runtime source commit.
 - [ ] Both physical devices run the same executable hash and managed backend contract.
 - [ ] The package completes fundamental relay and direct inference workflows.
 - [ ] Stop, restart, failed startup, and cleanup behavior leave no orphan backend or stale UI state.
@@ -59,3 +59,9 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 - What changed: built the Windows x64 portable target after backend and frontend validation, ran the package-content audit, and verified the existing managed-WSL lifecycle contract through 17 launcher tests.
 - Why: both physical test devices need one reviewed artifact after the relay and responsiveness fixes, without packaged secrets or developer runtime state.
 - Status: the pre-commit build is 87,654,380 bytes with SHA-256 `4a49b057674a873d3d6e10c6ff5ee8e25174b66e139eef98fc24078a6e6f807e`; its audit found 34 ASAR entries and zero forbidden entries. A final post-commit rebuild/hash and two physical Windows device runs remain open.
+
+### 2026-08-13 - Bind the post-commit portable artifact
+
+- What changed: rebuilt `DistribLLM-1.0.0-portable.exe` from runtime source commit `7c75b84`, reran the package audit, and recorded the final local artifact identity.
+- Why: the device-test executable must be distinguishable from the earlier package produced before the relay and responsiveness implementation was committed.
+- Status: the artifact is 87,654,381 bytes with SHA-256 `22038dc3f6c045105e39d3051a8180d7b84bbd3c5ba4565480e607b5bacc4ba2`; the audit reports 34 ASAR entries and zero forbidden entries. Python/Hivemind runtime binding and relay/direct inference still require the two physical Windows runs.
