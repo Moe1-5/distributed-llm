@@ -15,12 +15,14 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 from client.generation import DistributedGenerator
+from client.rpc_policy import RPCAttemptPolicy, get_rpc_attempt_policy
 from client.sequential import RemoteSequential
+from hivemind.compression import deserialize_torch_tensor, serialize_torch_tensor
 from models.architecture_adapter import get_architecture_adapter
 from node.handler import InferenceHandler
 from node.node import Node
 from node.relay_compat import _static_relay_process_args
-from node.rpc_server import RPCServer
+from node.rpc_server import ACTIVATION_COMPRESSION, RPCServer
 from relay_probe import _relay_dht_kwargs, run_relay_probe
 from api.local_models import (
     LocalModelValidationError,
@@ -1136,6 +1138,129 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             api_server.local_nodes.update(original_local_nodes)
 
         self.assertEqual(peers, ["bootstrap", "local-peer"])
+
+    def test_generator_dials_relay_without_requesting_a_reservation(self) -> None:
+        from api import server as api_server
+
+        kwargs = api_server._generator_dht_kwargs(["bootstrap"])
+
+        self.assertEqual(kwargs["initial_peers"], ["bootstrap"])
+        self.assertTrue(kwargs["use_relay"])
+        self.assertTrue(kwargs["client_mode"])
+        self.assertNotIn("trusted_relays", kwargs)
+        self.assertNotIn("use_auto_relay", kwargs)
+
+    def test_generation_session_reuses_one_discovered_route(self) -> None:
+        node = {
+            **self.make_node(0, 1, "peer-a"),
+            "rpc_uid": "test-prefix.0.1",
+            "running": True,
+            "layers_loaded": True,
+            "rpc_running": True,
+        }
+        sequential = RemoteSequential(
+            DummyDHT(),
+            "test-prefix",
+            num_layers=1,
+            model_name="facebook/opt-125m",
+        )
+        discoveries = 0
+
+        def discover() -> list[dict]:
+            nonlocal discoveries
+            discoveries += 1
+            return [node]
+
+        sequential._discover_nodes = discover
+        sequential._call_node = lambda **kwargs: kwargs["hidden_states"]
+        sequential.start_session("session-a")
+
+        sequential.forward(torch.zeros(1, 2, 4))
+        sequential.forward(torch.zeros(1, 3, 4))
+
+        self.assertEqual(discoveries, 1)
+        self.assertTrue(sequential.get_last_forward_metrics()["route_reused"])
+        sequential.end_session()
+        self.assertIsNone(sequential._session_route)
+
+    def test_ambiguous_stream_reset_is_not_retried(self) -> None:
+        sequential = RemoteSequential(
+            DummyDHT(),
+            "test-prefix",
+            num_layers=1,
+            rpc_attempt_policy=RPCAttemptPolicy(
+                max_attempts=3,
+                initial_backoff_seconds=0,
+                max_backoff_seconds=0,
+            ),
+        )
+        calls = 0
+
+        def fail(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("stream reset")
+
+        sequential._rpc_forward = fail
+        with self.assertRaisesRegex(RuntimeError, "1/3 attempt.*ambiguous_transport"):
+            sequential._call_node(
+                "test-prefix.0.1",
+                "peer-a",
+                torch.zeros(1, 2, 4),
+                request_id="request-a",
+            )
+
+        self.assertEqual(calls, 1)
+
+    def test_pre_execution_dial_failure_retries_within_budget(self) -> None:
+        sequential = RemoteSequential(
+            DummyDHT(),
+            "test-prefix",
+            num_layers=1,
+            rpc_attempt_policy=RPCAttemptPolicy(
+                max_attempts=2,
+                initial_backoff_seconds=0,
+                max_backoff_seconds=0,
+            ),
+        )
+        calls = 0
+        expected = torch.ones(1, 2, 4)
+
+        def forward(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("failed to dial peer")
+            return expected
+
+        sequential._rpc_forward = forward
+        result = sequential._call_node(
+            "test-prefix.0.1",
+            "peer-a",
+            torch.zeros(1, 2, 4),
+            request_id="request-b",
+        )
+
+        self.assertIs(result, expected)
+        self.assertEqual(calls, 2)
+
+    def test_rpc_policy_environment_is_validated(self) -> None:
+        with patch.dict(os.environ, {"DISTRIBLLM_RPC_MAX_ATTEMPTS": "0"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "between 1 and 5"):
+                get_rpc_attempt_policy()
+
+    def test_activation_wire_compression_reduces_representative_payload(self) -> None:
+        activation = torch.linspace(-1, 1, 50 * 768, dtype=torch.float32).reshape(
+            1, 50, 768
+        )
+
+        serialized = serialize_torch_tensor(activation, ACTIVATION_COMPRESSION)
+        restored = deserialize_torch_tensor(serialized)
+
+        self.assertGreater(activation.numel() * activation.element_size(), 131072)
+        self.assertLess(len(serialized.buffer), 131072)
+        self.assertEqual(restored.dtype, activation.dtype)
+        self.assertTrue(torch.allclose(restored, activation, atol=5e-4, rtol=5e-4))
 
     def test_reachable_route_probes_each_expert(self) -> None:
         from client import sequential as sequential_module

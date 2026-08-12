@@ -27,6 +27,8 @@ The renderer has six pages:
 
 Bootstrap configuration is intentionally hidden from normal product workflow. The backend URL defaults to `http://127.0.0.1:8000`; Vite overrides use `VITE_API_BASE_URL` and `VITE_WS_BASE_URL`.
 
+Renderer HTTP calls have finite deadlines. Stats, node, status, and Monitoring polls do not overlap themselves, and Monitoring preserves successful partial responses when another endpoint times out. Network loads the local model catalog without a DHT scan, then requests coverage independently for the selected model.
+
 In the Windows package, Electron main owns a managed WSL launcher. It validates persisted distro/path/relay configuration, checks WSL and distro availability, synchronizes the uv environment, launches FastAPI through `wsl.exe`, polls the loopback status endpoint, and publishes typed lifecycle diagnostics over preload IPC. The Nodes and inference views still communicate with FastAPI normally; Settings owns first-run launcher configuration and lifecycle commands. The launcher PID file stops only its managed backend process and leaves WSL model, identity, OAuth, trace, and receipt state intact.
 
 ## Backend State
@@ -40,6 +42,8 @@ generator: Optional[DistributedGenerator]
 client_dht: Optional[hivemind.DHT]
 client_dht_prefix: str
 ```
+
+Long node and generator starts run as lifecycle jobs with queued, running, ready, failed, cancelling, and cancelled state. The initiating request returns immediately, progress is polled by job ID, duplicate active resource starts are deduplicated, and cancellation cleans up resources after the owned startup call returns. Existing synchronous endpoints remain for compatible clients.
 
 One backend can serve multiple non-overlapping slices, but all local slices must use one model-compatible DHT prefix. Only one generator is active per backend process. True multi-machine testing uses separate backend/worker processes.
 
@@ -84,11 +88,13 @@ Current layer-loading limitation: Transformers constructs the complete model in 
 
 `RemoteSequential` validates DHT metadata, filters by model, builds a contiguous non-overlapping route, rejects gaps/incompatible ranges, and calls selected RPC experts in layer order.
 
-When incentives are in shadow or credit mode, selected nodes may advertise a separate receipt expert with signed Ed25519 presence. The generator signs the complete route and BLAKE3 input commitment, validates the worker's signed response commitment, and countersigns accepted output. Receipt failures fall back to the unchanged expert without credit. A project-owned FastAPI service validates pairs and stores an append-only SQLite WAL ledger; credits remain read-only and non-transferable.
+When incentives are in shadow or credit mode, selected nodes may advertise a separate receipt expert with signed Ed25519 presence. The generator signs the complete route and BLAKE3 input commitment, validates the worker's signed response commitment, and countersigns accepted output. Legacy fallback is allowed only when the advertised receipt expert is absent before execution; ambiguous failures stop without duplicate work or credit. A project-owned FastAPI service validates pairs and stores an append-only SQLite WAL ledger; credits remain read-only and non-transferable.
 
 When serving and generating on the same machine, generator startup directly seeds matching local node multiaddresses alongside configured bootstrap peers. Generator peers enable relay dialing. Readiness resolves every selected expert and probes RPC metadata so DHT coverage or a claimed relay address alone cannot produce a false-ready state.
 
-`DistributedGenerator` loads local model components and performs autoregressive generation through that route. Base models preserve raw completion prompts, while chat and instruct models apply the publisher tokenizer chat template once with a generation prompt. Stream chunks are derived from cumulative tokenizer decoding so concatenating them preserves spaces and matches the final decoded sequence. The generator also supports exact generation controls, stop requests, route readiness, next-token parity probes, generated-output comparisons, and JSON trace artifacts. Generator status exposes startup/load duration, current route-probe duration, latest time to first token, total generation duration, token throughput, and per-hop RPC latency aggregates. These measurements are observational and do not alter route selection.
+`DistributedGenerator` loads local model components and performs autoregressive generation through that route. One immutable route snapshot is discovered and validated per generation session instead of once per token. Base models preserve raw completion prompts, while chat and instruct models apply the publisher tokenizer chat template once with a generation prompt. Stream chunks are derived from cumulative tokenizer decoding so concatenating them preserves spaces and matches the final decoded sequence. The generator also supports exact generation controls, stop requests, route readiness, next-token parity probes, generated-output comparisons, and JSON trace artifacts. Generator status exposes startup/load duration, current route-probe duration, latest time to first token, total generation duration, token throughput, and per-hop RPC latency aggregates.
+
+Ordinary expert activations use float-sixteen wire compression and restore the source dtype after transport. Receipt protocol version one deliberately uses exact uncompressed tensors so request and response commitments remain verifiable.
 
 The current data plane is:
 
@@ -100,12 +106,12 @@ token ids
   -> token selection
 ```
 
-There is no distributed KV cache, stable session routing, failover, or concurrent generator registry yet. Each token can still process the full sequence, so performance is prototype-grade.
+There is no distributed KV cache, health-aware failover, or concurrent generator registry yet. The selected route is stable for a generation session, but each token still processes the full sequence, so compute throughput remains prototype-grade.
 
 ## Current Validation State
 
-- Backend regression suite: 154 tests and 19 subtests passing as of 2026-08-12, including an independent-peer Hivemind receipt RPC and shadow-settlement round trip.
-- Frontend TypeScript typecheck and Python compilation pass with the direct/relay transport changes.
+- Backend regression suite: 195 tests and 22 subtests passing as of 2026-08-13, including an independent-peer Hivemind receipt RPC with an activation larger than 128 KiB and a shadow-settlement round trip.
+- Frontend TypeScript checks, production build, 17 managed-launcher tests, Python compilation, and Windows package audit pass.
 - Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
 - Hugging Face device OAuth and real gated Llama 2 download have been exercised.
 - A Windows/WSL participant obtained a complete circuit address through the public VPS relay in 1.63 seconds, and a second same-host Hivemind peer completed an OPT-125M expert metadata RPC using only that circuit address. Tensor forwarding, direct two-device routing, and relayed two-device inference remain to be validated live.

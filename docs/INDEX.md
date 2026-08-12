@@ -7,7 +7,7 @@
 |-------|------|---------------|
 | Documentation landing page | `README.md` | Start-here guide, current project goal, and end vision |
 | Source file map | `REPO_MAP.md` | Responsibilities for backend, frontend, incentives, and generated artifacts |
-| Current architecture | `CURRENT_ARCHITECTURE.md` | Backend, frontend, DHT, node, RPC, generation, useful-work settlement, and limitations |
+| Current architecture | `CURRENT_ARCHITECTURE.md` | Backend, frontend, lifecycle jobs, DHT, compressed/exact RPC paths, generation, useful-work settlement, and limitations |
 | Runtime flows | `FLOWS.md` | Bootstrap, model access, lifecycle, routing, inference, useful-work receipts, remote workers, and cleanup |
 | Implementation roadmap | `IMPLEMENTATION.md` | Current validation status plus proposed selective loading, health, RPC safety, failover, incentives, API access, and later training work |
 | Petals comparison | `PETALS_COMPARISON.md` | Similarities, differences, public-swarm positioning, and what to borrow from Petals |
@@ -19,10 +19,11 @@
 | Two-device acceptance evidence | `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized relay/direct captures, Windows and VPS artifact assembly, complete-route validation, shadow receipts, standby non-payment, and manual gates |
 | Local split acceptance | `LOCAL_SPLIT_ACCEPTANCE.md` | One-command real two-peer OPT split inference, parity, accounting, cleanup, and recorded evidence |
 | TinyLlama performance baseline | `TINYLLAMA_PERFORMANCE_BASELINE.md` | Bounded real distributed timing probe and the current Transformers chat-template compatibility blocker |
-| Errors and debugging | `ERRORS_AND_DEBUGGING.md` | Current OAuth, model access, CUDA/RAM, bootstrap, RPC/NAT, route, and trace troubleshooting |
+| Errors and debugging | `ERRORS_AND_DEBUGGING.md` | Current OAuth, model access, CUDA/RAM, bootstrap, bounded RPC/reset diagnosis, route, and trace troubleshooting |
 | Validation and testing | `VALIDATION_AND_TEST_PLAN.md` | Current regression status plus local, gated, instruction-ready, cleanup, and real multi-machine phase gates |
 | Starter-system architecture summary | `architecture.md` | Stack, folder ownership, key patterns, and external services |
 | Decision log | `decisions.md` | Append-only architecture decision records |
+| Active sprint plans | `../tasks/active.md` | Current implementation and acceptance sprints, including relay stability, responsiveness, and Windows build work |
 | Historical issue findings | `../ISSUES.md` | Dated runtime findings, verification evidence, resolutions, and confirmed open defects |
 
 ---

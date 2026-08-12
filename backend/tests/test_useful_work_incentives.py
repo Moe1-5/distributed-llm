@@ -292,7 +292,7 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 layer_start = 0
                 layer_end = 12
                 device = "cpu"
-                layers = nn.ModuleList([nn.Linear(8, 8, bias=False)])
+                layers = nn.ModuleList([nn.Linear(768, 768, bias=False)])
 
                 def is_loaded(self) -> bool:
                     return True
@@ -336,7 +336,16 @@ class IdentityAndProtocolTests(unittest.TestCase):
                         "layer_end": 12,
                     }
                 ]
-                hidden = torch.arange(24, dtype=torch.float32).reshape(1, 3, 8)
+                hidden = torch.linspace(
+                    -1,
+                    1,
+                    50 * 768,
+                    dtype=torch.float32,
+                ).reshape(1, 50, 768)
+                self.assertGreater(
+                    hidden.numel() * hidden.element_size(),
+                    131072,
+                )
                 request = create_inference_request(
                     generator,
                     generator_peer_id=generator_peer,
@@ -346,7 +355,7 @@ class IdentityAndProtocolTests(unittest.TestCase):
                     route=route,
                     worker=route[0],
                     hidden_states=hidden,
-                    position_count=3,
+                    position_count=50,
                     request_id="integration-request",
                 )
                 expert = get_experts(
@@ -358,8 +367,8 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 output, metadata_tensor = expert.forward(
                     hidden,
                     encode_metadata_tensor(request),
-                    attention_mask=torch.ones((1, 3), dtype=torch.bool),
-                    position_ids=torch.arange(3).unsqueeze(0),
+                    attention_mask=torch.ones((1, 50), dtype=torch.bool),
+                    position_ids=torch.arange(50).unsqueeze(0),
                 )
                 metadata = decode_metadata_tensor(metadata_tensor)
                 acceptance = accept_worker_receipt(
@@ -380,9 +389,11 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 verified = validate_submission(submission, store.active_policy())
                 result = store.append(verified, "shadow", int(time.time()))
 
-                self.assertTrue(torch.equal(output, hidden + 1))
+                self.assertTrue(
+                    torch.allclose(output, hidden + 1, atol=1e-3, rtol=1e-3)
+                )
                 self.assertEqual(result["status"], "shadow_accepted")
-                self.assertEqual(result["reward_units"], 36)
+                self.assertEqual(result["reward_units"], 600)
             finally:
                 if expert is not None:
                     RemoteExpertWorker.run_coroutine(expert.p2p.shutdown())

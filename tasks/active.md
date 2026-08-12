@@ -14,6 +14,9 @@
 | Sprint 19 | `tasks/sprints/sprint-19-continuous-provider-health.md` | Continuously probe provider RPC health and invalidate stale route readiness. |
 | Sprint 20 | `tasks/sprints/sprint-20-rpc-resource-safety.md` | Bound and validate public expert RPC work before model execution. |
 | Sprint 21 | `tasks/sprints/sprint-21-health-aware-route-failover.md` | Select healthy complete routes and fail over through bounded, accounting-safe attempts. |
+| Sprint 22 | `tasks/sprints/sprint-22-relay-tensor-rpc-stability.md` | Stabilize relayed tensor RPC with correlated evidence and strictly bounded attempts. |
+| Sprint 23 | `tasks/sprints/sprint-23-responsive-startup-and-generation.md` | Keep startup and generation responsive while removing repeated route and polling work. |
+| Sprint 24 | `tasks/sprints/sprint-24-windows-fundamental-acceptance-build.md` | Produce an audited Windows executable for repeatable two-device fundamental acceptance. |
 
 ## Completed Sprints
 

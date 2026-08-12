@@ -5,6 +5,7 @@
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
 const WS_URL = import.meta.env.VITE_WS_BASE_URL ?? BASE_URL.replace(/^http/, 'ws')
+const REQUEST_TIMEOUT_MS = 8_000
 
 // ---------------------------------------------------------------------------
 // Types
@@ -24,6 +25,20 @@ export interface NodeInfo {
   connection_mode?: 'checking' | 'direct' | 'relay'
   direct_reachability?: boolean | null
   transport_verified?: boolean
+}
+
+export interface LifecycleJob {
+  job_id: string
+  kind: 'node_start' | 'generator_start'
+  resource_key: string
+  status: 'queued' | 'running' | 'ready' | 'failed' | 'cancelled'
+  stage: string
+  detail: string
+  elapsed_seconds: number
+  cancel_requested: boolean
+  result: Record<string, unknown> | null
+  error: string | null
+  reused?: boolean
 }
 
 export interface ModelInfo {
@@ -414,8 +429,23 @@ function generationOptionsPayload(options: GenerationOptions): Record<string, un
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
+async function fetchWithDeadline(path: string, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  try {
+    return await fetch(`${BASE_URL}${path}`, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error(`${init?.method ?? 'GET'} ${path} timed out after 8 seconds`)
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
+  }
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`)
+  const res = await fetchWithDeadline(path)
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`)
   return res.json() as Promise<T>
 }
@@ -432,7 +462,7 @@ export class ApiError extends Error {
 }
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await fetchWithDeadline(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined
@@ -460,7 +490,7 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 async function del<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, { method: 'DELETE' })
+  const res = await fetchWithDeadline(path, { method: 'DELETE' })
   if (!res.ok) {
     let detail = ''
     try {
@@ -500,6 +530,12 @@ export const api = {
       token_available: boolean
       default_peers: string[]
     }>('/models'),
+  getModelCatalog: () =>
+    get<{
+      models: ModelInfo[]
+      token_available: boolean
+      default_peers: string[]
+    }>('/models/catalog'),
   getServingPlan: (modelId: string, layerCount: number) =>
     get<ServingPlan>(
       `/models/${encodeURIComponent(modelId)}/serving-plan?layer_count=${encodeURIComponent(layerCount)}`
@@ -511,6 +547,8 @@ export const api = {
       '/node/start',
       params
     ),
+  startNodeAsync: (params: NodeStartParams) =>
+    post<LifecycleJob>('/node/start-async', params),
   turnOnNode: (nodeId?: string) =>
     post<{ status: string; info?: NodeInfo; error?: string }>(
       `/node/turn-on${nodeId ? `?node_id=${encodeURIComponent(nodeId)}` : ''}`
@@ -528,8 +566,14 @@ export const api = {
   // Generator
   startGenerator: (params: GeneratorStartParams) =>
     post<{ status: string; error?: string; message?: string }>('/generator/start', params),
+  startGeneratorAsync: (params: GeneratorStartParams) =>
+    post<LifecycleJob>('/generator/start-async', params),
   stopGenerator: () => post<{ status: string }>('/generator/stop'),
   getGeneratorStatus: () => get<GeneratorStatus>('/generator/status'),
+  getLifecycleJob: (jobId: string) =>
+    get<LifecycleJob>(`/lifecycle/jobs/${encodeURIComponent(jobId)}`),
+  cancelLifecycleJob: (jobId: string) =>
+    del<LifecycleJob>(`/lifecycle/jobs/${encodeURIComponent(jobId)}`),
 
   // Chat
   chat: (

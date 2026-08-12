@@ -196,6 +196,12 @@ Possible causes:
 
 Inspect node logs, route trace, `backend/client/sequential.py`, `backend/node/handler.py`, and worker-visible multiaddresses.
 
+Current clients attach a request ID, hop number, attempt budget, elapsed time, input byte count, and failure class to expert-call logs. A `stream reset` is classified as an ambiguous transport outcome and is not retried automatically because the worker may already have executed it. Known pre-execution dial failures may retry only within `DISTRIBLLM_RPC_MAX_ATTEMPTS` and the configured bounded backoff.
+
+VPS relay debug lines that report exactly `131072` bytes in one direction do not by themselves prove a 128 KiB relay quota. The Hivemind 1.1.12 bundled daemon reports a four-gigabyte default relay data allowance; 128 KiB can be the stream flow-control window visible when an endpoint resets. Correlate the same time window across generator, worker, and VPS logs. The worker must show either `Expert forward complete` with shape, bytes, and duration or an exception before the transport failure can be classified.
+
+Legacy inference compresses floating activations to float sixteen on the wire and restores their original dtype. Receipt protocol version one remains uncompressed because its signed BLAKE3 commitment covers exact tensor bytes; applying lossy compression before worker verification would invalidate the commitment.
+
 If the peer advertises only `/ip4/172.x.x.x/...`, another Windows device cannot normally reach that WSL-private address. Choose one path:
 
 - Direct LAN: set a fixed `DISTRIBLLM_P2P_PORT`, announce the Windows LAN address, enable WSL mirrored networking or a Windows `portproxy`, and allow that TCP port through the Windows/Hyper-V firewall.
@@ -249,3 +255,4 @@ Trace JSON defaults to `backend/traces/`; override with `DISTRIBLLM_TRACE_DIR`. 
 8. `/generator/status` reports complete contiguous coverage.
 9. Worker transport reports direct or relay, and every selected expert passes its RPC probe.
 10. Use parity/trace tools before diagnosing output quality.
+11. For a reset, match the generator request ID to worker completion/error timing and the VPS circuit interval before changing relay limits.

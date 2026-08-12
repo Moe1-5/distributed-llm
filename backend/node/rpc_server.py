@@ -14,12 +14,14 @@ UID format fix:
 """
 
 import threading
+import time
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import hivemind
 from hivemind.moe.server import ModuleBackend
+from hivemind.proto.runtime_pb2 import CompressionType
 from hivemind.utils.tensor_descr import BatchTensorDescriptor
 from hivemind.utils.logging import get_logger
 
@@ -37,6 +39,7 @@ from node.handler import InferenceHandler
 logger = get_logger(__name__)
 
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+ACTIVATION_COMPRESSION = CompressionType.FLOAT16
 
 
 def _run_with_timeout(name: str, target, timeout: float) -> bool:
@@ -78,7 +81,31 @@ class _HandlerModule(nn.Module):
             position_ids: Optional[torch.Tensor] = None,
             ) -> torch.Tensor:
         
-        return self._handler.forward(hidden_states=hidden_states, attention_mask=attention_mask, position_ids=position_ids)
+        started_at = time.perf_counter()
+        try:
+            output = self._handler.forward(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
+        except Exception:
+            logger.exception(
+                "Expert forward failed | layers=%s-%s shape=%s",
+                self._handler.layer_start,
+                self._handler.layer_end,
+                tuple(hidden_states.shape),
+            )
+            raise
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        logger.info(
+            "Expert forward complete | layers=%s-%s shape=%s bytes=%s elapsed_ms=%.1f",
+            self._handler.layer_start,
+            self._handler.layer_end,
+            tuple(hidden_states.shape),
+            hidden_states.numel() * hidden_states.element_size(),
+            elapsed_ms,
+        )
+        return output
 
 
 class _ReceiptHandlerModule(nn.Module):
@@ -111,6 +138,7 @@ class _ReceiptHandlerModule(nn.Module):
         outputs: list[torch.Tensor] = []
         receipts: list[torch.Tensor] = []
         for index in range(hidden_states.shape[0]):
+            started_at = time.perf_counter()
             sample = hidden_states[index : index + 1]
             request_document = decode_metadata_tensor(
                 receipt_metadata[index : index + 1]
@@ -140,6 +168,16 @@ class _ReceiptHandlerModule(nn.Module):
                     if position_ids is not None
                     else None
                 ),
+            )
+            logger.info(
+                "Receipt expert forward complete | request=%s layers=%s-%s "
+                "shape=%s bytes=%s elapsed_ms=%.1f",
+                request["request_id"],
+                self._handler.layer_start,
+                self._handler.layer_end,
+                tuple(sample.shape),
+                sample.numel() * sample.element_size(),
+                (time.perf_counter() - started_at) * 1000,
             )
             receipt = create_worker_receipt(
                 self._identity,
@@ -279,7 +317,11 @@ class RPCServer:
             # here — hivemind only uses this for serialization sizing, not strict
             # shape enforcement.
             
-            hidden_descriptor = BatchTensorDescriptor(2048, hidden_size)
+            hidden_descriptor = BatchTensorDescriptor(
+                2048,
+                hidden_size,
+                compression=ACTIVATION_COMPRESSION,
+            )
 
             # attention_mask is [batch, seq_len] → per-sample shape is (seq_len,)
             # We use (2048,) to match the max sequence length.
@@ -310,6 +352,11 @@ class RPCServer:
                     METADATA_TENSOR_SIZE,
                     dtype=torch.uint8,
                 )
+                receipt_hidden_descriptor = BatchTensorDescriptor(
+                    2048,
+                    hidden_size,
+                    compression=CompressionType.NONE,
+                )
                 receipt_backend = ModuleBackend(
                     name=self._receipt_uid,
                     module=_ReceiptHandlerModule(
@@ -319,12 +366,12 @@ class RPCServer:
                         self._receipt_uid,
                         self.incentives_config.model_revision,
                     ),
-                    args_schema=(hidden_descriptor, metadata_descriptor),
+                    args_schema=(receipt_hidden_descriptor, metadata_descriptor),
                     kwargs_schema={
                         "attention_mask": mask_descriptor,
                         "position_ids": mask_descriptor,
                     },
-                    outputs_schema=(hidden_descriptor, metadata_descriptor),
+                    outputs_schema=(receipt_hidden_descriptor, metadata_descriptor),
                     max_batch_size=4096,
                 )
                 module_backends[self._receipt_uid] = receipt_backend

@@ -10,11 +10,12 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react'
-import { api, ApiError } from '../api/client'
+import { api } from '../api/client'
 import type {
   HuggingFaceConnection,
   HuggingFaceDeviceFlow,
   HuggingFaceDownloadJob,
+  LifecycleJob,
   LocalModelImport,
   ModelInfo,
   ServingPlan
@@ -56,26 +57,54 @@ function formatRanges(ranges: Array<{ start: number; end: number }>): string {
     : 'none'
 }
 
-interface CoverageConflict {
-  error: 'coverage_revision_stale' | 'redundancy_confirmation_required'
-  message: string
-  plan: ServingPlan
+interface StartResult {
+  status: string
+  info?: { maddrs?: string[] }
+  error?: string
+  message?: string
+  plan?: ServingPlan
 }
 
-function coverageConflict(error: unknown): CoverageConflict | null {
-  if (!(error instanceof ApiError) || error.status !== 409 || !error.payload) return null
-  const payload = error.payload as { detail?: Partial<CoverageConflict> }
-  const detail = payload.detail
-  if (
-    !detail ||
-    (detail.error !== 'coverage_revision_stale' &&
-      detail.error !== 'redundancy_confirmation_required') ||
-    typeof detail.message !== 'string' ||
-    !detail.plan
-  ) {
-    return null
+async function waitForLifecycleJob(
+  initial: LifecycleJob,
+  onUpdate: (job: LifecycleJob) => void
+): Promise<LifecycleJob> {
+  let current = initial
+  onUpdate(current)
+  while (current.status === 'queued' || current.status === 'running') {
+    await new Promise((resolve) => window.setTimeout(resolve, 500))
+    current = await api.getLifecycleJob(current.job_id)
+    onUpdate(current)
   }
-  return detail as CoverageConflict
+  return current
+}
+
+function startResultFromJob(job: LifecycleJob): StartResult {
+  const candidate = job.result
+  if (candidate && typeof candidate.status === 'string') {
+    const info = candidate.info
+    const infoRecord =
+      info && typeof info === 'object' ? (info as Record<string, unknown>) : null
+    const plan = candidate.plan
+    return {
+      status: candidate.status,
+      error: typeof candidate.error === 'string' ? candidate.error : undefined,
+      message: typeof candidate.message === 'string' ? candidate.message : undefined,
+      info:
+        infoRecord
+          ? {
+              maddrs: Array.isArray(infoRecord.maddrs)
+                ? infoRecord.maddrs.filter((item): item is string => typeof item === 'string')
+                : undefined
+            }
+          : undefined,
+      plan: plan && typeof plan === 'object' ? (plan as ServingPlan) : undefined
+    }
+  }
+  return {
+    status: job.status === 'failed' ? 'error' : job.status,
+    error: job.error ?? undefined
+  }
 }
 
 function CoverageStrip({ plan }: { plan: ServingPlan }): React.JSX.Element {
@@ -136,11 +165,15 @@ export default function Network(): React.JSX.Element {
   const [device, setDevice] = useState('cuda')
   const [nodeRunning, setNodeRunning] = useState(false)
   const [nodeLoading, setNodeLoading] = useState(false)
+  const [nodeProgress, setNodeProgress] = useState('starting')
+  const [nodeJobId, setNodeJobId] = useState<string | null>(null)
 
   // Run Inference form state
   const [inferModel, setInferModel] = useState('')
   const [inferencePlan, setInferencePlan] = useState<ServingPlan | null>(null)
   const [genLoading, setGenLoading] = useState(false)
+  const [genProgress, setGenProgress] = useState('starting')
+  const [genJobId, setGenJobId] = useState<string | null>(null)
   const [genReady, setGenReady] = useState(false)
 
   // Status badges
@@ -162,19 +195,25 @@ export default function Network(): React.JSX.Element {
   useEffect(() => {
     const loadInitial = async (): Promise<void> => {
       try {
-        const [modelsRes, statusRes, hfRes] = await Promise.all([
-          api.getModels(),
+        const [modelsResult, statusResult, hfResult] = await Promise.allSettled([
+          api.getModelCatalog(),
           api.getStatus(),
           api.getHuggingFaceConnection()
         ])
 
-        setModels(modelsRes.models)
-        setLocalImports(statusRes.local_models ?? [])
-        setHfConnection(hfRes)
+        if (modelsResult.status === 'fulfilled') setModels(modelsResult.value.models)
+        if (statusResult.status === 'fulfilled') {
+          setLocalImports(statusResult.value.local_models ?? [])
+          setBackendOk(true)
+          setGpuAvailable(statusResult.value.gpu_available)
+          setNodeRunning(statusResult.value.node_running)
+          setGenReady(statusResult.value.generator_ready)
+        }
+        if (hfResult.status === 'fulfilled') setHfConnection(hfResult.value)
 
         // Auto-select first model
-        if (modelsRes.models.length > 0) {
-          const first = modelsRes.models[0]
+        if (modelsResult.status === 'fulfilled' && modelsResult.value.models.length > 0) {
+          const first = modelsResult.value.models[0]
           setServeModel(first.id)
           setInferModel(first.id)
           const initialLayerCount = Math.max(1, Math.ceil(first.num_layers / 2))
@@ -183,10 +222,7 @@ export default function Network(): React.JSX.Element {
           setLayerEnd(initialLayerCount)
         }
 
-        setBackendOk(true)
-        setGpuAvailable(statusRes.gpu_available)
-        setNodeRunning(statusRes.node_running)
-        setGenReady(statusRes.generator_ready)
+        if (statusResult.status === 'rejected') throw statusResult.reason
       } catch {
         setBackendOk(false)
       } finally {
@@ -644,31 +680,42 @@ export default function Network(): React.JSX.Element {
         coverage_revision: latestPlan.coverage_revision
       }
 
-      let res: Awaited<ReturnType<typeof api.startNode>>
-      try {
-        res = await api.startNode(startParams)
-      } catch (err) {
-        const conflict = coverageConflict(err)
-        if (!conflict) throw err
+      let previousStage = ''
+      const observe = (job: LifecycleJob): void => {
+        setNodeProgress(job.stage)
+        if (job.stage !== previousStage) {
+          previousStage = job.stage
+          log(job.detail, job.status === 'failed' ? 'error' : 'info')
+        }
+      }
+      const submitted = await api.startNodeAsync(startParams)
+      setNodeJobId(submitted.job_id)
+      let completed = await waitForLifecycleJob(submitted, observe)
+      let res = startResultFromJob(completed)
 
-        setServingPlan(conflict.plan)
-        if (servingMode === 'recommended') applyRecommendation(conflict.plan)
-
-        if (conflict.error === 'coverage_revision_stale') {
-          log(conflict.message, 'error')
+      if (
+        res.status === 'error' &&
+        res.plan &&
+        (res.error === 'coverage_revision_stale' || res.error === 'redundancy_confirmation_required')
+      ) {
+        setServingPlan(res.plan)
+        if (servingMode === 'recommended') applyRecommendation(res.plan)
+        if (res.error === 'coverage_revision_stale') {
+          log(res.message ?? 'Layer coverage changed. Review the fresh plan.', 'error')
           return
         }
-
-        const confirmed = window.confirm(conflict.message)
-        if (!confirmed) {
+        if (!window.confirm(res.message ?? 'Confirm redundant serving range.')) {
           log('Redundant serving range was not started.', 'info')
           return
         }
-        res = await api.startNode({
-          ...startParams,
-          coverage_revision: conflict.plan.coverage_revision,
-          confirm_redundancy: true
-        })
+        const confirmedJob = await api.startNodeAsync({
+            ...startParams,
+            coverage_revision: res.plan.coverage_revision,
+            confirm_redundancy: true
+          })
+        setNodeJobId(confirmedJob.job_id)
+        completed = await waitForLifecycleJob(confirmedJob, observe)
+        res = startResultFromJob(completed)
       }
 
       if (res.status === 'error') {
@@ -692,6 +739,8 @@ export default function Network(): React.JSX.Element {
       log(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
     } finally {
       setNodeLoading(false)
+      setNodeProgress('starting')
+      setNodeJobId(null)
     }
   }, [
     serveModel,
@@ -710,6 +759,17 @@ export default function Network(): React.JSX.Element {
     refreshServingPlan,
     refreshInferencePlan
   ])
+
+  const handleCancelNodeStart = useCallback(async () => {
+    if (!nodeJobId) return
+    try {
+      await api.cancelLifecycleJob(nodeJobId)
+      setNodeProgress('cancelling')
+      log('Node startup cancellation requested.', 'info')
+    } catch (err) {
+      log(err instanceof Error ? err.message : 'Could not cancel node startup', 'error')
+    }
+  }, [log, nodeJobId])
 
   const handleServeMissingRange = useCallback(async () => {
     if (!selectedInferModel || !inferencePlan) return
@@ -754,11 +814,24 @@ export default function Network(): React.JSX.Element {
       const accessOk = await ensureLocalImport(inferModel)
       if (!accessOk) return
 
-      const res = await api.startGenerator({
-        model_name: inferModel,
-        dht_prefix: 'distribllm',
-        initial_peers: []
-      })
+      let previousStage = ''
+      const submitted = await api.startGeneratorAsync({
+          model_name: inferModel,
+          dht_prefix: 'distribllm',
+          initial_peers: []
+        })
+      setGenJobId(submitted.job_id)
+      const completed = await waitForLifecycleJob(
+        submitted,
+        (job) => {
+          setGenProgress(job.stage)
+          if (job.stage !== previousStage) {
+            previousStage = job.stage
+            log(job.detail, job.status === 'failed' ? 'error' : 'info')
+          }
+        }
+      )
+      const res = startResultFromJob(completed)
 
       if (res.status === 'error') {
         if (res.error === 'local_model_import_required') {
@@ -774,8 +847,21 @@ export default function Network(): React.JSX.Element {
       log(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
     } finally {
       setGenLoading(false)
+      setGenProgress('starting')
+      setGenJobId(null)
     }
   }, [inferModel, genLoading, inferNeedsLocalImport, inferencePlan, log, ensureLocalImport])
+
+  const handleCancelGeneratorStart = useCallback(async () => {
+    if (!genJobId) return
+    try {
+      await api.cancelLifecycleJob(genJobId)
+      setGenProgress('cancelling')
+      log('Generator startup cancellation requested.', 'info')
+    } catch (err) {
+      log(err instanceof Error ? err.message : 'Could not cancel generator startup', 'error')
+    }
+  }, [genJobId, log])
 
   const handleStopGenerator = useCallback(async () => {
     if (!genReady || genLoading) return
@@ -1231,19 +1317,23 @@ export default function Network(): React.JSX.Element {
               </div>
 
               <button
-                onClick={() => void handleStartNode()}
-                disabled={nodeLoading || !serveModel || !customRangeValid}
+                onClick={() =>
+                  void (nodeLoading ? handleCancelNodeStart() : handleStartNode())
+                }
+                disabled={!nodeLoading && (!serveModel || !customRangeValid)}
                 className={`
                   w-full rounded-xl border py-3 font-mono text-[12px] font-semibold
                   transition-all duration-150
                   ${
-                    nodeLoading || !serveModel || !customRangeValid
-                      ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
+                    nodeLoading
+                      ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
+                      : !serveModel || !customRangeValid
+                        ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
                       : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
                   }
                 `}
               >
-                {nodeLoading ? 'STARTING...' : 'START NODE'}
+                {nodeLoading ? `CANCEL ${nodeProgress.toUpperCase()}` : 'START NODE'}
               </button>
             </>
           )}
@@ -1358,19 +1448,27 @@ export default function Network(): React.JSX.Element {
                 </div>
               ) : (
                 <button
-                  onClick={() => void handleStartGenerator()}
-                  disabled={genLoading || !inferModel || !inferencePlan?.current_runnable}
+                  onClick={() =>
+                    void (genLoading
+                      ? handleCancelGeneratorStart()
+                      : handleStartGenerator())
+                  }
+                  disabled={
+                    !genLoading && (!inferModel || !inferencePlan?.current_runnable)
+                  }
                   className={`
                     w-full rounded-xl border py-3 font-mono text-[12px] font-semibold
                     transition-all duration-150
                     ${
-                      genLoading || !inferModel || !inferencePlan?.current_runnable
-                        ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
+                      genLoading
+                        ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
+                        : !inferModel || !inferencePlan?.current_runnable
+                          ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
                         : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
                     }
                   `}
                 >
-                  {genLoading ? 'CONNECTING...' : 'START GENERATOR'}
+                  {genLoading ? `CANCEL ${genProgress.toUpperCase()}` : 'START GENERATOR'}
                 </button>
               )}
             </>

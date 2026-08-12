@@ -78,28 +78,39 @@ export default function Monitoring(): React.JSX.Element {
   })
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const refreshInFlightRef = useRef(false)
 
   const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) return
+    refreshInFlightRef.current = true
     try {
-      const [generator, modelsRes, nodesRes, stats] = await Promise.all([
+      const [generatorResult, modelsResult, nodesResult, statsResult] = await Promise.allSettled([
         api.getGeneratorStatus(),
         api.getModels(),
         api.getNodes(),
-        api.getStats().catch(() => null)
+        api.getStats()
       ])
 
       setState((prev) => {
+        const generator =
+          generatorResult.status === 'fulfilled' ? generatorResult.value : prev.generator
+        const models = modelsResult.status === 'fulfilled' ? modelsResult.value.models : prev.models
+        const nodes = nodesResult.status === 'fulfilled' ? nodesResult.value.nodes ?? [] : prev.nodes
+        const stats = statsResult.status === 'fulfilled' ? statsResult.value : prev.stats
         const selectedModel =
-          prev.selectedModel || generator.model_name || modelsRes.models[0]?.id || ''
+          prev.selectedModel || generator?.model_name || models[0]?.id || ''
+        const failures = [generatorResult, modelsResult, nodesResult, statsResult].filter(
+          (result) => result.status === 'rejected'
+        )
 
         return {
           generator,
-          models: modelsRes.models,
-          nodes: nodesRes.nodes ?? [],
+          models,
+          nodes,
           stats,
           selectedModel,
           lastUpdated: new Date(),
-          lastError: null
+          lastError: failures.length > 0 ? `${failures.length} monitor request(s) timed out` : null
         }
       })
     } catch (err) {
@@ -107,6 +118,8 @@ export default function Monitoring(): React.JSX.Element {
         ...prev,
         lastError: err instanceof Error ? err.message : 'Network monitor refresh failed'
       }))
+    } finally {
+      refreshInFlightRef.current = false
     }
   }, [])
 

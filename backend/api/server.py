@@ -33,6 +33,7 @@ from hivemind.utils.logging import get_logger
 from pydantic import BaseModel, field_validator
 
 from api.env_loader import load_project_env
+from api.lifecycle_jobs import LifecycleJobStore
 from node.gpu_monitor import GPUMonitor
 from node.node import Node
 from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, _run_with_timeout
@@ -65,7 +66,6 @@ from constants import (
     SUPPORTED_MODELS,
     DHT_PREFIX,
     get_initial_peers,
-    get_p2p_network_config,
 )
 
 load_project_env()
@@ -427,6 +427,7 @@ local_nodes: dict[str, Node]                = {}
 generator:   Optional[DistributedGenerator] = None
 client_dht:  Optional[hivemind.DHT]         = None
 client_dht_prefix: str = DHT_PREFIX
+_lifecycle_jobs = LifecycleJobStore()
 
 
 def _sync_primary_node() -> None:
@@ -551,6 +552,17 @@ def _generator_initial_peers(
     return list(dict.fromkeys(peer for peer in peers if peer))
 
 
+def _generator_dht_kwargs(initial_peers: list[str]) -> dict:
+    """Build a dialing-only client that can reach workers through circuit addresses."""
+    return {
+        "initial_peers": initial_peers,
+        "start": True,
+        "use_ipfs": False,
+        "use_relay": True,
+        "client_mode": True,
+    }
+
+
 def _shutdown_local_nodes(
     timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
 ) -> list[dict]:
@@ -614,6 +626,7 @@ async def lifespan(app: FastAPI):
     logger.info("GPU monitor started.")
     yield
     logger.info("Shutting down...")
+    _lifecycle_jobs.cancel_all()
     if gpu_monitor is not None: gpu_monitor.stop()
     node_shutdown_results = _shutdown_local_nodes()
     client_shutdown_result = _shutdown_client_dht()
@@ -970,6 +983,10 @@ async def get_stats() -> dict:
 
 @app.get("/nodes")
 async def get_nodes() -> dict:
+    return await asyncio.to_thread(_get_nodes_sync)
+
+
+def _get_nodes_sync() -> dict:
     dht = _active_local_dht() or client_dht
     if dht is None:
         local_infos = _local_node_infos()
@@ -1006,6 +1023,51 @@ async def get_local_nodes() -> dict:
 
 @app.get("/models")
 async def get_models() -> dict:
+    return await asyncio.to_thread(_get_models_sync)
+
+
+@app.get("/models/catalog")
+async def get_model_catalog() -> dict:
+    """Return local model choices without waiting for any DHT route scan."""
+    token_available = token_is_set()
+    local_imports = {
+        record["model_name"]: record
+        for record in list_local_models()
+        if record.get("model_name")
+    }
+    models = []
+    for model_id, info in SUPPORTED_MODELS.items():
+        total_layers = int(info["num_layers"])
+        models.append(
+            {
+                "id": model_id,
+                "num_layers": total_layers,
+                "hidden_size": info["hidden_size"],
+                "gated": info["gated"],
+                "tuning": info.get("tuning", "base"),
+                "description": info["description"],
+                "vram_gb": info["vram_gb"],
+                "available": not info["gated"] or model_id in local_imports,
+                "local_imported": model_id in local_imports,
+                "local_import": local_imports.get(model_id),
+                "runnable": False,
+                "route_ready": False,
+                "route_reasons": ["Route status loads separately."],
+                "covered_layers": 0,
+                "missing_layers": list(range(total_layers)),
+                "total_layers": total_layers,
+                "compatible_nodes": 0,
+                "route_trace": [],
+            }
+        )
+    return {
+        "models": models,
+        "token_available": token_available,
+        "default_peers": get_initial_peers(),
+    }
+
+
+def _get_models_sync() -> dict:
     """
     Return the validated list of supported models.
     Frontend uses this to build the model dropdown.
@@ -1127,7 +1189,7 @@ async def get_model_serving_plan(
     model_id: str,
     layer_count: int = Query(..., ge=1),
 ) -> dict:
-    return _build_model_serving_plan(model_id, layer_count)
+    return await asyncio.to_thread(_build_model_serving_plan, model_id, layer_count)
 
 
 def _get_model_route_status(
@@ -1632,6 +1694,31 @@ async def start_node(req: NodeStartRequest) -> dict:
         return {"status": "error", "error": str(e)}
 
 
+@app.post("/node/start-async", status_code=202)
+async def start_node_async(req: NodeStartRequest) -> dict:
+    resource_key = (
+        f"node:{req.dht_prefix}:{req.model_name}:{req.layer_start}:{req.layer_end}"
+    )
+
+    def target(progress, cancelled) -> dict:
+        progress("validating", "Refreshing coverage and validating the layer request.")
+        if cancelled.is_set():
+            return {"status": "cancelled"}
+        progress("loading", "Establishing transport and loading model layers.")
+        try:
+            result = asyncio.run(start_node(req))
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+            result = {"status": "error", **detail}
+        if cancelled.is_set() and result.get("status") == "started":
+            node_id = (result.get("info") or {}).get("node_id")
+            asyncio.run(delete_node(node_id))
+            return {"status": "cancelled"}
+        return result
+
+    return _lifecycle_jobs.submit("node_start", resource_key, target)
+
+
 @app.post("/node/turn-on")
 async def turn_on_node(node_id: Optional[str] = None) -> dict:
     try:
@@ -1744,19 +1831,10 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         req.model_name,
         req.dht_prefix,
     )
-    p2p_config = get_p2p_network_config()
-
     try:
         _shutdown_client_dht()
 
-        client_dht = hivemind.DHT(
-            initial_peers=peers,
-            start=True,
-            use_ipfs=False,
-            use_relay=True,
-            trusted_relays=list(p2p_config.trusted_relays) or None,
-            client_mode=True,
-        )
+        client_dht = hivemind.DHT(**_generator_dht_kwargs(peers))
         if client_dht.peer_id is None:
             raise RuntimeError("Generator DHT started but peer_id is None")
         client_dht_prefix = req.dht_prefix
@@ -1812,6 +1890,47 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         return {"status": "error", "error": str(e)}
 
 
+@app.post("/generator/start-async", status_code=202)
+async def start_generator_async(req: GeneratorStartRequest) -> dict:
+    resource_key = f"generator:{req.dht_prefix}:{req.model_name}"
+
+    def target(progress, cancelled) -> dict:
+        progress("networking", "Starting the generator network client.")
+        if cancelled.is_set():
+            return {"status": "cancelled"}
+        progress("loading", "Loading embeddings and the output head.")
+        try:
+            result = asyncio.run(start_generator(req))
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+            result = {"status": "error", **detail}
+        if cancelled.is_set() and result.get("status") == "ready":
+            global generator
+            _cleanup_failed_generator(generator)
+            generator = None
+            _shutdown_client_dht()
+            return {"status": "cancelled"}
+        return result
+
+    return _lifecycle_jobs.submit("generator_start", resource_key, target)
+
+
+@app.get("/lifecycle/jobs/{job_id}")
+async def get_lifecycle_job(job_id: str) -> dict:
+    job = _lifecycle_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Lifecycle job not found")
+    return job
+
+
+@app.delete("/lifecycle/jobs/{job_id}")
+async def cancel_lifecycle_job(job_id: str) -> dict:
+    job = _lifecycle_jobs.cancel(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Lifecycle job not found")
+    return job
+
+
 @app.get("/generator/status")
 async def get_generator_status() -> dict:
     if generator is None or not generator.is_loaded():
@@ -1830,7 +1949,7 @@ async def get_generator_status() -> dict:
 
     route_validation_started_at = time.perf_counter()
     try:
-        route = generator.sequential.validate_reachable_route()
+        route = await asyncio.to_thread(generator.sequential.validate_reachable_route)
         route_ready = True
         node_trace = _format_route_trace(route)
     except Exception as e:

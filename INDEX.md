@@ -77,6 +77,9 @@
 | `tasks/sprints/sprint-19-continuous-provider-health.md` | Proposed sprint for provider health states, background probes, and stale-readiness invalidation. |
 | `tasks/sprints/sprint-20-rpc-resource-safety.md` | Proposed sprint for typed expert RPC limits, validation, bounded admission, and safety counters. |
 | `tasks/sprints/sprint-21-health-aware-route-failover.md` | Proposed sprint for health-aware complete routes, bounded failover, and accounting-safe retry behavior. |
+| `tasks/sprints/sprint-22-relay-tensor-rpc-stability.md` | Active sprint for relayed tensor RPC diagnostics, bounded attempts, route reuse, and live inference acceptance. |
+| `tasks/sprints/sprint-23-responsive-startup-and-generation.md` | Active sprint for startup jobs, progress, request deadlines, partial UI state, and generation-path performance. |
+| `tasks/sprints/sprint-24-windows-fundamental-acceptance-build.md` | Active sprint for one audited Windows executable bound to fundamental two-device acceptance evidence. |
 | `tasks/archive/sprint-10-gated-model-local-import.md`          | Completed sprint for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
 | `tasks/archive/sprint-11-instruction-ready-model-expansion.md` | Completed sprint for instruction-ready/chat-ready model registry expansion, tuning labels, local-import contracts, and live TinyLlama generation validation. |
 | `tasks/archive/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Completed sprint for public-model auth isolation, failed-start cleanup, model cache cleanup, local expert routing, and safetensors/bin-index gated import validation. |
@@ -126,8 +129,10 @@
 | `backend/main.py`        | Uvicorn entry point.                                                                 |
 | `backend/colab_worker.py` | Headless remote worker entry point with browser OAuth support for Colab and GPU hosts. |
 | `backend/api/`           | FastAPI app, root `.env` loading, settings/token endpoints, Hugging Face OAuth/download helpers, and local model import registry. |
+| `backend/api/lifecycle_jobs.py` | Thread-safe long-running node/generator job state, deduplication, progress, and cancellation requests. |
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
 | `backend/client/coverage.py` | Pure adjacent-range route planning, provider segmentation, snapshot revision, and serving recommendation logic. |
+| `backend/client/rpc_policy.py` | Validated remote-expert attempt policy, failure classification, and safe receipt fallback rules. |
 | `backend/incentives/` | Ed25519 application identities, canonical BLAKE3 receipt protocol, runtime submission queue, and SQLite settlement service. |
 | `backend/node/`          | Serving node, layer loading, direct/relay transport, Hivemind RPC, and GPU monitoring. |
 | `backend/node/reachability.py` | Petals-derived independent direct-reachability probe used before relay fallback. |
@@ -153,6 +158,7 @@
 | `backend/tests/test_acceptance_manifest.py` | Cross-sprint artifact compatibility, VPS/probe binding, version mismatch, manual-gate, and private-output regressions. |
 | `backend/tests/test_local_split_probe.py` | Local split probe option, range, evidence sanitization, and private-output regressions. |
 | `backend/tests/test_tinyllama_performance_probe.py` | TinyLlama probe bounds, metric sanitization, and acceptance-contract regressions. |
+| `backend/tests/test_lifecycle_jobs.py` | Long-running startup job progress, deduplication, cancellation, failure, and prompt-response regressions. |
 
 ---
 

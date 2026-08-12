@@ -40,6 +40,13 @@ from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
 from hivemind.utils.logging import get_logger
 
 from client.coverage import route_requirement_ranges, select_route
+from client.rpc_policy import (
+    RPCAttemptPolicy,
+    classify_rpc_error,
+    get_rpc_attempt_policy,
+    is_retryable_rpc_error,
+    is_safe_receipt_fallback,
+)
 from incentives.protocol import decode_metadata_tensor, encode_metadata_tensor
 from incentives.receipts import (
     accept_worker_receipt,
@@ -51,10 +58,6 @@ from incentives.runtime import UsefulWorkRuntime, get_useful_work_runtime
  
 logger = get_logger(__name__)
  
-REQUEST_TIMEOUT = 30
-MAX_RETRIES     = 2          # ← unchanged from original
-
-
 def shutdown_remote_expert_p2p(dht: object) -> bool:
     """Close Hivemind's cached replicated P2P control client before DHT teardown."""
     replica = getattr(dht, "_p2p_replica", None)
@@ -171,6 +174,7 @@ class RemoteSequential:
         num_layers: int,
         model_name: Optional[str] = None,
         useful_work_runtime: Optional[UsefulWorkRuntime] = None,
+        rpc_attempt_policy: Optional[RPCAttemptPolicy] = None,
     ):
         if dht is None:
             raise ValueError("dht must not be None")
@@ -184,9 +188,11 @@ class RemoteSequential:
         self.num_layers = num_layers
         self.model_name = model_name
         self.useful_work_runtime = useful_work_runtime or get_useful_work_runtime()
+        self.rpc_attempt_policy = rpc_attempt_policy or get_rpc_attempt_policy()
         self._replica_cursors: dict[tuple[int, int], int] = {}
         self._last_forward_metrics: dict = {}
         self._session_id: Optional[str] = None
+        self._session_route: Optional[list[dict]] = None
 
     def _validate_node_metadata(self, info: dict, peer_id: str = "unknown") -> dict:
         required = {"peer_id", "layer_start", "layer_end", "model_name", "rpc_uid"}
@@ -297,10 +303,12 @@ class RemoteSequential:
 
     def start_session(self, session_id: Optional[str] = None) -> str:
         self._session_id = session_id or str(uuid4())
+        self._session_route = None
         return self._session_id
 
     def end_session(self) -> None:
         self._session_id = None
+        self._session_route = None
 
     def _receipt_route(self, ordered_nodes: list[dict]) -> Optional[list[dict]]:
         runtime = self.useful_work_runtime
@@ -425,6 +433,12 @@ class RemoteSequential:
             )
  
         t_start = time.perf_counter()
+        request_id = str(uuid4())
+        input_bytes = sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (hidden_states, attention_mask, position_ids)
+            if tensor is not None
+        )
         logger.info(
             f"[forward] ── BEGIN FORWARD PASS ──────────────────────────\n"
             f"  hidden_states : {_shape_str(hidden_states)}\n"
@@ -432,45 +446,38 @@ class RemoteSequential:
             f"  position_ids  : {'provided' if position_ids is not None else 'None'}"
         )
  
-        # ── Step 1: node discovery ────────────────────────────────────────────
-        logger.debug("[forward] Step 1/3 — discovering nodes …")
-        discovery_started_at = time.perf_counter()
-        nodes = self._discover_nodes()
-        discovery_ms = (time.perf_counter() - discovery_started_at) * 1000
- 
-        if not nodes:
-            # This is almost always caused by a silent _announce() crash.
-            # Give the caller enough context to diagnose without reading server logs.
-            logger.error(
-                "[forward] ✗ No nodes found. Likely root causes (in order of frequency):\n"
-                "  1. _announce() on the server crashed silently due to a bad import\n"
-                "     (e.g. 'from hivemind.dht import get_dht_time' — wrong path in 1.1.12).\n"
-                "     The exception was swallowed and the DHT was never written to.\n"
-                "  2. Wrong dht_prefix — client and server are using different prefixes.\n"
-                "  3. DHT bootstrap peer unreachable — node started but can't join the swarm.\n"
-                "  Check server stdout for lines like:\n"
-                "    'Failed to update members index: <ImportError or AttributeError>'\n"
-                "  Those are the swallowed crashes."
-            )
-            raise RuntimeError(
-                "No nodes found on the DHT. "
-                "Make sure at least one node is running."
-            )
- 
-        logger.info(f"[forward] Step 1/3 ✓ — {len(nodes)} node(s) discovered")
- 
-        # ── Step 2: route validation ────────────────────────────────────────
-        logger.debug(
-            f"[forward] Step 2/3 — validating route "
-            f"(need layers 0…{self.num_layers - 1}) …"
-        )
-        route_started_at = time.perf_counter()
-        ordered_nodes = self.validate_route(nodes)
+        route_reused = self._session_route is not None
+        discovery_ms = 0.0
+        route_validation_ms = 0.0
+        if route_reused:
+            ordered_nodes = [dict(node) for node in self._session_route or []]
+            logger.debug("[forward] request=%s reusing session route", request_id)
+        else:
+            # ── Step 1: node discovery ────────────────────────────────────────
+            logger.debug("[forward] Step 1/3 — discovering nodes …")
+            discovery_started_at = time.perf_counter()
+            nodes = self._discover_nodes()
+            discovery_ms = (time.perf_counter() - discovery_started_at) * 1000
+
+            if not nodes:
+                raise RuntimeError(
+                    "No nodes found on the DHT. Make sure at least one node is running."
+                )
+
+            logger.info(f"[forward] Step 1/3 ✓ — {len(nodes)} node(s) discovered")
+
+            # ── Step 2: route validation ────────────────────────────────────
+            route_started_at = time.perf_counter()
+            ordered_nodes = self.validate_route(nodes)
+            route_validation_ms = (time.perf_counter() - route_started_at) * 1000
+            if self._session_id is not None:
+                self._session_route = [dict(node) for node in ordered_nodes]
+
         receipt_route = self._receipt_route(ordered_nodes)
-        route_validation_ms = (time.perf_counter() - route_started_at) * 1000
-        logger.info(
-            f"[forward] Step 2/3 ✓ — route validated for {len(ordered_nodes)} node(s)"
-        )
+        if not route_reused:
+            logger.info(
+                f"[forward] Step 2/3 ✓ — route validated for {len(ordered_nodes)} node(s)"
+            )
  
         # ── Step 3: sequential RPC calls ─────────────────────────────────────
         node_trace = []
@@ -512,8 +519,11 @@ class RemoteSequential:
                 node_info=node_info,
                 receipt_route=receipt_route,
                 pending_receipts=pending_receipts,
+                request_id=request_id,
+                hop_index=hop_idx,
             )
             hop_ms = (time.perf_counter() - t_hop) * 1000
+            output_bytes = hidden_states.numel() * hidden_states.element_size()
             hop_metrics.append(
                 {
                     "peer_id": str(peer_id),
@@ -522,6 +532,8 @@ class RemoteSequential:
                     "layer_end": int(layer_end),
                     "latency_ms": hop_ms,
                     "receipt_requested": receipt_route is not None,
+                    "input_bytes": input_bytes,
+                    "output_bytes": output_bytes,
                 }
             )
  
@@ -540,6 +552,9 @@ class RemoteSequential:
         self._last_forward_metrics = {
             "discovery_ms": discovery_ms,
             "route_validation_ms": route_validation_ms,
+            "route_reused": route_reused,
+            "request_id": request_id,
+            "input_bytes": input_bytes,
             "rpc_total_ms": sum(hop["latency_ms"] for hop in hop_metrics),
             "total_ms": total_ms,
             "hops": hop_metrics,
@@ -577,9 +592,16 @@ class RemoteSequential:
         node_info: Optional[dict] = None,
         receipt_route: Optional[list[dict]] = None,
         pending_receipts: Optional[list[dict]] = None,
+        request_id: Optional[str] = None,
+        hop_index: int = 0,
     ) -> torch.Tensor:
-        last_error = None
-        for attempt in range(MAX_RETRIES + 1):
+        request_id = request_id or str(uuid4())
+        policy = self.rpc_attempt_policy
+        last_error: Optional[Exception] = None
+        attempted = 0
+        for attempt in range(policy.max_attempts):
+            attempted = attempt + 1
+            attempt_started_at = time.perf_counter()
             try:
                 if node_info is not None and receipt_route is not None:
                     try:
@@ -592,27 +614,70 @@ class RemoteSequential:
                         )
                         if pending_receipts is not None:
                             pending_receipts.append(submission)
-                        return response
+                        result = response
                     except Exception as exc:
+                        if not is_safe_receipt_fallback(exc):
+                            raise
                         logger.warning(
-                            "Receipt RPC failed for %s; using legacy RPC without credit: %s",
+                            "request=%s peer=%s receipt capability unavailable; "
+                            "using legacy RPC without credit: %s",
+                            request_id,
                             peer_id[:8],
                             exc,
                         )
-                return self._rpc_forward(
-                    rpc_uid, peer_id, hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids
+                        result = self._rpc_forward(
+                            rpc_uid,
+                            peer_id,
+                            hidden_states,
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                        )
+                else:
+                    result = self._rpc_forward(
+                        rpc_uid,
+                        peer_id,
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
                     )
+                elapsed_seconds = time.perf_counter() - attempt_started_at
+                if elapsed_seconds >= policy.slow_request_warning_seconds:
+                    logger.warning(
+                        "request=%s hop=%s peer=%s slow expert call elapsed_seconds=%.1f",
+                        request_id,
+                        hop_index + 1,
+                        peer_id[:8],
+                        elapsed_seconds,
+                    )
+                return result
             except Exception as e:
                 last_error = e
-                if attempt < MAX_RETRIES:
-                    logger.warning(
-                        f"Node {peer_id[:8]} attempt {attempt + 1} failed: {e} — retrying..."
-                    )
-                    time.sleep(1)
+                elapsed_ms = (time.perf_counter() - attempt_started_at) * 1000
+                failure_class = classify_rpc_error(e)
+                retryable = is_retryable_rpc_error(e) and attempted < policy.max_attempts
+                logger.warning(
+                    "request=%s hop=%s peer=%s attempt=%s/%s elapsed_ms=%.1f "
+                    "failure=%s retry=%s error=%s",
+                    request_id,
+                    hop_index + 1,
+                    peer_id[:8],
+                    attempted,
+                    policy.max_attempts,
+                    elapsed_ms,
+                    failure_class,
+                    retryable,
+                    e,
+                )
+                if retryable:
+                    backoff = policy.backoff_seconds(attempted)
+                    if backoff:
+                        time.sleep(backoff)
+                else:
+                    break
         raise RuntimeError(
-            f"Node {peer_id[:8]} failed after {MAX_RETRIES + 1} attempts. "
+            f"RPC request {request_id} to node {peer_id[:8]} failed after "
+            f"{attempted}/{policy.max_attempts} attempt(s) "
+            f"({classify_rpc_error(last_error) if last_error else 'unknown'}). "
             f"Last error: {last_error}"
         )
 
@@ -643,7 +708,7 @@ class RemoteSequential:
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None
-    ) -> tuple[torch.Tensor, dict]:
+    ) -> torch.Tensor:
         """Call remote node using its rpc_uid stored in DHT metadata."""
         experts = get_experts(self.dht, [rpc_uid])
 

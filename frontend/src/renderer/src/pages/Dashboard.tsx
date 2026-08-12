@@ -233,6 +233,9 @@ export default function Dashboard(): React.JSX.Element {
   const statsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const nodesIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const statusIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const statsInFlightRef = useRef(false)
+  const nodesInFlightRef = useRef(false)
+  const statusInFlightRef = useRef(false)
 
   // ---------------------------------------------------------------------------
   // Fetch helpers — each updates only its own slice of state to avoid
@@ -241,6 +244,8 @@ export default function Dashboard(): React.JSX.Element {
   // ---------------------------------------------------------------------------
 
   const fetchStats = useCallback(async () => {
+    if (statsInFlightRef.current) return
+    statsInFlightRef.current = true
     try {
       const stats = await api.getStats()
       setState((prev) => ({ ...prev, stats, backend: 'online', lastError: null }))
@@ -251,25 +256,35 @@ export default function Dashboard(): React.JSX.Element {
         backend: 'unreachable',
         lastError: err instanceof Error ? err.message : 'Unknown error'
       }))
+    } finally {
+      statsInFlightRef.current = false
     }
   }, [])
 
   const fetchNodes = useCallback(async () => {
+    if (nodesInFlightRef.current) return
+    nodesInFlightRef.current = true
     try {
       const res = await api.getLocalNodes()
       setState((prev) => ({ ...prev, nodes: res.nodes ?? [] }))
     } catch {
       // Local node lookup failure is non-fatal while the backend is starting.
       setState((prev) => ({ ...prev, nodes: [] }))
+    } finally {
+      nodesInFlightRef.current = false
     }
   }, [])
 
   const fetchStatus = useCallback(async () => {
+    if (statusInFlightRef.current) return
+    statusInFlightRef.current = true
     try {
       const status = await api.getStatus()
       setState((prev) => ({ ...prev, status }))
     } catch {
       // Status failure is non-fatal if stats is still succeeding
+    } finally {
+      statusInFlightRef.current = false
     }
   }, [])
 

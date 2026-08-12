@@ -10,8 +10,8 @@
 
 ## Active Sprint
 
-**Sprint:** Sprint 13 implements useful-work incentives; Sprints 14 through 17 retain live gates; Sprints 18 through 21 are proposals awaiting review.
-**Goal:** Finish cross-device relay evidence, then implement selective loading, continuous health, RPC safety, and failover in dependency order after approval.
+**Sprint:** Sprint 22 is stabilizing live relay tensor RPC; Sprints 23 and 24 cover responsiveness and the Windows acceptance build; Sprints 18 through 21 are approved future reliability work.
+**Goal:** Complete bounded relayed inference, responsive lifecycle UX, and one audited two-device executable before health, RPC safety, and failover rollout.
 
 ## Tech Stack
 React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Transformers/PyTorch, uv for backend dependencies, npm for frontend scripts.
@@ -36,4 +36,5 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 17 implements adjacent-range route selection, capacity-aware serving plans, stale/redundancy conflicts, selected/standby route visibility, and the inference-to-serving gap workflow on `feature/coverage-aware-serving`; local acceptance passes and two-device validation remains open.
 - Sprint 13 has signed settlement, real local split parity, and clean cached remote-expert P2P teardown on `feature/remote-expert-p2p-cleanup`; only separate-device, live VPS shadow/restart, and credit-approval gates remain.
 - `feature/two-device-acceptance-evidence` adds sanitized relay/direct captures, actual-route ownership and timing validation, accepted shadow-receipt deltas, and optional standby non-payment checks; all 165 backend tests and 19 subtests pass, while physical-device and live VPS execution remain open.
-- Sprints 18 through 21 are proposal-only plans for selective worker loading, continuous provider health, RPC resource safety, and health-aware failover; no runtime implementation has started.
+- Live relay discovery and generator startup pass, but tensor forwards reset and retry; Sprint 22 owns correlated diagnostics and bounded completion.
+- Sprints 18 through 21 are approved plans for selective worker loading, continuous provider health, RPC resource safety, and health-aware failover; implementation follows the fundamental stability gates.
