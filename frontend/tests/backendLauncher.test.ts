@@ -7,6 +7,7 @@ import {
   DEFAULT_BACKEND_LAUNCHER_CONFIG,
   PROJECT_VPS_RELAY_MADDR,
   WslBackendLauncher,
+  buildWindowsAcceptanceReport,
   buildBackendLaunchScript,
   parseWslDistroInfo,
   parseWslDistros,
@@ -260,4 +261,88 @@ test('does not restart after managed shutdown fails', async () => {
   assert.equal(status.state, 'failed')
   assert.equal(status.diagnosticCode, 'backend_stop_failed')
   assert.equal(runCalls, callsBeforeRestart + 1)
+})
+
+test('exports sanitized acceptance evidence after a complete managed lifecycle', async () => {
+  const config = validConfig({ syncDependencies: true })
+  const runtime = fakeRuntime()
+  const launcher = new WslBackendLauncher(config, runtime)
+
+  await launcher.start()
+  await launcher.stop()
+  const report = launcher.getAcceptanceReport({
+    version: '1.0.0',
+    packaged: true,
+    platform: 'win32',
+    arch: 'x64'
+  })
+
+  assert.equal(report.ok, true)
+  assert.equal(report.checks.backendHealthReady, true)
+  assert.equal(report.checks.backendStoppedCleanly, true)
+  assert.equal(report.configuration.backendPathConfigured, true)
+  assert.equal(report.configuration.initialPeerCount, 1)
+  assert.equal(report.launcher.currentStatus.state, 'idle')
+  assert.deepEqual(
+    report.launcher.transitions.map((transition) => transition.state),
+    ['idle', 'checking', 'installing_backend', 'starting_backend', 'ready', 'stopping', 'idle']
+  )
+  const serialized = JSON.stringify(report)
+  assert.doesNotMatch(serialized, /\/home\/test/)
+  assert.doesNotMatch(serialized, /203\.0\.113\.10/)
+})
+
+test('acceptance report cannot pass outside a packaged Windows lifecycle', () => {
+  const config = validConfig()
+  const status = {
+    state: 'ready' as const,
+    message: 'Managed backend is ready.',
+    diagnosticCode: null,
+    detail: null,
+    managed: false,
+    updatedAt: '2026-08-13T00:00:00.000Z'
+  }
+  const report = buildWindowsAcceptanceReport(
+    config,
+    status,
+    {
+      transitions: [],
+      wslAvailable: true,
+      distroPresent: true,
+      distroWsl2: true,
+      dependencySyncRequested: true,
+      dependencySyncCompleted: true,
+      backendHealthReady: true,
+      backendStoppedCleanly: true
+    },
+    { version: '1.0.0', packaged: false, platform: 'linux', arch: 'x64' },
+    '2026-08-13T00:00:00.000Z'
+  )
+
+  assert.equal(report.ok, false)
+  assert.equal(report.checks.windowsHost, false)
+  assert.equal(report.checks.packagedApplication, false)
+})
+
+test('changing launcher configuration clears evidence from the previous lifecycle', async () => {
+  const runtime = fakeRuntime()
+  const launcher = new WslBackendLauncher(validConfig({ syncDependencies: true }), runtime)
+  await launcher.start()
+  await launcher.stop()
+
+  launcher.setConfig(validConfig({ syncDependencies: true, distroName: 'Ubuntu-24.04' }))
+  const report = launcher.getAcceptanceReport({
+    version: '1.0.0',
+    packaged: true,
+    platform: 'win32',
+    arch: 'x64'
+  })
+
+  assert.equal(report.ok, false)
+  assert.equal(report.configuration.distroName, 'Ubuntu-24.04')
+  assert.equal(report.checks.wslAvailable, false)
+  assert.deepEqual(
+    report.launcher.transitions.map((transition) => transition.state),
+    ['idle']
+  )
 })

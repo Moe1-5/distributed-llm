@@ -23,7 +23,7 @@
 | Implementation roadmap                    | `docs/IMPLEMENTATION.md`                  |
 | Petals comparison                         | `docs/PETALS_COMPARISON.md`               |
 | Network reachability and relay review      | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` |
-| Windows managed WSL packaging        | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` |
+| Windows managed WSL packaging and acceptance capture | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` |
 | Useful-work incentives and settlement | `docs/USEFUL_WORK_INCENTIVES.md`       |
 | Two-device acceptance evidence          | `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` |
 | Local split acceptance                   | `docs/LOCAL_SPLIT_ACCEPTANCE.md` |
@@ -103,7 +103,7 @@
 | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Review proposal for Petals-style direct reachability, automatic relay fallback, VPS infrastructure, security, and production validation. |
 | `docs/COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, serving recommendations, stale-plan validation, and serving/inference workflow. |
 | `docs/VPS_RELAY_OPERATIONS.md` | Persistent VPS relay installation, runtime validation, restart continuity, recovery, and rollback runbook. |
-| `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, state locations, launcher contract, and smoke-test plan. |
+| `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, launcher contract, sanitized acceptance report, and clean-Windows runbook. |
 | `docs/USEFUL_WORK_INCENTIVES.md` | Signed useful-work receipt protocol, SQLite settlement policy, rollout modes, VPS deployment, and remaining acceptance gates. |
 | `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized relay/direct capture commands, route and ownership validation, shadow receipt evidence, standby non-payment, and manual gates. |
 | `docs/LOCAL_SPLIT_ACCEPTANCE.md` | Isolated real two-peer OPT split inference, direct parity, accounting evidence, cleanup, and recorded local result. |
@@ -157,14 +157,14 @@
 | `frontend/package.json`                 | Frontend dependencies and scripts.            |
 | `frontend/README.md`                    | Frontend development, validation, Windows packaging, and launcher runtime notes. |
 | `frontend/src/main/`                    | Electron main process and managed WSL backend launcher. |
-| `frontend/src/main/backendLauncher.ts`  | Validated WSL detection, dependency sync, FastAPI health, diagnostics, and PID lifecycle state machine. |
+| `frontend/src/main/backendLauncher.ts`  | Validated WSL detection, dependency sync, FastAPI health, diagnostics, PID lifecycle, and sanitized Windows acceptance evidence. |
 | `frontend/src/preload/`                 | Electron preload bridge.                      |
 | `frontend/src/renderer/`                | React renderer application.                   |
 | `frontend/src/renderer/src/api/`        | HTTP and WebSocket API client.                |
 | `frontend/src/renderer/src/pages/`      | Dashboard, Network, Chat, Monitoring, and Settings pages. |
 | `frontend/src/renderer/src/components/` | Shared renderer components.                   |
 | `frontend/src/renderer/src/assets/`     | CSS and static renderer assets.               |
-| `frontend/tests/backendLauncher.test.ts` | Managed WSL launcher state, validation, quoting, health, and stop regressions. |
+| `frontend/tests/backendLauncher.test.ts` | Managed WSL launcher state, validation, quoting, health, stop, and acceptance-report regressions. |
 | `frontend/scripts/test-backend-launcher.mjs` | Temporary esbuild and Node test runner for launcher regressions. |
 | `frontend/scripts/audit-windows-package.mjs` | Rejects secrets, local archives, model state, traces, receipts, and identities in Windows package contents. |
 

@@ -36,9 +36,13 @@ export default function Settings(): React.JSX.Element {
   const [launcherConfig, setLauncherConfig] = useState<LauncherConfig | null>(null)
   const [launcherStatus, setLauncherStatus] = useState<LauncherStatus | null>(null)
   const [launcherAction, setLauncherAction] = useState<
-    'idle' | 'saving' | 'starting' | 'stopping' | 'restarting'
+    'idle' | 'saving' | 'starting' | 'stopping' | 'restarting' | 'exporting'
   >('idle')
   const [launcherError, setLauncherError] = useState<string | null>(null)
+  const [launcherReportStatus, setLauncherReportStatus] = useState<{
+    message: string
+    ok: boolean
+  } | null>(null)
 
   // ---------------------------------------------------------------------------
   // Load current settings on mount
@@ -100,6 +104,7 @@ export default function Settings(): React.JSX.Element {
     async (action: 'start' | 'stop' | 'restart') => {
       setLauncherAction(action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : 'restarting')
       setLauncherError(null)
+      setLauncherReportStatus(null)
       try {
         if (action !== 'stop') {
           const saved = await saveLauncherConfig(false)
@@ -120,6 +125,29 @@ export default function Settings(): React.JSX.Element {
     },
     [saveLauncherConfig]
   )
+
+  const exportAcceptanceReport = useCallback(async () => {
+    setLauncherAction('exporting')
+    setLauncherError(null)
+    setLauncherReportStatus(null)
+    try {
+      const result = await window.api.exportWindowsAcceptanceReport()
+      if (!result.canceled) {
+        setLauncherReportStatus({
+          message: result.reportOk
+            ? `Acceptance report saved: ${result.fileName}.`
+            : `Acceptance report saved: ${result.fileName}. Required checks remain incomplete.`,
+          ok: Boolean(result.reportOk)
+        })
+      }
+    } catch (error) {
+      setLauncherError(
+        error instanceof Error ? error.message : 'Could not export Windows acceptance report'
+      )
+    } finally {
+      setLauncherAction('idle')
+    }
+  }, [])
 
   // ---------------------------------------------------------------------------
   // Save token
@@ -339,6 +367,15 @@ export default function Settings(): React.JSX.Element {
             </div>
 
             {launcherError && <p className="font-mono text-[11px] text-red">{launcherError}</p>}
+            {launcherReportStatus && (
+              <p
+                className={`font-mono text-[11px] ${
+                  launcherReportStatus.ok ? 'text-green' : 'text-amber'
+                }`}
+              >
+                {launcherReportStatus.message}
+              </p>
+            )}
 
             <div className="flex flex-wrap gap-2">
               <button
@@ -348,6 +385,15 @@ export default function Settings(): React.JSX.Element {
                 className="h-9 rounded border border-border-bright px-4 font-mono text-[10px] font-semibold text-text-secondary disabled:opacity-50"
               >
                 SAVE
+              </button>
+              <button
+                type="button"
+                onClick={() => void exportAcceptanceReport()}
+                disabled={launcherAction !== 'idle'}
+                title="Export Windows acceptance report"
+                className="h-9 rounded border border-border-bright px-4 font-mono text-[10px] font-semibold text-text-secondary disabled:opacity-50"
+              >
+                EXPORT REPORT
               </button>
               {launcherStatus.state === 'ready' ? (
                 <>

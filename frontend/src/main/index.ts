@@ -1,9 +1,9 @@
 import { app, shell, BrowserWindow, ipcMain, session, dialog } from 'electron'
-import type { OpenDialogOptions } from 'electron'
+import type { OpenDialogOptions, SaveDialogOptions } from 'electron'
 import { execFile, spawn } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { mkdir, readFile, rename, writeFile } from 'fs/promises'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import {
@@ -181,6 +181,36 @@ app.whenReady().then(async () => {
   ipcMain.handle('backend-launcher:start', () => backendLauncher?.start())
   ipcMain.handle('backend-launcher:stop', () => backendLauncher?.stop())
   ipcMain.handle('backend-launcher:restart', () => backendLauncher?.restart())
+  ipcMain.handle('backend-launcher:export-acceptance-report', async (event) => {
+    if (!backendLauncher) throw new Error('Managed backend launcher is unavailable.')
+
+    const parentWindow = BrowserWindow.fromWebContents(event.sender)
+    const report = backendLauncher.getAcceptanceReport({
+      version: app.getVersion(),
+      packaged: app.isPackaged,
+      platform: process.platform,
+      arch: process.arch
+    })
+    const date = report.capturedAt.slice(0, 10)
+    const options: SaveDialogOptions = {
+      title: 'Export Windows acceptance report',
+      defaultPath: `distribllm-windows-acceptance-${date}.json`,
+      filters: [{ name: 'JSON report', extensions: ['json'] }]
+    }
+    const result = parentWindow
+      ? await dialog.showSaveDialog(parentWindow, options)
+      : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) {
+      return { canceled: true, fileName: null, reportOk: null }
+    }
+
+    await writeFile(result.filePath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
+    return {
+      canceled: false,
+      fileName: basename(result.filePath),
+      reportOk: report.ok
+    }
+  })
 
   ipcMain.handle('select-local-model-directory', async (event) => {
     const parentWindow = BrowserWindow.fromWebContents(event.sender)

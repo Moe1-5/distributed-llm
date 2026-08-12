@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import type {
+  AcceptanceReportExportResult,
   BackendLauncherConfig,
   BackendLauncherStatus
 } from '../main/backendLauncher'
@@ -23,6 +24,10 @@ const api = {
     ipcRenderer.invoke('backend-launcher:stop') as Promise<BackendLauncherStatus>,
   restartBackend: (): Promise<BackendLauncherStatus> =>
     ipcRenderer.invoke('backend-launcher:restart') as Promise<BackendLauncherStatus>,
+  exportWindowsAcceptanceReport: (): Promise<AcceptanceReportExportResult> =>
+    ipcRenderer.invoke(
+      'backend-launcher:export-acceptance-report'
+    ) as Promise<AcceptanceReportExportResult>,
   onBackendLauncherStatus: (callback: (status: BackendLauncherStatus) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, status: BackendLauncherStatus): void => {
       callback(status)

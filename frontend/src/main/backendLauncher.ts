@@ -35,6 +35,67 @@ export interface BackendLauncherStatus {
   updatedAt: string
 }
 
+export interface BackendLauncherTransition {
+  state: BackendLauncherState
+  diagnosticCode: string | null
+  updatedAt: string
+}
+
+export interface BackendLauncherEvidence {
+  transitions: BackendLauncherTransition[]
+  wslAvailable: boolean
+  distroPresent: boolean
+  distroWsl2: boolean
+  dependencySyncRequested: boolean
+  dependencySyncCompleted: boolean
+  backendHealthReady: boolean
+  backendStoppedCleanly: boolean
+}
+
+export interface WindowsAcceptanceApplication {
+  version: string
+  packaged: boolean
+  platform: NodeJS.Platform
+  arch: string
+}
+
+export interface WindowsAcceptanceReport {
+  schemaVersion: 1
+  capturedAt: string
+  application: WindowsAcceptanceApplication
+  configuration: {
+    distroName: string
+    backendPathConfigured: boolean
+    backendUrl: string
+    syncDependencies: boolean
+    networkMode: NetworkMode
+    initialPeerCount: number
+    trustedRelayCount: number
+    relayWaitTimeoutSeconds: number
+  }
+  launcher: {
+    currentStatus: BackendLauncherTransition
+    transitions: BackendLauncherTransition[]
+  }
+  checks: {
+    windowsHost: boolean
+    packagedApplication: boolean
+    wslAvailable: boolean
+    distroPresent: boolean
+    distroWsl2: boolean
+    dependencySyncCompleted: boolean
+    backendHealthReady: boolean
+    backendStoppedCleanly: boolean
+  }
+  ok: boolean
+}
+
+export interface AcceptanceReportExportResult {
+  canceled: boolean
+  fileName: string | null
+  reportOk: boolean | null
+}
+
 export interface CommandResult {
   stdout: string
   stderr: string
@@ -73,6 +134,59 @@ export const DEFAULT_BACKEND_LAUNCHER_CONFIG: BackendLauncherConfig = {
 const DISTRO_PATTERN = /^[A-Za-z0-9._-]+$/
 const HEALTH_ATTEMPTS = 80
 const HEALTH_INTERVAL_MS = 750
+const MAX_ACCEPTANCE_TRANSITIONS = 100
+
+function acceptanceTransition(status: BackendLauncherStatus): BackendLauncherTransition {
+  return {
+    state: status.state,
+    diagnosticCode: status.diagnosticCode,
+    updatedAt: status.updatedAt
+  }
+}
+
+export function buildWindowsAcceptanceReport(
+  config: BackendLauncherConfig,
+  status: BackendLauncherStatus,
+  evidence: BackendLauncherEvidence,
+  application: WindowsAcceptanceApplication,
+  capturedAt: string
+): WindowsAcceptanceReport {
+  const checks = {
+    windowsHost: application.platform === 'win32',
+    packagedApplication: application.packaged,
+    wslAvailable: evidence.wslAvailable,
+    distroPresent: evidence.distroPresent,
+    distroWsl2: evidence.distroWsl2,
+    dependencySyncCompleted:
+      config.syncDependencies &&
+      evidence.dependencySyncRequested &&
+      evidence.dependencySyncCompleted,
+    backendHealthReady: evidence.backendHealthReady,
+    backendStoppedCleanly: evidence.backendStoppedCleanly && status.state === 'idle'
+  }
+
+  return {
+    schemaVersion: 1,
+    capturedAt,
+    application: { ...application },
+    configuration: {
+      distroName: config.distroName,
+      backendPathConfigured: Boolean(config.backendPath.trim()),
+      backendUrl: config.backendUrl,
+      syncDependencies: config.syncDependencies,
+      networkMode: config.networkMode,
+      initialPeerCount: config.initialPeers.length,
+      trustedRelayCount: config.trustedRelays.length,
+      relayWaitTimeoutSeconds: config.relayWaitTimeoutSeconds
+    },
+    launcher: {
+      currentStatus: acceptanceTransition(status),
+      transitions: evidence.transitions.map((transition) => ({ ...transition }))
+    },
+    checks,
+    ok: Object.values(checks).every(Boolean)
+  }
+}
 
 export function decodeWslOutput(output: string): string {
   return output.replace(/^\uFEFF/, '').replaceAll('\u0000', '').replaceAll('\r', '')
@@ -258,6 +372,7 @@ export class WslBackendLauncher extends EventEmitter {
   private stderr = ''
   private startPromise: Promise<BackendLauncherStatus> | null = null
   private status: BackendLauncherStatus
+  private evidence: BackendLauncherEvidence
 
   constructor(
     config: BackendLauncherConfig,
@@ -273,6 +388,20 @@ export class WslBackendLauncher extends EventEmitter {
       managed: runtime.platform === 'win32',
       updatedAt: runtime.now()
     }
+    this.evidence = this.initialEvidence()
+  }
+
+  private initialEvidence(): BackendLauncherEvidence {
+    return {
+      transitions: [acceptanceTransition(this.status)],
+      wslAvailable: false,
+      distroPresent: false,
+      distroWsl2: false,
+      dependencySyncRequested: false,
+      dependencySyncCompleted: false,
+      backendHealthReady: false,
+      backendStoppedCleanly: false
+    }
   }
 
   getConfig(): BackendLauncherConfig {
@@ -281,10 +410,21 @@ export class WslBackendLauncher extends EventEmitter {
 
   setConfig(config: BackendLauncherConfig): void {
     this.config = { ...config, initialPeers: [...config.initialPeers], trustedRelays: [...config.trustedRelays] }
+    this.evidence = this.initialEvidence()
   }
 
   getStatus(): BackendLauncherStatus {
     return { ...this.status }
+  }
+
+  getAcceptanceReport(application: WindowsAcceptanceApplication): WindowsAcceptanceReport {
+    return buildWindowsAcceptanceReport(
+      this.config,
+      this.status,
+      this.evidence,
+      application,
+      this.runtime.now()
+    )
   }
 
   private update(
@@ -301,6 +441,10 @@ export class WslBackendLauncher extends EventEmitter {
       managed: this.runtime.platform === 'win32',
       updatedAt: this.runtime.now()
     }
+    this.evidence.transitions = [
+      ...this.evidence.transitions,
+      acceptanceTransition(this.status)
+    ].slice(-MAX_ACCEPTANCE_TRANSITIONS)
     this.emit('status', this.getStatus())
     return this.getStatus()
   }
@@ -331,6 +475,7 @@ export class WslBackendLauncher extends EventEmitter {
     this.update('checking', 'Checking WSL 2 and the configured distro.')
     try {
       await this.runtime.run('wsl.exe', ['--status'])
+      this.evidence.wslAvailable = true
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       return this.update('missing_wsl', 'WSL 2 is unavailable.', 'wsl_missing', detail)
@@ -357,6 +502,7 @@ export class WslBackendLauncher extends EventEmitter {
           : 'No WSL distros were found.'
       )
     }
+    this.evidence.distroPresent = true
     if (selectedDistro.version !== 2) {
       return this.update(
         'failed',
@@ -367,8 +513,10 @@ export class WslBackendLauncher extends EventEmitter {
           : `Current version: ${selectedDistro.version}`
       )
     }
+    this.evidence.distroWsl2 = true
 
     if (this.config.syncDependencies) {
+      this.evidence.dependencySyncRequested = true
       this.update('installing_backend', 'Synchronizing backend dependencies.')
       try {
         await this.runtime.run('wsl.exe', [
@@ -379,6 +527,7 @@ export class WslBackendLauncher extends EventEmitter {
           '-lc',
           buildDependencySyncScript(this.config)
         ])
+        this.evidence.dependencySyncCompleted = true
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
         const diagnostic = diagnosticFromOutput(detail)
@@ -427,6 +576,7 @@ export class WslBackendLauncher extends EventEmitter {
     for (let attempt = 0; attempt < HEALTH_ATTEMPTS; attempt += 1) {
       if (!this.child || this.child.exitCode !== null) return this.getStatus()
       if (await this.runtime.health(`${this.config.backendUrl.replace(/\/$/, '')}/status`)) {
+        this.evidence.backendHealthReady = true
         return this.update('ready', 'Managed backend is ready.')
       }
       await this.runtime.sleep(HEALTH_INTERVAL_MS)
@@ -465,6 +615,7 @@ export class WslBackendLauncher extends EventEmitter {
     }
     this.child?.kill('SIGTERM')
     this.child = null
+    this.evidence.backendStoppedCleanly = true
     return this.update('idle', 'Managed backend is stopped.')
   }
 

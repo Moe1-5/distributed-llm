@@ -1,7 +1,7 @@
 # Windows Managed WSL Packaging
 
-**Status:** Sprint 15 design baseline
-**Date:** 2026-08-12
+**Status:** Sprint 15 implementation and acceptance runbook
+**Date:** 2026-08-13
 
 ## Packaging Boundary
 
@@ -131,6 +131,19 @@ Diagnostic mapping:
 
 `npm run test:launcher` exercises configuration validation, WSL output parsing, shell quoting, missing prerequisites, process launch, health readiness, port conflict, and safe stop/restart behavior. `npm run audit:win-package` inspects the generated ASAR and rejects environment files, archives, model state, traces, tokens, identities, and receipts. The portable artifact is generated output under `frontend/dist` and is not committed.
 
+The Settings page can export a versioned JSON acceptance report after a launcher lifecycle. The report contains only application metadata, non-secret configuration counts, sanitized launcher state transitions, diagnostic codes, and boolean checks. It deliberately excludes the backend path, peer and relay addresses, process output, model data, tokens, identities, receipts, and local usernames.
+
+The report passes only when one unchanged configuration has completed all of these checks:
+
+1. the app is a packaged build running on Windows,
+2. WSL is available,
+3. the configured distro exists and uses WSL 2,
+4. dependency synchronization was enabled and completed,
+5. backend health reached ready, and
+6. the managed backend subsequently stopped cleanly.
+
+Saving launcher configuration resets accumulated evidence so one distro or relay setup cannot certify another. A report exported before clean stop remains useful for diagnostics but has `ok: false`.
+
 ## First Smoke Test
 
 The first Windows package smoke test should prove only the desktop-to-WSL lifecycle:
@@ -143,3 +156,19 @@ The first Windows package smoke test should prove only the desktop-to-WSL lifecy
 6. node startup surfaces relay failure details if no circuit address appears.
 
 Two-device inference remains gated on Sprint 16 relay validation.
+
+## Clean-Windows Acceptance Capture
+
+On each physical Windows test device:
+
+1. record the portable artifact SHA-256 and compare it with the reviewed branch artifact,
+2. launch the portable application without manually starting the backend in WSL,
+3. configure the WSL 2 distro and backend path in Settings, leave dependency sync enabled, and retain `auto` mode with the reviewed VPS bootstrap and relay values,
+4. start the backend and wait for the launcher state to become `ready`,
+5. complete the relay probe and two-device inference capture described in `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md`,
+6. return to Settings and stop the managed backend,
+7. select **Export report** and retain the generated JSON beside the two-device evidence files.
+
+The Windows acceptance report proves only the packaged Electron-to-WSL lifecycle. It does not by itself prove relay reservation, route ownership, tensor forwarding, inference parity, or two-device operation; those remain separate live evidence gates.
+
+The portable artifact produced from `feature/windows-package-acceptance-report` is 87,652,120 bytes with SHA-256 `2f88a3169110820edb3f4af57394aabd045fd5307b25e7a1c5a4f7b280dd5328`. Generated artifacts remain outside version control.

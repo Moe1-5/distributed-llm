@@ -1,5 +1,6 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 import type {
+  AcceptanceReportExportResult,
   BackendLauncherConfig,
   BackendLauncherStatus
 } from '../main/backendLauncher'
@@ -13,6 +14,7 @@ export interface DistribLLMAPI {
   startBackend: () => Promise<BackendLauncherStatus>
   stopBackend: () => Promise<BackendLauncherStatus>
   restartBackend: () => Promise<BackendLauncherStatus>
+  exportWindowsAcceptanceReport: () => Promise<AcceptanceReportExportResult>
   onBackendLauncherStatus: (callback: (status: BackendLauncherStatus) => void) => () => void
 }
 
