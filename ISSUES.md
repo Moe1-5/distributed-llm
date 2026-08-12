@@ -661,3 +661,22 @@ At the time of the failed test, the VPS bootstrap provided peer discovery and DH
 - Display enough of each peer ID to distinguish peers that share the common `12D3KooW` prefix.
 
 **Status:** implementation complete locally; live multi-device verification pending. On 2026-07-23, typed fixed-port/announce/relay settings, a Petals-derived direct-reachability probe, automatic relay fallback, relay-capable bootstrap behavior, generator relay dialing, transport metadata, UI mode visibility, and regression tests were added. The issue remains open until the updated VPS accepts a circuit reservation and two separate devices complete an expert RPC and inference route through direct and relay paths.
+
+## 15. Transformers 5.3 chat template returns `BatchEncoding` but generation assumes a tensor
+
+**Observed during the 2026-08-13 TinyLlama performance pass:**
+
+- cached TinyLlama bfloat16 weights loaded for a full `0-22` worker;
+- the serving expert started and a separate client validated the complete RPC route;
+- generator components loaded;
+- generation failed before the first distributed forward call:
+
+```text
+TypeError: 'str' object cannot be interpreted as an integer
+```
+
+The failure originates in `DistributedGenerator._encode_prompt`. Transformers 5.3 defaults `apply_chat_template` to `return_dict=True`, so `return_tensors="pt"` returns a `BatchEncoding`. The current code checks only for `torch.Tensor`, then sends the mapping to `torch.as_tensor`; iteration yields the string key `input_ids` and triggers the type error. Existing Sprint 14 tokenizer doubles return a tensor directly and do not model the installed dependency behavior.
+
+**Required fix direction:** explicitly request `return_dict=False`, or support both tensors and mapping-like tokenizer outputs by extracting and validating `input_ids`. Add a regression using a realistic `BatchEncoding`, then run a fresh TinyLlama baseline as a new system-test pass.
+
+**Status:** confirmed compatibility defect. The one-pass system test stopped and cleaned up with no remaining `p2pd` process. Per the testing protocol, no fix or rerun was made during the same pass; the Sprint 14 performance baseline remains open.

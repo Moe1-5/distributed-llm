@@ -114,3 +114,10 @@ The live TinyLlama route now completes correctly, but the application does not e
 - What changed: chat and instruct models now apply their tokenizer chat template once, base models preserve raw prompts, streamed deltas come from cumulative decoding, `/nodes/local` isolates lifecycle controls from all-peer Monitoring, and focused regressions plus architecture/flow documentation cover the contracts.
 - Why: production prompts must match model training format, streamed text must preserve tokenizer spacing, and remote peers must never appear as locally controllable nodes.
 - Status: 122 backend tests plus 19 subtests, frontend type checks, lint, production build, and `git diff --check` pass; only live TinyLlama performance evidence and two-device direct/relay validation remain open.
+
+### 2026-08-13 - Stop TinyLlama baseline on installed chat-template incompatibility
+
+- What changed: added a bounded cached TinyLlama performance probe with a real full-range expert, separate generator identity, bfloat16 CPU loading, timing/accounting/resource evidence, private output, and cleanup; ran one linear live pass.
+- Why: Sprint 14 needs a reproducible baseline from the actual instrumentation rather than manually copied logs, while the limited local memory requires a deliberately bounded test.
+- Finding: model loading, server startup, route discovery, and generator loading passed. Generation failed before the first RPC because Transformers 5.3 returned a `BatchEncoding` from `apply_chat_template` and `_encode_prompt` treated its string key as tensor data. Cleanup completed with no remaining `p2pd` process; the known late Hivemind destructor warning also appeared.
+- Status: four focused probe tests pass, but no performance baseline is claimed and both Sprint 14 live gates remain open. Issue 15 records the required compatibility fix and fresh-pass requirement; no fix or rerun was attempted during this system-test task.

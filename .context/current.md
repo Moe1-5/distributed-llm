@@ -31,7 +31,7 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - [x] Documentation map created
 **Latest Sprint Update**
 - Sprints 10 and 11 are closed and archived; Sprint 13 remains planned for real incentives behind substantial correctness and proof prerequisites.
-- Sprint 14 now exposes performance metrics, applies model-aware chat templates, preserves cumulative streamed decoding, and separates local lifecycle controls from all-peer Monitoring; live TinyLlama and two-device baselines remain open.
+- Sprint 14 instrumentation is complete; `feature/tinyllama-performance-baseline` reproduces a Transformers 5.3 `BatchEncoding` compatibility defect before first-token generation, so live TinyLlama and two-device baselines remain open.
 - Sprint 15 now has a tested Electron-to-WSL launcher, first-run relay settings, lifecycle diagnostics, safe PID shutdown, package auditing, and a portable Windows artifact; clean-Windows and two-device packaged validation remain open.
 - Sprint 16 has verified a public VPS circuit reservation in 1.63 seconds and expert metadata RPC through it. A persistent systemd service, runtime validator, restart continuity check, and recovery runbook are implemented on `feature/vps-relay-service-and-validation`; live VPS restart, tensor forwarding, direct mode, and two-device inference remain open.
 - Sprint 17 implements adjacent-range route selection, capacity-aware serving plans, stale/redundancy conflicts, selected/standby route visibility, and the inference-to-serving gap workflow on `feature/coverage-aware-serving`; local acceptance passes and two-device validation remains open.
