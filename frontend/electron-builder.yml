@@ -1,5 +1,5 @@
-appId: com.electron.app
-productName: frontend
+appId: com.distribllm.desktop
+productName: DistribLLM
 directories:
   buildResources: build
 files:
@@ -12,12 +12,15 @@ files:
 asarUnpack:
   - resources/**
 win:
-  executableName: frontend
+  executableName: DistribLLM
+  signAndEditExecutable: false
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
+  artifactName: DistribLLM-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
+portable:
+  artifactName: DistribLLM-${version}-portable.${ext}
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
@@ -38,6 +41,3 @@ linux:
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
-publish:
-  provider: generic
-  url: https://example.com/auto-updates

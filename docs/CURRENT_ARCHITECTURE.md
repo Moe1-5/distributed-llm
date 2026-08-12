@@ -26,6 +26,8 @@ The renderer has five pages:
 
 Bootstrap configuration is intentionally hidden from normal product workflow. The backend URL defaults to `http://127.0.0.1:8000`; Vite overrides use `VITE_API_BASE_URL` and `VITE_WS_BASE_URL`.
 
+In the Windows package, Electron main owns a managed WSL launcher. It validates persisted distro/path/relay configuration, checks WSL and distro availability, synchronizes the uv environment, launches FastAPI through `wsl.exe`, polls the loopback status endpoint, and publishes typed lifecycle diagnostics over preload IPC. The Nodes and inference views still communicate with FastAPI normally; Settings owns first-run launcher configuration and lifecycle commands. The launcher PID file stops only its managed backend process and leaves WSL model, identity, OAuth, trace, and receipt state intact.
+
 ## Backend State
 
 `backend/api/server.py` currently owns process-level state:

@@ -133,13 +133,18 @@
 | Path                                    | What's inside                                 |
 | --------------------------------------- | --------------------------------------------- |
 | `frontend/package.json`                 | Frontend dependencies and scripts.            |
-| `frontend/src/main/`                    | Electron main process.                        |
+| `frontend/README.md`                    | Frontend development, validation, Windows packaging, and launcher runtime notes. |
+| `frontend/src/main/`                    | Electron main process and managed WSL backend launcher. |
+| `frontend/src/main/backendLauncher.ts`  | Validated WSL detection, dependency sync, FastAPI health, diagnostics, and PID lifecycle state machine. |
 | `frontend/src/preload/`                 | Electron preload bridge.                      |
 | `frontend/src/renderer/`                | React renderer application.                   |
 | `frontend/src/renderer/src/api/`        | HTTP and WebSocket API client.                |
 | `frontend/src/renderer/src/pages/`      | Dashboard, Network, Chat, Monitoring, and Settings pages. |
 | `frontend/src/renderer/src/components/` | Shared renderer components.                   |
 | `frontend/src/renderer/src/assets/`     | CSS and static renderer assets.               |
+| `frontend/tests/backendLauncher.test.ts` | Managed WSL launcher state, validation, quoting, health, and stop regressions. |
+| `frontend/scripts/test-backend-launcher.mjs` | Temporary esbuild and Node test runner for launcher regressions. |
+| `frontend/scripts/audit-windows-package.mjs` | Rejects secrets, local archives, model state, traces, receipts, and identities in Windows package contents. |
 
 ---
 

@@ -41,14 +41,19 @@ The Electron launcher should treat the distro name as configuration, defaulting 
 
 ## Launcher Contract
 
-The Electron main process should eventually expose these states to the renderer:
+The Electron main process exposes these states to the renderer:
 
+- `needs_setup`: required distro, backend path, bootstrap, or relay configuration is absent or invalid.
 - `missing_wsl`: `wsl.exe` is unavailable or WSL 2 is not installed.
 - `missing_distro`: the configured distro name is absent.
 - `installing_backend`: uv sync or backend bootstrap is running.
 - `starting_backend`: FastAPI has been launched but health has not passed.
 - `ready`: `/status` responds from the WSL backend.
 - `failed`: process exit, dependency install failure, port conflict, or health timeout.
+
+`frontend/src/main/backendLauncher.ts` owns this state machine. It validates loopback-only backend URLs and shell-safe WSL settings, checks `wsl.exe --status`, parses the installed distro list, optionally runs `uv sync --python 3.12`, launches FastAPI, and polls `/status`. A PID file under the WSL state directory lets Electron stop the exact backend process it launched instead of terminating the entire distro.
+
+The preload bridge exposes typed status, configuration, start, stop, and restart IPC methods. The Settings page persists non-secret launcher configuration to `backend-launcher.json` in Electron's user data directory. The file contains distro/path/network settings only; OAuth tokens, model files, P2P identities, and receipts remain in WSL-owned storage.
 
 The backend process should receive relay defaults through environment variables, not by mutating the user's root `.env` silently:
 
@@ -59,9 +64,27 @@ DISTRIBLLM_TRUSTED_RELAYS=<project VPS relay multiaddr>
 DISTRIBLLM_AUTO_RELAY=true
 ```
 
+Auto and relay modes require both a bootstrap peer and trusted relay in the saved packaged configuration. Direct mode permits empty relay fields for advanced LAN development. The package defaults both lists to the sprint sixteen verified project VPS multiaddress at `178.156.212.0:7001`; Settings keeps both fields editable so an operator can rotate the public service without editing `.env`. First run remains `needs_setup` until an absolute WSL backend path is supplied.
+
+## Existing Ubuntu Installer Flow
+
+The early-tester package uses an existing Ubuntu WSL distro:
+
+1. Electron checks `wsl.exe --status` and reports `missing_wsl` without attempting administrator-level installation.
+2. Electron parses `wsl.exe --list --verbose`, reports installed alternatives when the configured distro is absent, and rejects a selected distro that is not version two.
+3. The user selects the distro and absolute backend path in Settings.
+4. Electron validates the relay/bootstrap addresses and loopback API URL before writing configuration.
+5. On start, Electron runs `uv sync --python 3.12` inside the backend directory and reports missing uv, missing project files, or dependency failure.
+6. Electron launches `uv run --python 3.12 python main.py`, rejects an occupied API port, and waits for `/status`.
+7. Closing or restarting the application terminates the PID recorded by the launcher without deleting WSL state.
+
+The later managed-distro installer will import a versioned root filesystem and prefill the distro/path fields, but it will reuse the same launcher state machine and IPC contract.
+
+`npm run build:win` produces the unsigned portable Windows artifact used for cross-build verification. `npm run build:win:installer` produces the NSIS setup executable on a Windows build host; electron-builder requires Wine when that NSIS target is invoked from Linux because it executes the generated installer to prepare its uninstaller. Signing and release-channel automation remain deferred.
+
 ## Stop and Update Behavior
 
-Closing the Electron app should stop the FastAPI process it launched, but it should not delete model caches, local imports, OAuth state, or P2P identity. App uninstall may offer a separate cleanup action for WSL state.
+Closing the Electron app stops the FastAPI process it launched, but it does not delete model caches, local imports, OAuth state, or P2P identity. App uninstall may offer a separate cleanup action for WSL state.
 
 Updates should be staged as:
 
@@ -70,6 +93,43 @@ Updates should be staged as:
 3. run `uv sync` inside WSL when backend dependencies changed,
 4. restart and poll health,
 5. show a diagnostic state if startup fails.
+
+## Install, Uninstall, and State Retention
+
+For the existing-Ubuntu tester path:
+
+1. Install WSL 2 and an Ubuntu distro through Windows.
+2. Place the DistribLLM backend checkout at an absolute path inside that distro and install `uv` there.
+3. Launch the portable Windows artifact or install the NSIS package built on Windows.
+4. Open Settings, confirm the distro, enter the WSL backend path, and start the managed backend.
+
+Removing the Windows package deletes only Electron application files. It deliberately leaves the Ubuntu distro, backend checkout, uv environment, model cache, local imports, OAuth state, P2P identity, traces, receipts, and launcher PID state untouched. To remove those, stop DistribLLM first and delete the chosen WSL directories explicitly. The future project-managed distro path may offer an opt-in `wsl.exe --unregister DistribLLM` cleanup, but it must never run during an ordinary app uninstall.
+
+## Logs and Diagnostics
+
+- The Settings launcher status shows the latest state, diagnostic code context, process exit detail, and the last captured backend standard error tail.
+- Electron launcher configuration is `backend-launcher.json` under the Windows Electron user data directory.
+- The managed backend PID is `${XDG_STATE_HOME:-$HOME/.local/state}/distribllm/backend.pid` inside WSL.
+- Backend application logs continue to use the backend's WSL runtime output and configured trace locations.
+- Model weights and Hugging Face caches remain in WSL and never enter Electron user data or package resources.
+
+Diagnostic mapping:
+
+| State/code | Operator action |
+| --- | --- |
+| `configuration_invalid` | Correct the distro, absolute backend path, loopback URL, and relay fields in Settings. |
+| `wsl_missing` | Install or enable WSL 2, then restart DistribLLM. |
+| `distro_missing` | Select one of the installed distros shown in the status detail. |
+| `distro_not_wsl2` | Convert the selected distro with `wsl.exe --set-version <name> 2`. |
+| `uv_missing` | Install uv inside the selected distro. |
+| `backend_path_invalid` | Point Settings at the directory containing `pyproject.toml`. |
+| `backend_port_conflict` | Stop the process already using the configured loopback port. |
+| `backend_health_timeout` | Inspect the captured backend error tail and WSL backend logs. |
+| `backend_stop_failed` | Stop the recorded PID inside the selected distro before retrying. |
+
+## Package Verification
+
+`npm run test:launcher` exercises configuration validation, WSL output parsing, shell quoting, missing prerequisites, process launch, health readiness, port conflict, and safe stop/restart behavior. `npm run audit:win-package` inspects the generated ASAR and rejects environment files, archives, model state, traces, tokens, identities, and receipts. The portable artifact is generated output under `frontend/dist` and is not committed.
 
 ## First Smoke Test
 

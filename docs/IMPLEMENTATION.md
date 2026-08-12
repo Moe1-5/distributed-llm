@@ -13,6 +13,7 @@ Current active validation work:
 - Sprint 12: live-check anonymous public loading and failed-start cleanup after the expired-token fix.
 - Sprint 13: real incentives and settlement remain gated by live multi-device correctness evidence.
 - Sprint 14: chat/instruct templates, context-aware streaming, local lifecycle separation, and performance contracts are implemented; live TinyLlama and two-device baselines remain open.
+- Sprint 15: the Electron main-process managed WSL launcher, health states, persisted relay configuration, first-run Settings controls, safe PID shutdown, and focused launcher tests are implemented; managed-distro import and clean-Windows package validation remain open.
 
 ## Phase 0: Stabilize the Current Prototype
 

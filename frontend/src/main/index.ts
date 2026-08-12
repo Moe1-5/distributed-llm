@@ -1,10 +1,19 @@
 import { app, shell, BrowserWindow, ipcMain, session, dialog } from 'electron'
 import type { OpenDialogOptions } from 'electron'
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
+import { mkdir, readFile, rename, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import {
+  DEFAULT_BACKEND_LAUNCHER_CONFIG,
+  WslBackendLauncher,
+  validateBackendLauncherConfig,
+  type BackendLauncherConfig,
+  type BackendLauncherRuntime,
+  type LauncherChild
+} from './backendLauncher'
 
 // Fix WSL GPU process errors — disable GPU rendering in WSL
 // since WSL doesn't have proper GPU access for Chromium rendering
@@ -36,6 +45,87 @@ function openWithWindowsDefaultBrowser(url: string): Promise<boolean> {
       }
     })
   })
+}
+
+function runFile(file: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { windowsHide: true, encoding: 'utf8' }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(`${error.message}\n${stderr}`.trim()))
+        return
+      }
+      resolve({ stdout, stderr })
+    })
+  })
+}
+
+function createBackendRuntime(): BackendLauncherRuntime {
+  const testPlatform =
+    !app.isPackaged && process.env['DISTRIBLLM_ELECTRON_TEST_PLATFORM'] === 'win32'
+      ? 'win32'
+      : process.platform
+  return {
+    platform: testPlatform,
+    run: runFile,
+    spawn: (file, args) =>
+      spawn(file, args, {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      }) as LauncherChild,
+    health: async (url) => {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(1500) })
+        return response.ok
+      } catch {
+        return false
+      }
+    },
+    sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    now: () => new Date().toISOString()
+  }
+}
+
+function backendConfigPath(): string {
+  return join(app.getPath('userData'), 'backend-launcher.json')
+}
+
+async function loadBackendConfig(): Promise<BackendLauncherConfig> {
+  try {
+    const stored = JSON.parse(await readFile(backendConfigPath(), 'utf8')) as Partial<BackendLauncherConfig>
+    return {
+      ...DEFAULT_BACKEND_LAUNCHER_CONFIG,
+      ...stored,
+      initialPeers: Array.isArray(stored.initialPeers) ? stored.initialPeers : [],
+      trustedRelays: Array.isArray(stored.trustedRelays) ? stored.trustedRelays : []
+    }
+  } catch {
+    return { ...DEFAULT_BACKEND_LAUNCHER_CONFIG }
+  }
+}
+
+async function saveBackendConfig(config: BackendLauncherConfig): Promise<void> {
+  const errors = validateBackendLauncherConfig(config)
+  if (errors.length > 0) throw new Error(errors.join(' '))
+
+  const target = backendConfigPath()
+  const temporary = `${target}.tmp`
+  await mkdir(app.getPath('userData'), { recursive: true })
+  await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600
+  })
+  await rename(temporary, target)
+}
+
+let backendLauncher: WslBackendLauncher | null = null
+let appShutdownStarted = false
+
+function broadcastBackendStatus(): void {
+  if (!backendLauncher) return
+  const status = backendLauncher.getStatus()
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send('backend-launcher:status', status)
+  }
 }
 
 function createWindow(): void {
@@ -74,8 +164,23 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.electron')
+
+  const backendConfig = await loadBackendConfig()
+  backendLauncher = new WslBackendLauncher(backendConfig, createBackendRuntime())
+  backendLauncher.on('status', broadcastBackendStatus)
+
+  ipcMain.handle('backend-launcher:get-status', () => backendLauncher?.getStatus())
+  ipcMain.handle('backend-launcher:get-config', () => backendLauncher?.getConfig())
+  ipcMain.handle('backend-launcher:save-config', async (_event, config: BackendLauncherConfig) => {
+    await saveBackendConfig(config)
+    backendLauncher?.setConfig(config)
+    return backendLauncher?.getConfig()
+  })
+  ipcMain.handle('backend-launcher:start', () => backendLauncher?.start())
+  ipcMain.handle('backend-launcher:stop', () => backendLauncher?.stop())
+  ipcMain.handle('backend-launcher:restart', () => backendLauncher?.restart())
 
   ipcMain.handle('select-local-model-directory', async (event) => {
     const parentWindow = BrowserWindow.fromWebContents(event.sender)
@@ -138,9 +243,20 @@ app.whenReady().then(() => {
 
   createWindow()
 
+  if (backendLauncher.getStatus().managed && backendConfig.autoStart) {
+    void backendLauncher.start()
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+app.on('before-quit', (event) => {
+  if (appShutdownStarted || !backendLauncher) return
+  event.preventDefault()
+  appShutdownStarted = true
+  void backendLauncher.stop().finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

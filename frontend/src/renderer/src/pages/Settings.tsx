@@ -10,6 +10,21 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { api } from '../api/client'
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error' | 'deleting'
+type LauncherConfig = Awaited<ReturnType<Window['api']['getBackendLauncherConfig']>>
+type LauncherStatus = Awaited<ReturnType<Window['api']['getBackendLauncherStatus']>>
+
+const launcherStatusStyle: Record<LauncherStatus['state'], string> = {
+  idle: 'border-border text-text-dim',
+  needs_setup: 'border-amber/30 bg-amber/10 text-amber',
+  checking: 'border-cyan/30 bg-cyan-dim text-cyan',
+  missing_wsl: 'border-red/20 bg-red/5 text-red',
+  missing_distro: 'border-red/20 bg-red/5 text-red',
+  installing_backend: 'border-cyan/30 bg-cyan-dim text-cyan',
+  starting_backend: 'border-cyan/30 bg-cyan-dim text-cyan',
+  ready: 'border-green/20 bg-green/5 text-green',
+  stopping: 'border-amber/30 bg-amber/10 text-amber',
+  failed: 'border-red/20 bg-red/5 text-red'
+}
 
 export default function Settings(): React.JSX.Element {
   const [tokenInput, setTokenInput] = useState('')
@@ -18,6 +33,12 @@ export default function Settings(): React.JSX.Element {
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [launcherConfig, setLauncherConfig] = useState<LauncherConfig | null>(null)
+  const [launcherStatus, setLauncherStatus] = useState<LauncherStatus | null>(null)
+  const [launcherAction, setLauncherAction] = useState<
+    'idle' | 'saving' | 'starting' | 'stopping' | 'restarting'
+  >('idle')
+  const [launcherError, setLauncherError] = useState<string | null>(null)
 
   // ---------------------------------------------------------------------------
   // Load current settings on mount
@@ -38,6 +59,67 @@ export default function Settings(): React.JSX.Element {
   useEffect(() => {
     void loadSettings()
   }, [loadSettings])
+
+  useEffect(() => {
+    void Promise.all([
+      window.api.getBackendLauncherConfig(),
+      window.api.getBackendLauncherStatus()
+    ]).then(([config, status]) => {
+      setLauncherConfig(config)
+      setLauncherStatus(status)
+    })
+    return window.api.onBackendLauncherStatus(setLauncherStatus)
+  }, [])
+
+  const updateLauncherConfig = useCallback(
+    <Key extends keyof LauncherConfig>(key: Key, value: LauncherConfig[Key]) => {
+      setLauncherConfig((current) => (current ? { ...current, [key]: value } : current))
+    },
+    []
+  )
+
+  const saveLauncherConfig = useCallback(async (
+    showProgress = true
+  ): Promise<LauncherConfig | null> => {
+    if (!launcherConfig) return null
+    if (showProgress) setLauncherAction('saving')
+    setLauncherError(null)
+    try {
+      const saved = await window.api.saveBackendLauncherConfig(launcherConfig)
+      setLauncherConfig(saved)
+      return saved
+    } catch (error) {
+      setLauncherError(error instanceof Error ? error.message : 'Could not save backend settings')
+      return null
+    } finally {
+      if (showProgress) setLauncherAction('idle')
+    }
+  }, [launcherConfig])
+
+  const runLauncherAction = useCallback(
+    async (action: 'start' | 'stop' | 'restart') => {
+      setLauncherAction(action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : 'restarting')
+      setLauncherError(null)
+      try {
+        if (action !== 'stop') {
+          const saved = await saveLauncherConfig(false)
+          if (!saved) return
+        }
+        const status =
+          action === 'start'
+            ? await window.api.startBackend()
+            : action === 'stop'
+              ? await window.api.stopBackend()
+              : await window.api.restartBackend()
+        setLauncherStatus(status)
+      } catch (error) {
+        setLauncherError(error instanceof Error ? error.message : `Could not ${action} backend`)
+      } finally {
+        setLauncherAction('idle')
+      }
+    },
+    [saveLauncherConfig]
+  )
 
   // ---------------------------------------------------------------------------
   // Save token
@@ -119,7 +201,187 @@ export default function Settings(): React.JSX.Element {
         </div>
       </div>
 
-      <div className="flex flex-col gap-6 p-7 max-w-2xl">
+      <div className="flex max-w-3xl flex-col gap-8 p-7">
+        {launcherConfig && launcherStatus?.managed && (
+          <section className="flex flex-col gap-5 border-b border-border pb-8">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-sm font-semibold text-text-primary">Managed WSL Backend</h2>
+                <p className="mt-1 font-mono text-[10px] text-text-dim">
+                  {launcherStatus.updatedAt
+                    ? new Date(launcherStatus.updatedAt).toLocaleTimeString()
+                    : ''}
+                </p>
+              </div>
+              <span
+                className={`rounded border px-2.5 py-1 font-mono text-[9px] font-semibold uppercase ${launcherStatusStyle[launcherStatus.state]}`}
+              >
+                {launcherStatus.state.replaceAll('_', ' ')}
+              </span>
+            </div>
+
+            <div className="border-l-2 border-border-bright pl-3">
+              <p className="text-[12px] text-text-secondary">{launcherStatus.message}</p>
+              {launcherStatus.detail && (
+                <p className="mt-1 break-words font-mono text-[10px] text-text-dim">
+                  {launcherStatus.detail}
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <label className="flex flex-col gap-1.5 font-mono text-[10px] text-text-dim uppercase">
+                WSL Distro
+                <input
+                  value={launcherConfig.distroName}
+                  onChange={(event) => updateLauncherConfig('distroName', event.target.value)}
+                  className="h-10 rounded border border-border-bright bg-bg-surface px-3 font-mono text-[12px] text-text-primary outline-none focus:border-cyan/40"
+                />
+              </label>
+              <label className="flex flex-col gap-1.5 font-mono text-[10px] text-text-dim uppercase">
+                Backend URL
+                <input
+                  value={launcherConfig.backendUrl}
+                  onChange={(event) => updateLauncherConfig('backendUrl', event.target.value)}
+                  className="h-10 rounded border border-border-bright bg-bg-surface px-3 font-mono text-[12px] text-text-primary outline-none focus:border-cyan/40"
+                />
+              </label>
+              <label className="flex flex-col gap-1.5 font-mono text-[10px] text-text-dim uppercase md:col-span-2">
+                Backend Path in WSL
+                <input
+                  value={launcherConfig.backendPath}
+                  onChange={(event) => updateLauncherConfig('backendPath', event.target.value)}
+                  placeholder="/home/user/distribllm/backend"
+                  className="h-10 rounded border border-border-bright bg-bg-surface px-3 font-mono text-[12px] text-text-primary outline-none placeholder:text-text-dim focus:border-cyan/40"
+                />
+              </label>
+              <label className="flex flex-col gap-1.5 font-mono text-[10px] text-text-dim uppercase">
+                Network Mode
+                <select
+                  value={launcherConfig.networkMode}
+                  onChange={(event) =>
+                    updateLauncherConfig(
+                      'networkMode',
+                      event.target.value as LauncherConfig['networkMode']
+                    )
+                  }
+                  className="h-10 rounded border border-border-bright bg-bg-surface px-3 font-mono text-[12px] text-text-primary outline-none focus:border-cyan/40"
+                >
+                  <option value="auto">Auto</option>
+                  <option value="relay">Relay</option>
+                  <option value="direct">Direct</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1.5 font-mono text-[10px] text-text-dim uppercase">
+                Relay Wait Seconds
+                <input
+                  type="number"
+                  min={0}
+                  max={3600}
+                  value={launcherConfig.relayWaitTimeoutSeconds}
+                  onChange={(event) =>
+                    updateLauncherConfig('relayWaitTimeoutSeconds', Number(event.target.value))
+                  }
+                  className="h-10 rounded border border-border-bright bg-bg-surface px-3 font-mono text-[12px] text-text-primary outline-none focus:border-cyan/40"
+                />
+              </label>
+              <label className="flex flex-col gap-1.5 font-mono text-[10px] text-text-dim uppercase md:col-span-2">
+                Bootstrap Peers
+                <textarea
+                  rows={3}
+                  value={launcherConfig.initialPeers.join('\n')}
+                  onChange={(event) =>
+                    updateLauncherConfig(
+                      'initialPeers',
+                      event.target.value.split('\n').map((value) => value.trim()).filter(Boolean)
+                    )
+                  }
+                  className="resize-y rounded border border-border-bright bg-bg-surface px-3 py-2 font-mono text-[11px] text-text-primary outline-none focus:border-cyan/40"
+                />
+              </label>
+              <label className="flex flex-col gap-1.5 font-mono text-[10px] text-text-dim uppercase md:col-span-2">
+                Trusted Relays
+                <textarea
+                  rows={3}
+                  value={launcherConfig.trustedRelays.join('\n')}
+                  onChange={(event) =>
+                    updateLauncherConfig(
+                      'trustedRelays',
+                      event.target.value.split('\n').map((value) => value.trim()).filter(Boolean)
+                    )
+                  }
+                  className="resize-y rounded border border-border-bright bg-bg-surface px-3 py-2 font-mono text-[11px] text-text-primary outline-none focus:border-cyan/40"
+                />
+              </label>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-5">
+              <label className="flex items-center gap-2 font-mono text-[10px] text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={launcherConfig.autoStart}
+                  onChange={(event) => updateLauncherConfig('autoStart', event.target.checked)}
+                  className="h-4 w-4 accent-cyan"
+                />
+                Start with app
+              </label>
+              <label className="flex items-center gap-2 font-mono text-[10px] text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={launcherConfig.syncDependencies}
+                  onChange={(event) =>
+                    updateLauncherConfig('syncDependencies', event.target.checked)
+                  }
+                  className="h-4 w-4 accent-cyan"
+                />
+                Sync dependencies before launch
+              </label>
+            </div>
+
+            {launcherError && <p className="font-mono text-[11px] text-red">{launcherError}</p>}
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void saveLauncherConfig()}
+                disabled={launcherAction !== 'idle'}
+                className="h-9 rounded border border-border-bright px-4 font-mono text-[10px] font-semibold text-text-secondary disabled:opacity-50"
+              >
+                SAVE
+              </button>
+              {launcherStatus.state === 'ready' ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void runLauncherAction('restart')}
+                    disabled={launcherAction !== 'idle'}
+                    className="h-9 rounded border border-cyan/30 bg-cyan-dim px-4 font-mono text-[10px] font-semibold text-cyan disabled:opacity-50"
+                  >
+                    RESTART
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void runLauncherAction('stop')}
+                    disabled={launcherAction !== 'idle'}
+                    className="h-9 rounded border border-red/20 bg-red/5 px-4 font-mono text-[10px] font-semibold text-red disabled:opacity-50"
+                  >
+                    STOP
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void runLauncherAction('start')}
+                  disabled={launcherAction !== 'idle'}
+                  className="h-9 rounded border border-cyan/30 bg-cyan-dim px-4 font-mono text-[10px] font-semibold text-cyan disabled:opacity-50"
+                >
+                  START
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+
         {/* HuggingFace Token Section */}
         <section className="flex flex-col gap-4 rounded-xl border border-border bg-bg-elevated p-6">
           {/* Section header */}

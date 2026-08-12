@@ -27,15 +27,21 @@ Restart the frontend after changing Vite environment values.
 
 ```bash
 npm run typecheck
+npm run test:launcher
+npx eslint . --no-cache --quiet
 ```
 
 ## Build
 
 ```bash
 npm run build:win
+npm run audit:win-package
+npm run build:win:installer # Windows build host, or Linux with Wine
 npm run build:mac
 npm run build:linux
 ```
+
+`build:win` produces the unsigned portable Windows artifact under `dist`. The Windows package starts and monitors the backend through the managed WSL launcher configured in Settings.
 
 ## Runtime Notes
 
@@ -43,3 +49,5 @@ npm run build:linux
 - Hugging Face OAuth opens only approved Hugging Face URLs; WSL falls back to the Windows browser when Linux has no browser.
 - Gated model folders are selected through Electron folder-picker IPC.
 - The Inference page depends on backend generator and route readiness, not WebSocket state alone.
+- Packaged Windows mode defaults to the project VPS in `auto` mode and requires an absolute WSL backend path on first run.
+- Launcher configuration contains no Hugging Face credentials, model data, P2P identity, traces, or receipts.

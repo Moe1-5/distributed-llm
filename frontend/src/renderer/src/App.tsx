@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import Chat from './pages/Chat'
 import Dashboard from './pages/Dashboard'
 import Monitoring from './pages/Monitoring'
@@ -48,11 +48,36 @@ class PageErrorBoundary extends React.Component<PageErrorBoundaryProps, PageErro
 
 function App(): React.JSX.Element {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard')
+  const [backendLauncherStatus, setBackendLauncherStatus] = useState<
+    Awaited<ReturnType<Window['api']['getBackendLauncherStatus']>> | null
+  >(null)
+
+  useEffect(() => {
+    void window.api.getBackendLauncherStatus().then(setBackendLauncherStatus)
+    return window.api.onBackendLauncherStatus(setBackendLauncherStatus)
+  }, [])
+
+  const showLauncherBanner =
+    backendLauncherStatus?.managed && backendLauncherStatus.state !== 'ready'
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-bg-base">
       <Sidebar currentPage={currentPage} onNavigate={setCurrentPage} />
       <main className="flex flex-1 flex-col overflow-hidden">
+        {showLauncherBanner && (
+          <button
+            type="button"
+            onClick={() => setCurrentPage('settings')}
+            className="flex min-h-10 flex-shrink-0 items-center justify-between gap-4 border-b border-amber/30 bg-amber/10 px-5 py-2 text-left"
+          >
+            <span className="min-w-0 truncate font-mono text-[11px] text-amber">
+              {backendLauncherStatus.message}
+            </span>
+            <span className="flex-shrink-0 font-mono text-[10px] font-semibold text-amber">
+              SETTINGS
+            </span>
+          </button>
+        )}
         <PageErrorBoundary key={currentPage}>
           {currentPage === 'dashboard' && <Dashboard />}
           {currentPage === 'chat' && <Chat />}

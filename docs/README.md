@@ -36,6 +36,7 @@ This is similar in spirit to Petals, but currently much simpler:
 - Sprint 12: public model loading is isolated from stale OAuth state and failed startup cleanup is implemented; live TinyLlama retry remains open.
 - Sprint 13: real incentives and settlement remain deferred until correctness and anti-abuse prerequisites are proven.
 - Sprint 14: runtime and generation metrics, model-aware chat templates, lossless streamed text deltas, and local-versus-network node visibility are implemented; live performance baselines remain open.
+- Sprint 15: Electron can configure, launch, monitor, restart, and stop an existing-Ubuntu WSL backend; managed-distro import and clean-Windows packaged validation remain open.
 
 ## End Vision
 

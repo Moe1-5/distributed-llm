@@ -1,8 +1,19 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
+import type {
+  BackendLauncherConfig,
+  BackendLauncherStatus
+} from '../main/backendLauncher'
 
 export interface DistribLLMAPI {
   selectLocalModelDirectory: () => Promise<string | null>
   openExternalUrl: (url: string) => Promise<boolean>
+  getBackendLauncherStatus: () => Promise<BackendLauncherStatus>
+  getBackendLauncherConfig: () => Promise<BackendLauncherConfig>
+  saveBackendLauncherConfig: (config: BackendLauncherConfig) => Promise<BackendLauncherConfig>
+  startBackend: () => Promise<BackendLauncherStatus>
+  stopBackend: () => Promise<BackendLauncherStatus>
+  restartBackend: () => Promise<BackendLauncherStatus>
+  onBackendLauncherStatus: (callback: (status: BackendLauncherStatus) => void) => () => void
 }
 
 declare global {

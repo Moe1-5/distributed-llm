@@ -48,6 +48,22 @@ DistribLLM never receives the Hugging Face password and never asks the user to p
 
 If browser opening fails in WSL/headless environments, the UI shows the verification URL and code for manual opening. The Electron main process permits only Hugging Face hosts for this action.
 
+## 3A. Windows Managed Backend Startup
+
+```text
+Packaged Electron app starts
+  -> loads non-secret launcher configuration from Electron user data
+  -> checks wsl.exe and the configured distro
+  -> validates WSL backend path plus bootstrap/relay settings
+  -> optionally runs uv sync --python 3.12
+  -> rejects an already occupied loopback backend port
+  -> launches uv run --python 3.12 python main.py through wsl.exe
+  -> polls /status until ready, process exit, or timeout
+  -> publishes lifecycle state and diagnostics over preload IPC
+```
+
+Restart and app shutdown use the launcher's WSL PID file to terminate the backend process without terminating the distro or deleting durable state.
+
 ## 4. Local Import Fallback
 
 ```text
