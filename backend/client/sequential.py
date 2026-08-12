@@ -36,6 +36,8 @@ import hivemind
 import torch
 from hivemind.moe import get_experts
 from hivemind.utils.logging import get_logger
+
+from client.coverage import route_requirement_ranges, select_route
  
 logger = get_logger(__name__)
  
@@ -224,56 +226,21 @@ class RemoteSequential:
         )
 
     def _plan_route(self, nodes: list[dict]) -> list[dict]:
-        """Order nodes by layer start and enforce a contiguous, non-overlapping route."""
+        """Select the best complete adjacent route and rotate exact replicas."""
         if not nodes:
             raise ValueError("No nodes available for routing")
-
-        nodes_by_span: dict[tuple[int, int], list[dict]] = {}
-        for node in nodes:
-            span = (int(node["layer_start"]), int(node["layer_end"]))
-            nodes_by_span.setdefault(span, []).append(node)
-
-        ordered_nodes: list[dict] = []
-        for span, replicas in sorted(nodes_by_span.items()):
-            ordered_replicas = sorted(
-                replicas,
-                key=lambda n: (
-                    str(n.get("peer_id", "")),
-                    str(n.get("rpc_uid", "")),
-                    str(n.get("node_id", "")),
-                ),
-            )
-            cursor = self._replica_cursors.get(span, 0) % len(ordered_replicas)
-            ordered_nodes.append(ordered_replicas[cursor])
-            self._replica_cursors[span] = (cursor + 1) % len(ordered_replicas)
-
-        prev_end = 0
-        for node in ordered_nodes:
-            layer_start = int(node["layer_start"])
-            layer_end = int(node["layer_end"])
-            peer_id = str(node.get("peer_id", "unknown"))
-
-            if layer_end <= layer_start:
-                raise ValueError(
-                    f"Invalid layer range for peer {peer_id}: {layer_start}-{layer_end}"
-                )
-            if layer_start != prev_end:
-                raise ValueError(
-                    f"Route is not contiguous: expected next layer_start={prev_end}, "
-                    f"got {layer_start} for peer {peer_id}"
-                )
-            if layer_end > self.num_layers:
-                raise ValueError(
-                    f"Route exceeds model depth: peer {peer_id} wants layers {layer_start}-{layer_end}, "
-                    f"but model has {self.num_layers} layers"
-                )
-            prev_end = layer_end
-
-        if prev_end != self.num_layers:
-            raise ValueError(
-                f"Route ends at layer {prev_end} but expected {self.num_layers}"
-            )
-
+        ordered_nodes, _ = select_route(
+            nodes,
+            self.num_layers,
+            self._replica_cursors,
+            advance_replicas=True,
+        )
+        if not ordered_nodes:
+            requirements = route_requirement_ranges(nodes, self.num_layers)
+            formatted = ", ".join(
+                f"{item['start']}-{item['end']}" for item in requirements
+            ) or "an exactly adjacent provider range"
+            raise ValueError(f"No complete adjacent route; needs layers {formatted}")
         return ordered_nodes
 
     def validate_route(self, nodes: Optional[list[dict]] = None) -> list[dict]:
@@ -297,11 +264,17 @@ class RemoteSequential:
 
         coverage = self._check_coverage(serving_nodes)
         if not coverage["complete"]:
-            raise RuntimeError(
-                f"Incomplete layer coverage — missing: {coverage['missing']}"
+            requirements = route_requirement_ranges(serving_nodes, self.num_layers)
+            formatted = ", ".join(
+                f"{item['start']}-{item['end']}" for item in requirements
             )
-
-        ordered_nodes = self._plan_route(serving_nodes)
+            raise RuntimeError(
+                f"Incomplete layer coverage - needs layers {formatted}"
+            )
+        try:
+            ordered_nodes = self._plan_route(serving_nodes)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
         route_str = " -> ".join(
             f"layers {n['layer_start']}–{n['layer_end']} @ {_peer_short(n['peer_id'])}"
             for n in ordered_nodes

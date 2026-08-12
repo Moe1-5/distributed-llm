@@ -47,6 +47,57 @@ export interface ModelInfo {
   route_trace: string[]
 }
 
+export interface CoverageRange {
+  start: number
+  end: number
+}
+
+export interface CoverageSegment extends CoverageRange {
+  provider_count: number
+  status: 'missing' | 'covered' | 'redundant'
+  recommended: boolean
+}
+
+export interface ServingRouteNode {
+  peer_id: string
+  node_id?: string | null
+  rpc_uid: string
+  layer_start: number
+  layer_end: number
+  recommended: boolean
+}
+
+export interface ServingRecommendation {
+  layer_start: number
+  layer_end: number
+  newly_covered_layers: number
+  adds_missing_coverage: boolean
+  adds_redundancy: boolean
+  completes_route: boolean
+  reachable_prefix: number
+  extends_reachable_prefix: boolean
+}
+
+export interface ServingPlan {
+  model_id: string
+  coverage_revision: string
+  total_layers: number
+  requested_layer_count: number
+  segments: CoverageSegment[]
+  missing_ranges: CoverageRange[]
+  uncovered_ranges: CoverageRange[]
+  projected_missing_ranges: CoverageRange[]
+  recommendation: ServingRecommendation
+  current_runnable: boolean
+  projected_runnable: boolean
+  reachable_prefix: number
+  selected_route: ServingRouteNode[]
+  projected_route: ServingRouteNode[]
+  route_kind: 'unavailable' | 'single_provider' | 'multiple_providers'
+  projected_route_kind: 'unavailable' | 'single_provider' | 'multiple_providers'
+  standby_ranges: ServingRouteNode[]
+}
+
 export interface Stats {
   sampled_at?: string | null
   sample_interval_seconds?: number
@@ -224,6 +275,8 @@ export interface NodeStartParams {
   dht_prefix: string
   initial_peers: string[]
   device: string
+  coverage_revision?: string
+  confirm_redundancy?: boolean
 }
 
 export interface GeneratorStartParams {
@@ -347,6 +400,17 @@ async function get<T>(path: string): Promise<T> {
   return res.json() as Promise<T>
 }
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly payload: unknown
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
@@ -355,8 +419,10 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   })
   if (!res.ok) {
     let detail = ''
+    let errorPayload: unknown = null
     try {
       const payload = (await res.json()) as { detail?: unknown; error?: unknown; message?: unknown }
+      errorPayload = payload
       const rawDetail = payload.detail ?? payload.error ?? payload.message
       if (typeof rawDetail === 'string') {
         detail = `: ${rawDetail}`
@@ -368,7 +434,7 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     } catch {
       detail = ''
     }
-    throw new Error(`POST ${path} failed: ${res.status}${detail}`)
+    throw new ApiError(`POST ${path} failed: ${res.status}${detail}`, res.status, errorPayload)
   }
   return res.json() as Promise<T>
 }
@@ -413,6 +479,10 @@ export const api = {
       token_available: boolean
       default_peers: string[]
     }>('/models'),
+  getServingPlan: (modelId: string, layerCount: number) =>
+    get<ServingPlan>(
+      `/models/${encodeURIComponent(modelId)}/serving-plan?layer_count=${encodeURIComponent(layerCount)}`
+    ),
 
   // Node management
   startNode: (params: NodeStartParams) =>
@@ -474,8 +544,7 @@ export const api = {
 
   // Settings
   getSettings: () => get<AppSettings>('/settings'),
-  getHuggingFaceConnection: () =>
-    get<HuggingFaceConnection>('/settings/huggingface/connection'),
+  getHuggingFaceConnection: () => get<HuggingFaceConnection>('/settings/huggingface/connection'),
   startHuggingFaceDeviceLogin: () =>
     post<HuggingFaceDeviceFlow>('/settings/huggingface/oauth/device'),
   pollHuggingFaceDeviceLogin: (flowId: string) =>
@@ -483,17 +552,12 @@ export const api = {
       flow_id: flowId
     }),
   disconnectHuggingFace: () =>
-    del<{ status: string; connection: HuggingFaceConnection }>(
-      '/settings/huggingface/connection'
-    ),
+    del<{ status: string; connection: HuggingFaceConnection }>('/settings/huggingface/connection'),
   downloadHuggingFaceModel: (modelName: string, revision?: string) =>
-    post<{ status: string; job: HuggingFaceDownloadJob }>(
-      '/settings/huggingface/download',
-      {
-        model_name: modelName,
-        ...(revision !== undefined && { revision })
-      }
-    ),
+    post<{ status: string; job: HuggingFaceDownloadJob }>('/settings/huggingface/download', {
+      model_name: modelName,
+      ...(revision !== undefined && { revision })
+    }),
   getHuggingFaceDownload: (jobId: string) =>
     get<{ job: HuggingFaceDownloadJob }>(
       `/settings/huggingface/downloads/${encodeURIComponent(jobId)}`

@@ -1222,8 +1222,17 @@ class RemoteSequentialRouteTests(unittest.TestCase):
     def test_plan_route_rejects_overlapping_spans(self) -> None:
         sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
 
-        with self.assertRaisesRegex(ValueError, "not contiguous"):
+        with self.assertRaisesRegex(ValueError, "No complete adjacent route"):
             sequential._plan_route([self.make_node(0, 5), self.make_node(4, 8)])
+
+    def test_plan_route_ignores_partial_overlap_when_full_route_exists(self) -> None:
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
+        partial = self.make_node(0, 5, "partial")
+        full = self.make_node(0, 8, "full")
+
+        route = sequential._plan_route([partial, full])
+
+        self.assertEqual([item["peer_id"] for item in route], ["full"])
 
     def test_plan_route_load_balances_duplicate_layer_replicas(self) -> None:
         sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)

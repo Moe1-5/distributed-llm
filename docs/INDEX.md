@@ -12,6 +12,7 @@
 | Implementation roadmap | `IMPLEMENTATION.md` | Phased plan for core correctness, reliability, public-swarm operations, incentives, API access, and later training resources |
 | Petals comparison | `PETALS_COMPARISON.md` | Similarities, differences, public-swarm positioning, and what to borrow from Petals |
 | Network reachability and relay review | `NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Sprint 14 transport defect, Petals-derived implementation, Windows/WSL direct setup, locked VPS deployment procedure, live relay diagnosis, rollout, and acceptance criteria |
+| Coverage-aware serving | `COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, replica behavior, serving-plan API, start revalidation, desktop workflow, and incentives boundary |
 | VPS relay operations | `VPS_RELAY_OPERATIONS.md` | Persistent systemd installation, runtime evidence validation, restart continuity, upgrade, rollback, recovery, backup, and monitoring procedure |
 | Windows managed WSL packaging | `WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed distro strategy, state locations, launcher contract, and first smoke test |
 | Errors and debugging | `ERRORS_AND_DEBUGGING.md` | Current OAuth, model access, CUDA/RAM, bootstrap, RPC/NAT, route, and trace troubleshooting |

@@ -20,7 +20,7 @@ from uuid import uuid4
 
 import hivemind
 import torch
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from huggingface_hub import HfApi
 from huggingface_hub.errors import (
@@ -37,6 +37,7 @@ from node.gpu_monitor import GPUMonitor
 from node.node import Node
 from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, _run_with_timeout
 from client.sequential import RemoteSequential
+from client.coverage import build_serving_plan, evaluate_candidate
 from client.generation import DistributedGenerator
 from api.local_models import (
     LocalModelDeletionError,
@@ -473,8 +474,9 @@ def _find_local_node(node_id: Optional[str] = None) -> Optional[Node]:
 
 def _active_local_dht() -> Optional[hivemind.DHT]:
     for local_node in _local_node_list():
-        if local_node.dht is not None:
-            return local_node.dht
+        local_dht = getattr(local_node, "dht", None)
+        if local_dht is not None:
+            return local_dht
     return None
 
 
@@ -636,6 +638,8 @@ class NodeStartRequest(BaseModel):
     dht_prefix:    str = DHT_PREFIX
     initial_peers: list[str] = []
     device:        str = "cuda" if torch.cuda.is_available() else "cpu"
+    coverage_revision: Optional[str] = None
+    confirm_redundancy: bool = False
 
     @field_validator("model_name")
     @classmethod
@@ -1040,6 +1044,80 @@ async def get_models() -> dict:
     }
 
 
+def _active_serving_nodes(model_id: str, dht_prefix: Optional[str] = None) -> list[dict]:
+    model_info = SUPPORTED_MODELS[model_id]
+    total_layers = int(model_info["num_layers"])
+    active_prefix = dht_prefix or _active_dht_prefix()
+    dht = _active_local_dht() or client_dht
+    discovered: list[dict] = []
+    sequential = RemoteSequential(
+        dht=dht if dht is not None else object(),
+        dht_prefix=active_prefix,
+        num_layers=total_layers,
+        model_name=model_id,
+    )
+    if dht is not None:
+        try:
+            discovered = sequential.get_network_status()["nodes"]
+        except Exception as exc:
+            logger.warning("Coverage discovery failed for %s: %s", model_id, exc)
+
+    discovered_keys = {_local_node_key(info) for info in discovered}
+    local_infos = [
+        info
+        for info in _local_node_infos()
+        if info.get("model_name") == model_id
+        and _local_node_key(info) not in discovered_keys
+    ]
+    candidates = [*discovered, *local_infos]
+    valid: list[dict] = []
+    for candidate in candidates:
+        try:
+            node_info = sequential._validate_node_metadata(
+                candidate,
+                str(candidate.get("peer_id", "unknown")),
+            )
+        except ValueError as exc:
+            logger.warning("Ignoring invalid coverage metadata: %s", exc)
+            continue
+        if sequential._is_serving_node(node_info):
+            valid.append(node_info)
+    return valid
+
+
+def _build_model_serving_plan(
+    model_id: str,
+    layer_count: int,
+    dht_prefix: Optional[str] = None,
+    serving_nodes: Optional[list[dict]] = None,
+) -> dict:
+    if model_id not in SUPPORTED_MODELS:
+        raise HTTPException(status_code=404, detail="Unsupported model")
+    total_layers = int(SUPPORTED_MODELS[model_id]["num_layers"])
+    if not 1 <= layer_count <= total_layers:
+        raise HTTPException(
+            status_code=422,
+            detail=f"layer_count must be between 1 and {total_layers}",
+        )
+    nodes = (
+        serving_nodes
+        if serving_nodes is not None
+        else _active_serving_nodes(model_id, dht_prefix)
+    )
+    return {
+        "model_id": model_id,
+        **build_serving_plan(nodes, total_layers, layer_count),
+    }
+
+
+@app.get("/models/{model_id:path}/serving-plan")
+async def get_model_serving_plan(
+    model_id: str,
+    layer_count: int = Query(..., ge=1),
+) -> dict:
+    return _build_model_serving_plan(model_id, layer_count)
+
+
 def _get_model_route_status(
     model_id: str,
     model_info: dict,
@@ -1429,6 +1507,50 @@ async def start_node(req: NodeStartRequest) -> dict:
                 "so they participate in one route."
             ),
         }
+
+    serving_nodes = _active_serving_nodes(req.model_name, req.dht_prefix)
+    fresh_plan = _build_model_serving_plan(
+        req.model_name,
+        req.layer_end - req.layer_start,
+        req.dht_prefix,
+        serving_nodes,
+    )
+    if (
+        req.coverage_revision is not None
+        and req.coverage_revision != fresh_plan["coverage_revision"]
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "coverage_revision_stale",
+                "message": "Layer coverage changed. Review the fresh serving plan.",
+                "plan": fresh_plan,
+            },
+        )
+
+    candidate = evaluate_candidate(
+        serving_nodes,
+        int(SUPPORTED_MODELS[req.model_name]["num_layers"]),
+        req.layer_start,
+        req.layer_end,
+    )
+    if (
+        fresh_plan["missing_ranges"]
+        and candidate["newly_covered_layers"] == 0
+        and not candidate["completes_route"]
+        and not req.confirm_redundancy
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "redundancy_confirmation_required",
+                "message": (
+                    f"Layers {req.layer_start}-{req.layer_end} add redundancy while "
+                    "the model still has route gaps. Confirm to continue."
+                ),
+                "plan": fresh_plan,
+            },
+        )
 
     overlapping_node = _has_overlapping_local_node(req)
     if overlapping_node is not None:

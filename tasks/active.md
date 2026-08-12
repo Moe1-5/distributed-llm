@@ -9,6 +9,7 @@
 | Sprint 14 | `tasks/sprints/sprint-14-performance-and-visibility.md` | Measure runtime and generation performance, expose resource/route visibility, and fix model-aware chat formatting plus streamed token spacing. |
 | Sprint 15 | `tasks/sprints/sprint-15-windows-managed-wsl-packaging.md` | Package the Windows Electron app while isolating the Linux-dependent backend inside a managed WSL 2 runtime. |
 | Sprint 16 | `tasks/sprints/sprint-16-vps-relay-and-live-inference-validation.md` | Verify the VPS circuit relay, expert RPC reachability, and two-device Windows/WSL distributed inference. |
+| Sprint 17 | `tasks/sprints/sprint-17-coverage-aware-serving.md` | Select complete adjacent layer routes and recommend useful serving ranges from live coverage. |
 
 ## Completed Sprints
 
