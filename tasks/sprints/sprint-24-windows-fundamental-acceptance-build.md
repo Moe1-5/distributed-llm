@@ -87,3 +87,10 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 - Why: matching app versions do not prove two devices launched the same reviewed executable; manual filename or hash transcription is unnecessarily error-prone.
 - Verification: 251 backend tests plus 54 subtests, 18 launcher tests, two renderer timing tests, frontend type checks, and the production build pass. Artifact hashing is streamed and exports only filename, size, and digest rather than a local path.
 - Status: the final executable metadata will be replaced after this change is committed, rebuilt with explicit clean-source metadata, and audited.
+
+### 2026-08-13 - Bind the schema-two device-test executable
+
+- What changed: rebuilt `DistribLLM-1.0.0-portable.exe` from runtime commit `ecaf75066e279b04fcd3900eb69fe30a1e1a9ef3` with explicit clean-source build metadata.
+- Verification: the package audit reports 36 ASAR entries and zero forbidden entries. Direct ASAR inspection confirms the exact runtime commit, clean-source flag, and report schema version two are embedded.
+- Artifact: 87,653,718 bytes with SHA-256 `0c1d84e6566e9ff43a8cd057feb7aa2fb1ceb8d2c77301f7c27caaabd0e38dbe`.
+- Status: this is the sole current executable for physical acceptance. Both devices must export passing schema-two reports with this hash before Sprint 24 can close.
