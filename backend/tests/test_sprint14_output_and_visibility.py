@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from transformers import BatchEncoding
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -57,7 +58,26 @@ def test_chat_model_applies_publisher_template_exactly_once():
         "tokenize": True,
         "add_generation_prompt": True,
         "return_tensors": "pt",
+        "return_dict": False,
     }
+
+
+def test_chat_model_accepts_transformers_batch_encoding():
+    class BatchTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            return BatchEncoding(
+                {"input_ids": torch.tensor([[10, 11, 12]], dtype=torch.long)}
+            )
+
+    generator = DistributedGenerator(
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        sequential=object(),
+    )
+    generator.tokenizer = BatchTokenizer()
+
+    encoded = generator._encode_prompt("Explain relay mode")
+
+    assert torch.equal(encoded, torch.tensor([[10, 11, 12]], dtype=torch.long))
 
 
 def test_base_model_keeps_raw_completion_prompt():

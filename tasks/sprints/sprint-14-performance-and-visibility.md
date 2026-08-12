@@ -38,7 +38,7 @@ The live TinyLlama route now completes correctly, but the application does not e
 - [x] Make streamed text deltas reconstruct the tokenizer's context-aware full decode.
 - [x] Add regression tests for chat formatting, stream spacing, metric contracts, and unavailable hardware.
 - [x] Update architecture, flow, validation, and troubleshooting documentation after the contracts settle.
-- [ ] Run a live TinyLlama performance smoke pass and record baseline measurements.
+- [x] Run a live TinyLlama performance smoke pass and record baseline measurements.
 
 ## Deferred To Later Sprint
 
@@ -55,7 +55,7 @@ The live TinyLlama route now completes correctly, but the application does not e
 - [x] Concatenated stream fragments match full generated-sequence decoding, including spaces.
 - [x] Missing GPU or platform-specific metrics are reported as unavailable, not misleading zeros.
 - [x] Automated tests cover the performance contract and both live TinyLlama output findings.
-- [ ] A live distributed TinyLlama pass records a reproducible performance baseline.
+- [x] A live distributed TinyLlama pass records a reproducible performance baseline.
 
 ---
 
@@ -121,3 +121,10 @@ The live TinyLlama route now completes correctly, but the application does not e
 - Why: Sprint 14 needs a reproducible baseline from the actual instrumentation rather than manually copied logs, while the limited local memory requires a deliberately bounded test.
 - Finding: model loading, server startup, route discovery, and generator loading passed. Generation failed before the first RPC because Transformers 5.3 returned a `BatchEncoding` from `apply_chat_template` and `_encode_prompt` treated its string key as tensor data. Cleanup completed with no remaining `p2pd` process; the known late Hivemind destructor warning also appeared.
 - Status: four focused probe tests pass, but no performance baseline is claimed and both Sprint 14 live gates remain open. Issue 15 records the required compatibility fix and fresh-pass requirement; no fix or rerun was attempted during this system-test task.
+
+### 2026-08-13 - Fix Transformers compatibility and record TinyLlama baseline
+
+- What changed: on a separate fix branch, `_encode_prompt` now requests non-dictionary chat-template output and accepts mapping-like tokenizer output by extracting `input_ids`; added a real Transformers `BatchEncoding` regression, then ran a fresh linear TinyLlama pass.
+- Why: installed Transformers 5.3 changed the default chat-template return contract, which blocked production chat models before their first distributed RPC despite tensor-only test doubles passing.
+- Verification: the full `0-22` bfloat16 CPU route generated two visible tokens in 3116.633 ms, with 1795.227 ms to first token, 0.642 tokens/s, two RPC calls totaling 2883.702 ms, 45 useful positions, zero worker failures, minimum available RAM of 4.779 GiB, and completed explicit cleanup with no remaining `p2pd` process. The full backend suite passes with 174 tests and 22 subtests.
+- Status: the reproducible local TinyLlama performance baseline is complete and Issue 15 is resolved. Sprint 14 remains active only for live direct and relayed two-device validation, which belongs to the external Sprint 16 gate.

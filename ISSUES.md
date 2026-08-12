@@ -679,4 +679,4 @@ The failure originates in `DistributedGenerator._encode_prompt`. Transformers 5.
 
 **Required fix direction:** explicitly request `return_dict=False`, or support both tensors and mapping-like tokenizer outputs by extracting and validating `input_ids`. Add a regression using a realistic `BatchEncoding`, then run a fresh TinyLlama baseline as a new system-test pass.
 
-**Status:** confirmed compatibility defect. The one-pass system test stopped and cleaned up with no remaining `p2pd` process. Per the testing protocol, no fix or rerun was made during the same pass; the Sprint 14 performance baseline remains open.
+**Status:** resolved on the separate `feature/transformers-chat-template-compat` branch. `_encode_prompt` now requests `return_dict=False`, accepts mapping-like fallback output by extracting `input_ids`, and has a real `BatchEncoding` regression. A fresh TinyLlama system pass generated two visible tokens through the full `0-22` RPC route and recorded complete performance metrics. The initial failed pass remains the authoritative reproduction; it was not modified or rerun in place.

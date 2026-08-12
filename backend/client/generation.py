@@ -15,6 +15,7 @@ Remote components (P2P network via RemoteSequential):
 
 import copy
 import time
+from collections.abc import Mapping
 from typing import AsyncGenerator, Optional
 from uuid import uuid4
 
@@ -153,6 +154,7 @@ class DistributedGenerator:
                     tokenize=True,
                     add_generation_prompt=True,
                     return_tensors="pt",
+                    return_dict=False,
                 )
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(
@@ -161,6 +163,10 @@ class DistributedGenerator:
         else:
             input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
 
+        if isinstance(input_ids, Mapping):
+            input_ids = input_ids.get("input_ids")
+            if input_ids is None:
+                raise RuntimeError("Chat template output has no input_ids")
         if not isinstance(input_ids, torch.Tensor):
             input_ids = torch.as_tensor(input_ids, dtype=torch.long)
         if input_ids.dim() == 1:

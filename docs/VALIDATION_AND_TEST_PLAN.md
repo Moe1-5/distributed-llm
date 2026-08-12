@@ -183,9 +183,11 @@ Checklist:
 - [x] TinyLlama chat and Llama 2 chat entries have explicit tuning/shape/generation metadata.
 - [x] Registry and local-import contracts have regression coverage.
 - [x] Public model loading is explicitly anonymous and independent from OAuth state.
-- [ ] TinyLlama live node/generator/inference smoke test passes.
+- [x] TinyLlama live node/generator/inference smoke test passes.
 - [ ] Llama 2 chat distributed route produces a response.
 - [ ] Direct versus distributed parity/quality notes are recorded before user-facing support is claimed.
+
+2026-08-13 performance update: a cached bfloat16 CPU TinyLlama full-range worker and separate generator completed a two-token chat-template request through real Hivemind RPC after the Transformers 5.3 `BatchEncoding` compatibility fix. Time to first token was 1795.227 ms, total generation was 3116.633 ms, throughput was 0.642 tokens/s, and two RPC calls totaled 2883.702 ms. See [TinyLlama Performance Baseline](TINYLLAMA_PERFORMANCE_BASELINE.md). This is performance/transport evidence, not direct-versus-distributed TinyLlama parity approval.
 
 ### Phase E.3: Failed Startup Cleanup Validation
 
