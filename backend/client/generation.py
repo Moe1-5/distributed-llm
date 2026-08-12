@@ -350,6 +350,10 @@ class DistributedGenerator:
         first_token_at: Optional[float] = None
         generated_token_count = 0
         route_validation_ms_total = 0.0
+        route_attempts = 0
+        failed_over = False
+        failover_reasons: list[dict] = []
+        route_revision: Optional[str] = None
         hop_totals: dict[tuple[str, int, int], dict] = {}
         cfg = self._get_gen_config()
         logger.info(
@@ -438,6 +442,15 @@ class DistributedGenerator:
                     route_validation_ms_total += float(
                         forward_metrics.get("route_validation_ms", 0.0)
                     )
+                    route_attempts += int(forward_metrics.get("attempt_count", 1))
+                    failed_over = failed_over or bool(
+                        forward_metrics.get("failed_over", False)
+                    )
+                    failover_reasons.extend(
+                        dict(reason)
+                        for reason in forward_metrics.get("failover_reasons", [])
+                    )
+                    route_revision = forward_metrics.get("route_revision", route_revision)
                     for hop in forward_metrics.get("hops", []):
                         key = (
                             str(hop.get("peer_id", "unknown")),
@@ -540,6 +553,10 @@ class DistributedGenerator:
                 "route_validation_ms_total": route_validation_ms_total,
                 "stopped": self._stop_requested,
                 "hop_metrics": hop_metrics,
+                "route_attempts": route_attempts,
+                "failed_over": failed_over,
+                "failover_reasons": failover_reasons,
+                "route_revision": route_revision,
             }
             self._last_generation_metrics = metrics
             yield {

@@ -3,25 +3,20 @@
 > Keep this under 40 lines. Read this after `INDEX.md`.
 > Update whenever the sprint changes, a major decision is made, or the stack changes.
 
-## Project
 **Name:** DistribLLM  
 **Description:** Electron + FastAPI prototype for project-owned public/discoverable peer-to-peer distributed LLM inference over Hivemind DHT/RPC.  
 **Stage:** [ ] Scaffolding [x] MVP prototype [ ] Feature-complete [ ] Production
 
 ## Active Sprint
-
-**Sprint:** Sprint 22 is stabilizing live relay tensor RPC; Sprints 23 and 24 cover responsiveness and the Windows acceptance build; Sprints 18 through 21 are approved future reliability work.
-**Goal:** Complete bounded relayed inference, responsive lifecycle UX, and one audited two-device executable before health, RPC safety, and failover rollout.
+**Sprint:** Sprints 18 through 24 are implemented locally on `feature/fundamental-live-stability`; physical two-device acceptance remains open.
+**Goal:** Rebuild the audited Windows executable and collect relay, failover, and direct-LAN evidence on two physical devices.
 
 ## Tech Stack
 React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Transformers/PyTorch, uv for backend dependencies, npm for frontend scripts.
-
 ## Last Decision
-
-[2026-06-30] Adopt project operating system from Project-Starter
+[2026-06-30] Adopt project operating system from Project-Starter.
 
 ## Status Flags
-
 - [x] Tests configured
 - [ ] CI/CD active
 - [x] Auth implemented
@@ -35,6 +30,10 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 16 has verified public circuit reservation and expert metadata RPC. Persistent service tooling plus a cross-sprint manifest now bind VPS restart, relay probe, Windows lifecycle, relay inference, and direct inference evidence; the actual live run remains open.
 - Sprint 17 implements adjacent-range route selection, capacity-aware serving plans, stale/redundancy conflicts, selected/standby route visibility, and the inference-to-serving gap workflow on `feature/coverage-aware-serving`; local acceptance passes and two-device validation remains open.
 - Sprint 13 has signed settlement, real local split parity, and clean cached remote-expert P2P teardown on `feature/remote-expert-p2p-cleanup`; only separate-device, live VPS shadow/restart, and credit-approval gates remain.
-- Live relay discovery and generator startup pass, but tensor forwards reset and retry; Sprint 22 owns correlated diagnostics and bounded completion.
-- Sprints 18 through 20 implement selective loading, continuous health, and RPC safety; Sprint 21 health-aware failover is the next approved reliability work.
-- Runtime commit `7c75b84` produced an audited Windows portable executable; physical relay/direct acceptance remains open.
+- Sprint 22 prevents the generator relay-daemon panic, classifies RPC certainty, bounds retries, reuses sessions, and compresses legacy activation tensors; physical relay inference remains open.
+- Sprint 23 implements asynchronous lifecycle jobs, prompt stop/unload paths, bounded status calls, and responsive frontend controls.
+- Sprint 18 selectively materializes only served safetensor layers with strict fallback and measured TinyLlama memory/startup evidence.
+- Sprint 19 continuously probes DHT/protocol/transport/RPC health with hysteresis, deadlines, bounded concurrency, and clean lifecycle ownership.
+- Sprint 20 enforces tensor/metadata limits, bounded admission, cooperative deadlines, safe counters, and receipt accounting after successful output.
+- Sprint 21 selects revisioned healthy complete routes, retains bounded alternates, and permits receipt-safe full-attempt failover only after known pre-execution failures.
+- Runtime commit `7c75b84` produced the initial audited portable executable; rebuild from the final runtime commit and physical relay/failover/direct acceptance remain open.

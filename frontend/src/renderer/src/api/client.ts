@@ -228,6 +228,7 @@ export interface ProviderHealth {
   layer_end: number
   state: 'checking' | 'healthy' | 'degraded' | 'offline'
   role: 'selected' | 'standby'
+  route_role?: 'active' | 'alternate' | 'standby'
   dht_present: boolean
   protocol_compatible: boolean
   transport_verified: boolean | null
@@ -250,9 +251,50 @@ export interface ProviderHealthStatus {
   active_probes?: number
   last_discovery_error?: string | null
   reasons: string[]
+  warnings?: string[]
+  route_revision?: string
+  coverage_revision?: string
   providers: ProviderHealth[]
   selected_providers?: ProviderHealth[]
+  alternate_providers?: ProviderHealth[]
   standby_providers?: ProviderHealth[]
+  active_route?: HealthRouteCandidate | null
+  alternate_routes?: HealthRouteCandidate[]
+  last_failover?: RouteFailoverStatus
+}
+
+export interface HealthRouteNode {
+  peer_id: string
+  rpc_uid: string
+  layer_start: number
+  layer_end: number
+  connection_mode?: 'checking' | 'direct' | 'relay'
+}
+
+export interface HealthRouteCandidate {
+  route: HealthRouteNode[]
+  degraded: boolean
+  degraded_hops: number
+  transport: 'direct' | 'relay' | 'mixed_or_unverified'
+  relay_hops: number
+  unverified_hops: number
+  latency_ms: number | null
+}
+
+export interface RouteFailoverReason {
+  attempt: number
+  request_id: string
+  failure_class: string
+  peer_id: string
+  layer_start: number
+  layer_end: number
+  reason: string
+}
+
+export interface RouteFailoverStatus {
+  attempt_count: number
+  failed_over: boolean
+  reasons: RouteFailoverReason[]
 }
 
 export interface HopPerformance {
@@ -274,6 +316,10 @@ export interface GenerationPerformance {
   route_validation_ms_total: number
   stopped: boolean
   hop_metrics: HopPerformance[]
+  route_attempts?: number
+  failed_over?: boolean
+  failover_reasons?: RouteFailoverReason[]
+  route_revision?: string
 }
 
 export interface GeneratorPerformance {

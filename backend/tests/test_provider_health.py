@@ -236,7 +236,7 @@ class ProviderHealthMonitorTests(unittest.TestCase):
 
 
 class HealthReadinessIntegrationTests(unittest.TestCase):
-    def test_degraded_selected_provider_blocks_readiness_without_using_healthy_standby(self) -> None:
+    def test_degraded_selected_provider_yields_to_healthy_replica(self) -> None:
         class DHT:
             pass
 
@@ -291,12 +291,15 @@ class HealthReadinessIntegrationTests(unittest.TestCase):
         self.assertTrue(sequential.get_health_readiness()["route_ready"])
         sequential.health_registry.record_failure(selected_key, now=103, reason="reset")
         degraded = sequential.get_health_readiness()
-        self.assertFalse(degraded["route_ready"])
-        self.assertEqual(degraded["selected_route"][0]["peer_id"], "peer-a")
-        self.assertEqual(degraded["standby_route"][0]["peer_id"], "peer-b")
+        self.assertTrue(degraded["route_ready"])
+        self.assertEqual(degraded["selected_route"][0]["peer_id"], "peer-b")
+        self.assertEqual(degraded["alternate_routes"][0]["route"][0]["peer_id"], "peer-a")
 
         sequential.health_registry.record_success(selected_key, now=104, latency_ms=5)
-        self.assertFalse(sequential.get_health_readiness()["route_ready"])
+        self.assertEqual(
+            sequential.get_health_readiness()["selected_route"][0]["peer_id"],
+            "peer-b",
+        )
         sequential.health_registry.record_success(selected_key, now=105, latency_ms=5)
         self.assertTrue(sequential.get_health_readiness()["route_ready"])
 

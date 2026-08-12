@@ -3,7 +3,7 @@
 **Goal:** Select healthy complete routes, retain bounded alternates, and recover from provider failure without duplicate execution, duplicate rewards, or unstable route switching.
 **Start:** 2026-08-13
 **End:** TBD
-**Status:** Proposed for user review; implementation has not started.
+**Status:** Implemented and locally verified; physical relay failure injection remains open.
 
 ---
 
@@ -35,14 +35,14 @@ This sprint consumes trustworthy provider health from Sprint 19 and bounded RPC 
 
 ## Work Plan
 
-- [ ] Review and approve route ranking, retry boundaries, and receipt semantics.
-- [ ] Extend route planning to produce health-aware active and alternate complete routes.
-- [ ] Add revisioned route caching and invalidation.
-- [ ] Add bounded generation-attempt orchestration and deterministic backoff.
-- [ ] Integrate request/session/route IDs and useful-work receipt cleanup across attempts.
-- [ ] Expose failover state and reasons in API responses, traces, and Monitoring.
-- [ ] Add local multi-peer failure injection and two-device acceptance procedures.
-- [ ] Document limitations before distributed session and key/value cache support.
+- [x] Review and approve route ranking, retry boundaries, and receipt semantics.
+- [x] Extend route planning to produce health-aware active and alternate complete routes.
+- [x] Add revisioned route caching and invalidation.
+- [x] Add bounded generation-attempt orchestration and deterministic backoff.
+- [x] Integrate request/session/route IDs and useful-work receipt cleanup across attempts.
+- [x] Expose failover state and reasons in API responses, traces, and Monitoring.
+- [x] Add local multi-peer failure injection and two-device acceptance procedures.
+- [x] Document limitations before distributed session and key/value cache support.
 
 ## Test Plan
 
@@ -56,14 +56,24 @@ This sprint consumes trustworthy provider health from Sprint 19 and bounded RPC 
 - Coverage and health revision changes invalidate cached choices while stable snapshots remain deterministic.
 - Real local Hivemind tests and a two-device relay failure-injection run validate transport behavior.
 
+### Two-device relay failure injection
+
+1. Run the managed VPS bootstrap relay and configure both devices with the same bootstrap address, trusted relay, DHT prefix, model revision, and `DISTRIBLLM_NETWORK_MODE=relay`.
+2. On each device, start one full-range provider for the same small acceptance model. Wait until Monitoring shows one active complete route and one complete alternate, both with verified relay transport and healthy RPC state.
+3. Start the generator on device one and request enough output to keep multiple forward steps active. Record `/generator/status` before injection.
+4. Identify the device hosting the active provider from Monitoring. On that device, call `POST /node/turn-off?node_id=<ACTIVE_NODE_ID>` while generation is active. Do not stop the alternate.
+5. The current forward may either complete on the active route or, only after a pre-execution failure, restart on the alternate. An ambiguous in-flight reset must stop without replay. Start one more generation if the shutdown landed after the prior forward completed.
+6. Capture `/generator/status`, the completed stream payload, both backend logs, and the VPS relay log. Passing evidence shows `failed_over=true`, at most the configured route-attempt count, an accepted alternate trace, no failed-attempt settlement, and no unbounded retry loop.
+7. Turn the provider back on, wait for the configured recovery successes, and confirm it moves from offline or degraded to alternate/eligible without restarting the generator.
+
 ## Acceptance Criteria
 
-- [ ] Routing returns a healthy complete active route and deterministic ordered alternates when they exist.
-- [ ] A provider failure can move a later safe attempt to an alternate without duplicate layer execution inside one attempt.
-- [ ] Retry count, timeout, and backoff are strictly bounded by configuration.
-- [ ] Only providers in the accepted complete attempt can produce settled useful-work entries.
-- [ ] Route and health revisions make stale client state detectable.
-- [ ] The UI distinguishes active, standby, alternate, degraded, failed-over, and unavailable providers.
+- [x] Routing returns a healthy complete active route and deterministic ordered alternates when they exist.
+- [x] A provider failure can move a later safe attempt to an alternate without duplicate layer execution inside one attempt.
+- [x] Retry count, timeout, and backoff are strictly bounded by configuration.
+- [x] Only providers in the accepted complete attempt can produce settled useful-work entries.
+- [x] Route and health revisions make stale client state detectable.
+- [x] The UI distinguishes active, standby, alternate, degraded, failed-over, and unavailable providers.
 - [ ] Two-device evidence proves one controlled provider failure and successful alternate completion through the project VPS relay.
 
 ---
@@ -75,3 +85,11 @@ This sprint consumes trustworthy provider health from Sprint 19 and bounded RPC 
 - What changed: created a review-ready sprint plan for health-aware route ranking, complete alternates, bounded retries, receipt safety, visibility, and failure injection.
 - Why: automatic failover must build on trustworthy health and bounded RPC behavior without paying for uncertain or duplicate work.
 - Status: proposal only. No planner or generation retry behavior changed; implementation awaits user approval.
+
+### 2026-08-13 - Implement bounded health-aware route failover
+
+- What changed: added a bounded dynamic-programming route planner that ranks healthy direct, relay, hop count, latency, and deterministic identity; retained complete alternates; added health and coverage route revisions; and made session route reuse revision-aware.
+- Failure semantics: a known pre-execution transport failure quarantines the provider and restarts the full forward from the original activation tensor with a fresh request ID. Ambiguous or post-dispatch outcomes stop without failover. No route is changed inside a hop chain.
+- Incentive safety: pending receipts from failed attempts are discarded and only the accepted complete attempt is submitted.
+- Visibility: generator readiness and Monitoring expose active, alternate, standby, degraded, transport, revision, attempt-count, and failover-reason state.
+- Verification: focused planner, health, useful-work, and failure-injection suites pass. The physical two-device relay failure-injection criterion remains open and this sprint stays active until the user explicitly closes it.

@@ -235,14 +235,22 @@ class IdentityAndProtocolTests(unittest.TestCase):
             {
                 "peer_id": "head-peer",
                 "rpc_uid": "legacy.0.6",
+                "model_name": "facebook/opt-125m",
                 "layer_start": 0,
                 "layer_end": 6,
+                "layers_loaded": True,
+                "rpc_running": True,
+                "running": True,
             },
             {
                 "peer_id": "tail-peer",
                 "rpc_uid": "legacy.6.12",
+                "model_name": "facebook/opt-125m",
                 "layer_start": 6,
                 "layer_end": 12,
+                "layers_loaded": True,
+                "rpc_running": True,
+                "running": True,
             },
         ]
 
@@ -255,7 +263,6 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 useful_work_runtime=runtime,
             )
             instance._discover_nodes = lambda: nodes
-            instance.validate_route = lambda discovered: nodes
             instance._receipt_route = lambda route: [{"route": "signed"}]
 
             def call_node(**kwargs):

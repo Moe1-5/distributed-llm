@@ -40,7 +40,17 @@ from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
 from hivemind.proto import runtime_pb2
 from hivemind.utils.logging import get_logger
 
-from client.coverage import route_requirement_ranges, select_route
+from client.coverage import (
+    plan_health_aware_routes,
+    provider_identity,
+    route_requirement_ranges,
+    select_route,
+)
+from client.failover import (
+    RouteAttemptError,
+    RouteFailoverConfig,
+    get_route_failover_config,
+)
 from client.health import (
     ProviderHealthConfig,
     ProviderHealthMonitor,
@@ -184,6 +194,7 @@ class RemoteSequential:
         useful_work_runtime: Optional[UsefulWorkRuntime] = None,
         rpc_attempt_policy: Optional[RPCAttemptPolicy] = None,
         health_config: Optional[ProviderHealthConfig] = None,
+        failover_config: Optional[RouteFailoverConfig] = None,
     ):
         if dht is None:
             raise ValueError("dht must not be None")
@@ -199,12 +210,21 @@ class RemoteSequential:
         self.useful_work_runtime = useful_work_runtime or get_useful_work_runtime()
         self.rpc_attempt_policy = rpc_attempt_policy or get_rpc_attempt_policy()
         self.health_config = health_config or get_provider_health_config()
+        self.failover_config = failover_config or get_route_failover_config()
         self.health_registry = ProviderHealthRegistry(self.health_config)
         self.health_monitor: Optional[ProviderHealthMonitor] = None
         self._replica_cursors: dict[tuple[int, int], int] = {}
         self._last_forward_metrics: dict = {}
         self._session_id: Optional[str] = None
         self._session_route: Optional[list[dict]] = None
+        self._session_snapshot_revision: Optional[tuple[str, str]] = None
+        self._session_nodes: Optional[list[dict]] = None
+        self._route_quarantine: dict[tuple[str, str, int, int], float] = {}
+        self._last_failover: dict = {
+            "attempt_count": 0,
+            "failed_over": False,
+            "reasons": [],
+        }
 
     def start_health_monitor(self) -> None:
         if self.health_monitor is not None and self.health_monitor.running:
@@ -230,12 +250,78 @@ class RemoteSequential:
 
     def _classify_health_roles(self, nodes: list[dict]) -> tuple[list[dict], list[dict]]:
         serving_nodes = [node for node in nodes if self._is_serving_node(node)]
-        return select_route(
+        plan = plan_health_aware_routes(
             serving_nodes,
             self.num_layers,
-            self._replica_cursors,
-            advance_replicas=False,
+            self.health_registry.snapshot(),
+            max_alternates=self.failover_config.max_alternates,
+            allow_degraded=self.failover_config.allow_degraded,
         )
+        if plan["active"] is not None:
+            selected = plan["active"]["route"]
+            selected_keys = {provider_identity(node) for node in selected}
+            standby = [
+                node
+                for node in serving_nodes
+                if provider_identity(node) not in selected_keys
+            ]
+            return selected, standby
+        return select_route(serving_nodes, self.num_layers)
+
+    def _health_route_plan(self, nodes: list[dict]) -> dict:
+        monitor = self.health_monitor
+        health_snapshot = (
+            self.health_registry.snapshot()
+            if monitor is not None and monitor.running
+            else None
+        )
+        return plan_health_aware_routes(
+            [node for node in nodes if self._is_serving_node(node)],
+            self.num_layers,
+            health_snapshot,
+            max_alternates=self.failover_config.max_alternates,
+            allow_degraded=self.failover_config.allow_degraded,
+        )
+
+    def _quarantine_active(self, node: dict, *, now: float) -> bool:
+        key = provider_identity(node)
+        failed_at = self._route_quarantine.get(key)
+        if failed_at is None:
+            return False
+        health = self.health_registry.get(ProviderKey.from_node(node))
+        last_success = health.get("last_success_at") if health else None
+        if isinstance(last_success, (int, float)) and last_success > failed_at:
+            self._route_quarantine.pop(key, None)
+            return False
+        if now - failed_at >= self.failover_config.quarantine_seconds:
+            self._route_quarantine.pop(key, None)
+            return False
+        return True
+
+    def _eligible_attempt_routes(self, plan: dict) -> list[dict]:
+        candidates = [
+            candidate
+            for candidate in [plan.get("active"), *plan.get("alternates", [])]
+            if candidate is not None
+        ]
+        now = time.time()
+        eligible = [
+            candidate
+            for candidate in candidates
+            if not any(self._quarantine_active(node, now=now) for node in candidate["route"])
+        ]
+        if (
+            self._session_route is not None
+            and self._session_snapshot_revision
+            == (plan.get("coverage_revision"), plan.get("health_revision"))
+            and not any(self._quarantine_active(node, now=now) for node in self._session_route)
+        ):
+            session_keys = tuple(provider_identity(node) for node in self._session_route)
+            for index, candidate in enumerate(eligible):
+                if tuple(provider_identity(node) for node in candidate["route"]) == session_keys:
+                    eligible.insert(0, eligible.pop(index))
+                    break
+        return eligible
 
     def _probe_provider(self, node: dict) -> None:
         deadline = time.monotonic() + self.health_config.probe_timeout_seconds
@@ -275,7 +361,20 @@ class RemoteSequential:
             }
 
         nodes = monitor.latest_nodes()
-        selected, standby = self._classify_health_roles(nodes)
+        plan = self._health_route_plan(nodes)
+        selected = plan["active"]["route"] if plan["active"] is not None else []
+        alternate_routes = [candidate["route"] for candidate in plan["alternates"]]
+        selected_keys = {provider_identity(node) for node in selected}
+        alternate_keys = {
+            provider_identity(node)
+            for route in alternate_routes
+            for node in route
+        } - selected_keys
+        standby = [
+            node
+            for node in nodes
+            if provider_identity(node) not in selected_keys | alternate_keys
+        ]
         health = monitor.snapshot()
         health_by_key = {
             ProviderKey.from_node(provider): provider
@@ -284,11 +383,11 @@ class RemoteSequential:
         }
         reasons: list[str] = []
         if not selected:
-            requirements = route_requirement_ranges(nodes, self.num_layers)
+            requirements = plan["unavailable_ranges"]
             formatted = ", ".join(
                 f"{item['start']}-{item['end']}" for item in requirements
             ) or "a complete adjacent provider route"
-            reasons.append(f"No complete adjacent route; needs layers {formatted}.")
+            reasons.append(f"No healthy complete route; unavailable layers {formatted}.")
 
         selected_health: list[dict] = []
         for node in selected:
@@ -303,13 +402,28 @@ class RemoteSequential:
                     "role": "selected",
                 }
             selected_health.append(provider)
-            if provider.get("state") != "healthy":
+            if provider.get("state") not in (
+                {"healthy", "degraded"}
+                if self.failover_config.allow_degraded
+                else {"healthy"}
+            ):
                 reasons.append(
                     f"Provider {str(node['peer_id'])[:8]} is "
                     f"{provider.get('state', 'checking')}: "
                     f"{provider.get('reason') or 'RPC health is not current.'}"
                 )
 
+        alternate_health = [
+            health_by_key.get(ProviderKey.from_node(node), {
+                **ProviderKey.from_node(node).__dict__,
+                "state": "checking",
+                "reason": "Awaiting first RPC health probe.",
+                "role": "standby",
+            })
+            for route in alternate_routes
+            for node in route
+            if provider_identity(node) in alternate_keys
+        ]
         standby_health = [
             health_by_key.get(ProviderKey.from_node(node), {
                 **ProviderKey.from_node(node).__dict__,
@@ -319,15 +433,42 @@ class RemoteSequential:
             })
             for node in standby
         ]
+        provider_roles = []
+        for provider in health["providers"]:
+            identity = provider_identity(provider)
+            provider_roles.append(
+                {
+                    **provider,
+                    "route_role": (
+                        "active"
+                        if identity in selected_keys
+                        else "alternate"
+                        if identity in alternate_keys
+                        else "standby"
+                    ),
+                }
+            )
         return {
             **health,
+            "providers": provider_roles,
             "enabled": True,
             "route_ready": bool(selected) and not reasons,
             "reasons": reasons,
+            "warnings": (
+                ["Active route contains a degraded provider."]
+                if plan["active"] is not None and plan["active"]["degraded"]
+                else []
+            ),
+            "route_revision": plan["route_revision"],
+            "coverage_revision": plan["coverage_revision"],
             "selected_route": selected,
+            "active_route": plan["active"],
+            "alternate_routes": plan["alternates"],
             "standby_route": standby,
             "selected_providers": selected_health,
+            "alternate_providers": alternate_health,
             "standby_providers": standby_health,
+            "last_failover": dict(self._last_failover),
         }
 
     def _assert_route_health(self, route: list[dict]) -> None:
@@ -337,7 +478,12 @@ class RemoteSequential:
         failures: list[str] = []
         for node in route:
             health = self.health_registry.get(ProviderKey.from_node(node))
-            if health is None or health.get("state") != "healthy":
+            eligible_states = (
+                {"healthy", "degraded"}
+                if self.failover_config.allow_degraded
+                else {"healthy"}
+            )
+            if health is None or health.get("state") not in eligible_states:
                 state = health.get("state", "checking") if health else "checking"
                 reason = health.get("reason") if health else "No health record yet."
                 failures.append(f"{str(node['peer_id'])[:8]}={state}: {reason}")
@@ -454,11 +600,17 @@ class RemoteSequential:
     def start_session(self, session_id: Optional[str] = None) -> str:
         self._session_id = session_id or str(uuid4())
         self._session_route = None
+        self._session_snapshot_revision = None
+        self._session_nodes = None
+        self._route_quarantine.clear()
         return self._session_id
 
     def end_session(self) -> None:
         self._session_id = None
         self._session_route = None
+        self._session_snapshot_revision = None
+        self._session_nodes = None
+        self._route_quarantine.clear()
 
     def _receipt_route(self, ordered_nodes: list[dict]) -> Optional[list[dict]]:
         runtime = self.useful_work_runtime
@@ -527,38 +679,43 @@ class RemoteSequential:
             raise ValueError(f"No complete adjacent route; needs layers {formatted}")
         return ordered_nodes
 
-    def validate_route(self, nodes: Optional[list[dict]] = None) -> list[dict]:
-        """Validate discovered nodes before a forward pass and return a safe route plan."""
-        discovered_nodes = list(nodes) if nodes is not None else self._discover_nodes()
+    def _build_route_plan(self, discovered_nodes: list[dict]) -> dict:
         if not discovered_nodes:
             raise RuntimeError(
                 "No nodes found on the DHT. Make sure at least one node is running."
             )
-
         validated_nodes = [
             self._validate_node_metadata(node, str(node.get("peer_id", "unknown")))
             for node in discovered_nodes
         ]
-
         serving_nodes = [node for node in validated_nodes if self._is_serving_node(node)]
         if not serving_nodes:
             raise RuntimeError(
                 "No serving nodes found on the DHT. Make sure at least one node is online."
             )
-
         coverage = self._check_coverage(serving_nodes)
         if not coverage["complete"]:
             requirements = route_requirement_ranges(serving_nodes, self.num_layers)
             formatted = ", ".join(
                 f"{item['start']}-{item['end']}" for item in requirements
             )
+            raise RuntimeError(f"Incomplete layer coverage - needs layers {formatted}")
+        plan = self._health_route_plan(serving_nodes)
+        if plan["active"] is None:
+            formatted = ", ".join(
+                f"{item['start']}-{item['end']}"
+                for item in plan["unavailable_ranges"]
+            ) or "a complete healthy provider chain"
             raise RuntimeError(
-                f"Incomplete layer coverage - needs layers {formatted}"
+                f"No healthy complete route; unavailable layers {formatted}"
             )
-        try:
-            ordered_nodes = self._plan_route(serving_nodes)
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
+        return plan
+
+    def validate_route(self, nodes: Optional[list[dict]] = None) -> list[dict]:
+        """Validate discovered nodes before a forward pass and return a safe route plan."""
+        discovered_nodes = list(nodes) if nodes is not None else self._discover_nodes()
+        plan = self._build_route_plan(discovered_nodes)
+        ordered_nodes = plan["active"]["route"]
         route_str = " -> ".join(
             f"layers {n['layer_start']}–{n['layer_end']} @ {_peer_short(n['peer_id'])}"
             for n in ordered_nodes
@@ -566,101 +723,32 @@ class RemoteSequential:
         logger.info("[route] validated route: %s", route_str)
         return ordered_nodes
 
-    # ------------------------------------------------------------------
-    # Forward pass
-    # ------------------------------------------------------------------
-
-   
-    def forward(
+    def _execute_route_attempt(
         self,
-        hidden_states:  torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids:   Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, list[str]]:
-        if hidden_states.dim() != 3:
-            raise ValueError(
-                f"hidden_states must be [batch, seq_len, hidden_size], got {hidden_states.shape}"
-            )
- 
-        t_start = time.perf_counter()
-        request_id = str(uuid4())
-        input_bytes = sum(
-            tensor.numel() * tensor.element_size()
-            for tensor in (hidden_states, attention_mask, position_ids)
-            if tensor is not None
-        )
-        logger.info(
-            f"[forward] ── BEGIN FORWARD PASS ──────────────────────────\n"
-            f"  hidden_states : {_shape_str(hidden_states)}\n"
-            f"  attention_mask: {'provided' if attention_mask is not None else 'None'}\n"
-            f"  position_ids  : {'provided' if position_ids is not None else 'None'}"
-        )
- 
-        route_reused = self._session_route is not None
-        discovery_ms = 0.0
-        route_validation_ms = 0.0
-        if route_reused:
-            ordered_nodes = [dict(node) for node in self._session_route or []]
-            logger.debug("[forward] request=%s reusing session route", request_id)
-        else:
-            # ── Step 1: node discovery ────────────────────────────────────────
-            logger.debug("[forward] Step 1/3 — discovering nodes …")
-            discovery_started_at = time.perf_counter()
-            nodes = self._discover_nodes()
-            discovery_ms = (time.perf_counter() - discovery_started_at) * 1000
-
-            if not nodes:
-                raise RuntimeError(
-                    "No nodes found on the DHT. Make sure at least one node is running."
-                )
-
-            logger.info(f"[forward] Step 1/3 ✓ — {len(nodes)} node(s) discovered")
-
-            # ── Step 2: route validation ────────────────────────────────────
-            route_started_at = time.perf_counter()
-            ordered_nodes = self.validate_route(nodes)
-            route_validation_ms = (time.perf_counter() - route_started_at) * 1000
-            if self._session_id is not None:
-                self._session_route = [dict(node) for node in ordered_nodes]
-
-        self._assert_route_health(ordered_nodes)
-        receipt_route = self._receipt_route(ordered_nodes)
-        if not route_reused:
-            logger.info(
-                f"[forward] Step 2/3 ✓ — route validated for {len(ordered_nodes)} node(s)"
-            )
- 
-        # ── Step 3: sequential RPC calls ─────────────────────────────────────
-        node_trace = []
+        *,
+        route: list[dict],
+        initial_hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor],
+        request_id: str,
+        input_bytes: int,
+    ) -> tuple[torch.Tensor, list[str], list[dict], list[dict]]:
+        hidden_states = initial_hidden_states
+        receipt_route = self._receipt_route(route)
+        node_trace: list[str] = []
         hop_metrics: list[dict] = []
         pending_receipts: list[dict] = []
- 
-        route_str = " → ".join(
-            f"layers {n['layer_start']}–{n['layer_end']} @ {_peer_short(n['peer_id'])}"
-            for n in ordered_nodes
-        )
-        logger.debug(f"[forward] Step 3/3 — routing plan: {route_str}")
- 
-        for hop_idx, node_info in enumerate(ordered_nodes):
-            peer_id     = node_info["peer_id"]
+        for hop_idx, node_info in enumerate(route):
+            peer_id = node_info["peer_id"]
             layer_start = node_info["layer_start"]
-            layer_end   = node_info["layer_end"]
-            rpc_uid     = node_info.get("rpc_uid")
- 
-            logger.debug(
-                f"[forward] Hop {hop_idx + 1}/{len(ordered_nodes)} | "
-                f"peer={_peer_short(peer_id)} layers={layer_start}→{layer_end} | "
-                f"rpc_uid={rpc_uid!r} | input={_shape_str(hidden_states)}"
-            )
- 
-            # ── ORIGINAL assert, kept exactly as-is ──────────────────────────
+            layer_end = node_info["layer_end"]
+            rpc_uid = node_info.get("rpc_uid")
             if not rpc_uid:
                 raise RuntimeError(
                     f"Node {peer_id[:8]} has no rpc_uid in DHT metadata. "
-                    f"Node may not have started its RPC server correctly."
+                    "Node may not have started its RPC server correctly."
                 )
- 
-            t_hop         = time.perf_counter()
+            t_hop = time.perf_counter()
             hidden_states = self._call_node(
                 rpc_uid=rpc_uid,
                 peer_id=peer_id,
@@ -674,7 +762,6 @@ class RemoteSequential:
                 hop_index=hop_idx,
             )
             hop_ms = (time.perf_counter() - t_hop) * 1000
-            output_bytes = hidden_states.numel() * hidden_states.element_size()
             hop_metrics.append(
                 {
                     "peer_id": str(peer_id),
@@ -684,20 +771,161 @@ class RemoteSequential:
                     "latency_ms": hop_ms,
                     "receipt_requested": receipt_route is not None,
                     "input_bytes": input_bytes,
-                    "output_bytes": output_bytes,
+                    "output_bytes": hidden_states.numel() * hidden_states.element_size(),
                 }
             )
- 
-            logger.debug(
-                f"[forward] Hop {hop_idx + 1}/{len(ordered_nodes)} ✓ | "
-                f"peer={_peer_short(peer_id)} | "
-                f"output={_shape_str(hidden_states)} | {hop_ms:.1f}ms"
+            node_trace.append(f"{peer_id[:8]}… (layers {layer_start}→{layer_end})")
+        return hidden_states, node_trace, hop_metrics, pending_receipts
+
+    # ------------------------------------------------------------------
+    # Forward pass
+    # ------------------------------------------------------------------
+
+    def forward(
+        self,
+        hidden_states:  torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids:   Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, list[str]]:
+        if hidden_states.dim() != 3:
+            raise ValueError(
+                f"hidden_states must be [batch, seq_len, hidden_size], got {hidden_states.shape}"
             )
  
-            node_trace.append(f"{peer_id[:8]}… (layers {layer_start}→{layer_end})")
+        t_start = time.perf_counter()
+        input_bytes = sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (hidden_states, attention_mask, position_ids)
+            if tensor is not None
+        )
+        logger.info(
+            f"[forward] ── BEGIN FORWARD PASS ──────────────────────────\n"
+            f"  hidden_states : {_shape_str(hidden_states)}\n"
+            f"  attention_mask: {'provided' if attention_mask is not None else 'None'}\n"
+            f"  position_ids  : {'provided' if position_ids is not None else 'None'}"
+        )
+ 
+        discovery_ms = 0.0
+        discovery_started_at = time.perf_counter()
+        monitor = self.health_monitor
+        if monitor is not None and monitor.running:
+            nodes = monitor.latest_nodes()
+        elif self._session_nodes is not None:
+            nodes = [dict(node) for node in self._session_nodes]
+        else:
+            nodes = self._discover_nodes()
+        discovery_ms = (time.perf_counter() - discovery_started_at) * 1000
+        route_started_at = time.perf_counter()
+        plan = self._build_route_plan(nodes)
+        routes = self._eligible_attempt_routes(plan)
+        route_validation_ms = (time.perf_counter() - route_started_at) * 1000
+        if not routes:
+            raise RuntimeError(
+                "No healthy complete route remains after temporary provider quarantine."
+            )
 
-        for submission in pending_receipts:
-            self.useful_work_runtime.submit(submission)
+        initial_hidden_states = hidden_states
+        failed_attempts: list[dict] = []
+        accepted_route: list[dict] | None = None
+        node_trace: list[str] = []
+        hop_metrics: list[dict] = []
+        attempt_count = 0
+        route_reused = False
+        candidate_index = 0
+        while (
+            attempt_count < self.failover_config.max_attempts
+            and candidate_index < len(routes)
+        ):
+            candidate = routes[candidate_index]
+            candidate_index += 1
+            route = [dict(node) for node in candidate["route"]]
+            now = time.time()
+            if any(self._quarantine_active(node, now=now) for node in route):
+                continue
+            attempt_count += 1
+            request_id = str(uuid4())
+            route_reused = (
+                attempt_count == 1
+                and self._session_snapshot_revision
+                == (plan["coverage_revision"], plan["health_revision"])
+                and self._session_route is not None
+                and tuple(provider_identity(node) for node in route)
+                == tuple(provider_identity(node) for node in self._session_route)
+            )
+            self._assert_route_health(route)
+            try:
+                hidden_states, node_trace, hop_metrics, pending_receipts = (
+                    self._execute_route_attempt(
+                        route=route,
+                        initial_hidden_states=initial_hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        request_id=request_id,
+                        input_bytes=input_bytes,
+                    )
+                )
+            except RouteAttemptError as exc:
+                failed_at = time.time()
+                self._route_quarantine[provider_identity(exc.node)] = failed_at
+                failed_attempts.append(
+                    {
+                        "attempt": attempt_count,
+                        "request_id": request_id,
+                        "failure_class": exc.failure_class,
+                        "peer_id": str(exc.node.get("peer_id", "")),
+                        "layer_start": int(exc.node.get("layer_start", 0)),
+                        "layer_end": int(exc.node.get("layer_end", 0)),
+                        "reason": str(exc),
+                    }
+                )
+                if exc.failure_class != "pre_execution_transport":
+                    self._last_failover = {
+                        "attempt_count": attempt_count,
+                        "failed_over": False,
+                        "reasons": failed_attempts,
+                    }
+                    raise RuntimeError(
+                        f"Route attempt failed with uncertain execution at layers "
+                        f"{exc.node.get('layer_start')}-{exc.node.get('layer_end')}; "
+                        "automatic failover was suppressed."
+                    ) from exc
+                if attempt_count >= self.failover_config.max_attempts:
+                    break
+                backoff = self.failover_config.backoff_for_attempt(attempt_count)
+                if backoff:
+                    time.sleep(backoff)
+                continue
+            accepted_route = route
+            for submission in pending_receipts:
+                self.useful_work_runtime.submit(submission)
+            break
+
+        if accepted_route is None:
+            failed = failed_attempts[-1] if failed_attempts else {}
+            start = failed.get("layer_start", "unknown")
+            end = failed.get("layer_end", "unknown")
+            self._last_failover = {
+                "attempt_count": attempt_count,
+                "failed_over": False,
+                "reasons": failed_attempts,
+            }
+            raise RuntimeError(
+                f"Route failed at layers {start}-{end}; no healthy complete alternate "
+                f"succeeded within {self.failover_config.max_attempts} attempt(s)."
+            )
+
+        if self._session_id is not None:
+            self._session_route = [dict(node) for node in accepted_route]
+            self._session_snapshot_revision = (
+                plan["coverage_revision"],
+                plan["health_revision"],
+            )
+            self._session_nodes = [dict(node) for node in nodes]
+        self._last_failover = {
+            "attempt_count": attempt_count,
+            "failed_over": bool(failed_attempts),
+            "reasons": failed_attempts,
+        }
  
         total_ms = (time.perf_counter() - t_start) * 1000
         self._last_forward_metrics = {
@@ -709,10 +937,22 @@ class RemoteSequential:
             "rpc_total_ms": sum(hop["latency_ms"] for hop in hop_metrics),
             "total_ms": total_ms,
             "hops": hop_metrics,
+            "attempt_count": attempt_count,
+            "failed_over": bool(failed_attempts),
+            "failover_reasons": failed_attempts,
+            "route_revision": plan["route_revision"],
+            "coverage_revision": plan["coverage_revision"],
+            "health_revision": plan["health_revision"],
+            "active_route": [dict(node) for node in accepted_route],
+            "alternate_routes": [
+                [dict(node) for node in candidate["route"]]
+                for candidate in plan["alternates"]
+            ],
         }
         logger.info(
             f"[forward] ── FORWARD PASS COMPLETE ──────────────────────\n"
             f"  hops    : {len(node_trace)}\n"
+            f"  attempts: {attempt_count}\n"
             f"  output  : {_shape_str(hidden_states)}\n"
             f"  elapsed : {total_ms:.1f}ms\n"
             f"  trace   : {' → '.join(node_trace)}"
@@ -831,11 +1071,24 @@ class RemoteSequential:
                         time.sleep(backoff)
                 else:
                     break
-        terminal_error = RuntimeError(
+        terminal_message = (
             f"RPC request {request_id} to node {peer_id[:8]} failed after "
             f"{attempted}/{policy.max_attempts} attempt(s) "
             f"({classify_rpc_error(last_error) if last_error else 'unknown'}). "
             f"Last error: {last_error}"
+        )
+        failure_class = classify_rpc_error(last_error) if last_error else "unknown"
+        failure_node = node_info or {
+            "peer_id": peer_id,
+            "rpc_uid": rpc_uid,
+            "layer_start": 0,
+            "layer_end": 0,
+        }
+        terminal_error = RouteAttemptError(
+            terminal_message,
+            failure_class=failure_class,
+            node=failure_node,
+            cause=last_error,
         )
         if node_info is not None:
             self.health_registry.record_failure(

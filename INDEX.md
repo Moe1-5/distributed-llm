@@ -44,8 +44,10 @@
 | Selective worker layer loading            | `backend/node/block_loader.py`            |
 | Selective layer loading tests             | `backend/tests/test_selective_layer_loading.py` |
 | Remote layer routing                      | `backend/client/sequential.py`            |
+| Health-aware route failover policy        | `backend/client/failover.py`              |
 | Continuous provider health                | `backend/client/health.py`                |
 | Provider health tests                     | `backend/tests/test_provider_health.py`   |
+| Route failover tests                      | `backend/tests/test_route_failover.py`    |
 | Distributed generation                    | `backend/client/generation.py`            |
 | Frontend API client                       | `frontend/src/renderer/src/api/client.ts` |
 | Frontend pages                            | `frontend/src/renderer/src/pages/`        |

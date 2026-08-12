@@ -138,6 +138,9 @@ export default function Monitoring(): React.JSX.Element {
   const generatorPerformance = state.generator?.performance
   const lastGeneration = generatorPerformance?.last_generation
   const providerHealth = state.generator?.health?.providers ?? []
+  const activeRoute = state.generator?.health?.active_route
+  const alternateRoutes = state.generator?.health?.alternate_routes ?? []
+  const lastFailover = state.generator?.health?.last_failover
   const healthByProvider = useMemo(
     () =>
       new Map(
@@ -494,9 +497,22 @@ export default function Monitoring(): React.JSX.Element {
             </div>
 
             <div className="rounded-xl border border-border bg-bg-elevated p-5">
-              <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
-                Route Chain
-              </h2>
+              <div className="flex items-start justify-between gap-3">
+                <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
+                  Route Chain
+                </h2>
+                {activeRoute && (
+                  <span
+                    className={`rounded border px-2 py-0.5 font-mono text-[9px] uppercase ${
+                      activeRoute.degraded
+                        ? 'border-amber/30 bg-amber/10 text-amber'
+                        : 'border-green/20 bg-green/5 text-green'
+                    }`}
+                  >
+                    {activeRoute.transport} · {activeRoute.degraded ? 'degraded' : 'healthy'}
+                  </span>
+                )}
+              </div>
               <div className="mt-4 flex flex-col gap-2">
                 {routeTrace.length === 0 ? (
                   <p className="font-mono text-[11px] text-text-dim">No validated route yet.</p>
@@ -509,6 +525,32 @@ export default function Monitoring(): React.JSX.Element {
                       {index + 1}. {hop}
                     </div>
                   ))
+                )}
+              </div>
+              <div className="mt-4 border-t border-border pt-4">
+                <div className="flex items-center justify-between gap-3 font-mono text-[10px]">
+                  <span className="text-text-dim uppercase">Complete alternates</span>
+                  <span className="text-text-primary">{alternateRoutes.length}</span>
+                </div>
+                {alternateRoutes.map((candidate, index) => (
+                  <p
+                    key={`${candidate.transport}-${index}`}
+                    className="mt-2 font-mono text-[10px] text-text-secondary"
+                  >
+                    {index + 1}. {candidate.route.map((node) => `${node.layer_start}-${node.layer_end} @ ${shortPeer(node.peer_id)}`).join(' → ')} · {candidate.transport}
+                  </p>
+                ))}
+                {lastFailover && (
+                  <p
+                    className={`mt-3 font-mono text-[10px] ${
+                      lastFailover.failed_over ? 'text-amber' : 'text-text-dim'
+                    }`}
+                  >
+                    Last forward: {lastFailover.attempt_count || 0} attempt(s)
+                    {lastFailover.failed_over
+                      ? ` · failed over at layers ${lastFailover.reasons.at(-1)?.layer_start}-${lastFailover.reasons.at(-1)?.layer_end}`
+                      : ' · no failover'}
+                  </p>
                 )}
               </div>
             </div>
@@ -571,6 +613,21 @@ export default function Monitoring(): React.JSX.Element {
                         {node.connection_mode}
                       </span>
                     )}
+                    {(() => {
+                      const role = healthByProvider.get(`${node.peer_id}:${node.rpc_uid ?? ''}`)?.route_role
+                      if (!role) return null
+                      const roleClass =
+                        role === 'active'
+                          ? 'border-cyan/30 bg-cyan-dim text-cyan'
+                          : role === 'alternate'
+                            ? 'border-amber/30 bg-amber/10 text-amber'
+                            : 'border-border text-text-dim'
+                      return (
+                        <span className={`rounded border px-2 py-0.5 font-mono text-[10px] uppercase ${roleClass}`}>
+                          {role}
+                        </span>
+                      )
+                    })()}
                     {node.loading && (
                       <span
                         className={`rounded border px-2 py-0.5 font-mono text-[10px] uppercase ${

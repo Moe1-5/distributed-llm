@@ -8,6 +8,7 @@ from collections.abc import Mapping, MutableMapping
 from typing import Any
 
 Span = tuple[int, int]
+ProviderIdentity = tuple[str, str, int, int]
 
 
 def _node_key(node: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -15,6 +16,15 @@ def _node_key(node: Mapping[str, Any]) -> tuple[str, str, str]:
         str(node.get("peer_id", "")),
         str(node.get("rpc_uid", "")),
         str(node.get("node_id", "")),
+    )
+
+
+def provider_identity(node: Mapping[str, Any]) -> ProviderIdentity:
+    return (
+        str(node.get("peer_id", "")),
+        str(node.get("rpc_uid", "")),
+        int(node.get("layer_start", 0)),
+        int(node.get("layer_end", 0)),
     )
 
 
@@ -100,6 +110,182 @@ def select_route(
         if (span, _node_key(node)) not in selected_keys
     ]
     return selected, standby
+
+
+def _health_by_provider(health_snapshot: Mapping[str, Any] | None) -> dict[ProviderIdentity, dict]:
+    if health_snapshot is None:
+        return {}
+    providers = health_snapshot.get("providers", [])
+    if not isinstance(providers, list):
+        return {}
+    return {
+        provider_identity(provider): provider
+        for provider in providers
+        if isinstance(provider, Mapping)
+    }
+
+
+def _transport_rank(node: Mapping[str, Any], health: Mapping[str, Any]) -> int:
+    verified = health.get("transport_verified", node.get("transport_verified")) is True
+    mode = str(node.get("connection_mode", "checking"))
+    if verified and mode == "direct":
+        return 0
+    if verified and mode == "relay":
+        return 1
+    return 2
+
+
+def _route_summary(route: list[dict], health_by_provider: Mapping[ProviderIdentity, dict]) -> dict:
+    provider_health: list[dict] = []
+    for node in route:
+        health = health_by_provider.get(provider_identity(node), {})
+        provider_health.append(
+            {
+                "state": str(health.get("state", "checking")),
+                "latency_ms": health.get("latency_ms"),
+                "transport_rank": _transport_rank(node, health),
+            }
+        )
+    degraded_count = sum(item["state"] == "degraded" for item in provider_health)
+    relay_hops = sum(item["transport_rank"] == 1 for item in provider_health)
+    unknown_hops = sum(item["transport_rank"] == 2 for item in provider_health)
+    latency_ms = sum(
+        float(item["latency_ms"])
+        for item in provider_health
+        if isinstance(item["latency_ms"], (int, float))
+    )
+    measured_hops = sum(
+        isinstance(item["latency_ms"], (int, float)) for item in provider_health
+    )
+    transport = (
+        "direct"
+        if route and not relay_hops and not unknown_hops
+        else "relay"
+        if route and not unknown_hops
+        else "mixed_or_unverified"
+    )
+    return {
+        "route": [dict(node) for node in route],
+        "degraded": degraded_count > 0,
+        "degraded_hops": degraded_count,
+        "transport": transport,
+        "relay_hops": relay_hops,
+        "unverified_hops": unknown_hops,
+        "latency_ms": latency_ms if measured_hops == len(route) else None,
+    }
+
+
+def plan_health_aware_routes(
+    nodes: list[dict],
+    total_layers: int,
+    health_snapshot: Mapping[str, Any] | None = None,
+    *,
+    max_alternates: int = 3,
+    allow_degraded: bool = True,
+) -> dict:
+    """Return one stable complete route and deterministic bounded alternates."""
+    if max_alternates < 0:
+        raise ValueError("max_alternates must be non-negative")
+    normalized = valid_nodes(nodes, total_layers)
+    groups = group_nodes_by_span(normalized, total_layers)
+    health_by_provider = _health_by_provider(health_snapshot)
+    default_state = "healthy" if health_snapshot is None else "checking"
+    limit = max_alternates + 1
+    eligible_groups: dict[Span, list[dict]] = {}
+    for span, replicas in groups.items():
+        eligible_groups[span] = []
+        for node in replicas:
+            state = str(
+                health_by_provider.get(provider_identity(node), {}).get(
+                    "state", default_state
+                )
+            )
+            if state == "healthy" or (allow_degraded and state == "degraded"):
+                eligible_groups[span].append(node)
+
+    def ranked(route: list[dict]) -> dict:
+        summary = _route_summary(route, health_by_provider)
+        summary["rank"] = (
+            summary["degraded_hops"],
+            summary["unverified_hops"],
+            summary["relay_hops"],
+            len(route),
+            summary["latency_ms"] if summary["latency_ms"] is not None else float("inf"),
+            tuple(provider_identity(node) for node in route),
+        )
+        return summary
+
+    edges: dict[int, list[Span]] = {}
+    for span, replicas in eligible_groups.items():
+        if replicas:
+            edges.setdefault(span[0], []).append(span)
+    best: dict[int, list[dict]] = {0: [ranked([])]}
+    evaluated_candidates = 0
+    for start in range(total_layers):
+        prefixes = best.get(start, [])
+        if not prefixes:
+            continue
+        for span in sorted(edges.get(start, [])):
+            additions = [
+                ranked([*prefix["route"], node])
+                for prefix in prefixes
+                for node in eligible_groups[span]
+            ]
+            evaluated_candidates += len(additions)
+            merged = [*best.get(span[1], []), *additions]
+            merged.sort(key=lambda item: item["rank"])
+            deduplicated: list[dict] = []
+            seen: set[tuple[ProviderIdentity, ...]] = set()
+            for candidate in merged:
+                identity = tuple(provider_identity(node) for node in candidate["route"])
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                deduplicated.append(candidate)
+                if len(deduplicated) >= limit:
+                    break
+            best[span[1]] = deduplicated
+
+    candidates = best.get(total_layers, []) if total_layers else best[0]
+    public_candidates = [
+        {key: value for key, value in item.items() if key != "rank"}
+        for item in candidates[: max_alternates + 1]
+    ]
+    active = public_candidates[0] if public_candidates else None
+    alternates = public_candidates[1:]
+    eligible_nodes = [
+        node
+        for node in normalized
+        if str(
+            health_by_provider.get(provider_identity(node), {}).get("state", default_state)
+        ) in ({"healthy", "degraded"} if allow_degraded else {"healthy"})
+    ]
+    unavailable_ranges = (
+        [] if active is not None else route_requirement_ranges(eligible_nodes, total_layers)
+    )
+    health_revision = str((health_snapshot or {}).get("health_revision", "unmonitored"))
+    revision_document = {
+        "coverage_revision": coverage_revision(normalized, total_layers),
+        "health_revision": health_revision,
+        "active": [provider_identity(node) for node in active["route"]] if active else [],
+        "alternates": [
+            [provider_identity(node) for node in alternate["route"]]
+            for alternate in alternates
+        ],
+    }
+    route_revision = hashlib.sha256(
+        json.dumps(revision_document, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:20]
+    return {
+        "route_revision": route_revision,
+        "coverage_revision": revision_document["coverage_revision"],
+        "health_revision": health_revision,
+        "active": active,
+        "alternates": alternates,
+        "unavailable_ranges": unavailable_ranges,
+        "candidate_count": len(candidates),
+        "evaluated_candidates": evaluated_candidates,
+    }
 
 
 def reachable_prefix(nodes: list[dict], total_layers: int) -> int:
