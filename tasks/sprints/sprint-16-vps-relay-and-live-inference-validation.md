@@ -130,3 +130,9 @@ The participant now selects the configured trusted relay statically and requests
 - What changed: added a hardened `systemd` unit, root installer, validated launcher, environment template, atomic non-secret runtime status, automated service and restart validator, and a dedicated operations runbook covering installation, upgrades, recovery, rollback, backup, and external probing.
 - Why: the relay command had been proven manually, but a production-style bootstrap needs reproducible deployment evidence, stable identity continuity, automatic restart, and an operator-safe way to detect a wrong commit, runtime, address, or relay configuration.
 - Status: service implementation is complete on the dedicated feature branch. Six focused relay/service tests and the full backend suite of 126 tests plus 19 subtests pass; changed Python files compile, all deployment scripts pass `bash -n`, the generated unit passes `systemd-analyze verify`, and `git diff --check` is clean. Live installation on the project VPS, restart continuity there, a fresh external probe after restart, monitoring-mode accuracy, direct-mode validation, and two-device OPT-125M inference remain open user-device acceptance gates.
+
+### 2026-08-13 - Make two-device relay evidence reproducible
+
+- What changed: added a command-line capture and validator that combines two participant API snapshots, proves distinct local owners for the executed adjacent route, checks relay or direct transport, and records per-hop timing plus deterministic generation.
+- Why: the final live relay test needs one reviewable result with explicit failure reasons rather than manually correlating screenshots and logs from both devices.
+- Status: automated evidence behavior passes in the full backend suite. The actual Windows/WSL two-device relay run, direct-mode run, and live persistent-service restart check remain open and no live acceptance checkbox changed.

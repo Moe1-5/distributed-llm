@@ -19,6 +19,11 @@
 
 > Lessons that still need active enforcement.
 
+### [2026-08-13] Keep sprint implementation on dedicated feature branches
+**Problem:** Sprint work and closure preparation must not continue on a shared or default branch while live acceptance is still pending.
+**Rule:** Create or switch to a dedicated `feature/*` branch before changing sprint implementation, evidence tooling, or sprint status; push that branch for review, and archive a sprint only after the user explicitly says to close it.
+**Why:** Isolated feature branches keep parallel sprint work reviewable and prevent unvalidated reachability or incentive work from being treated as approved.
+
 ### [2026-07-06] Separate stop, offline, and unload semantics
 **Problem:** I treated stopping a local node as equivalent to deleting the node and unloading its layers, but the user expects stop to make a node offline while preserving loaded layers, with a separate delete/unload action for destructive cleanup.
 **Rule:** Model serving lifecycle controls must distinguish pause/offline, resume/online, and delete/unload. UI labels must not hide destructive behavior behind a generic stop button.

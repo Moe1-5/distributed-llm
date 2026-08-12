@@ -16,6 +16,7 @@
 | VPS relay operations | `VPS_RELAY_OPERATIONS.md` | Persistent systemd installation, runtime evidence validation, restart continuity, upgrade, rollback, recovery, backup, and monitoring procedure |
 | Windows managed WSL packaging | `WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed distro strategy, state locations, launcher contract, and first smoke test |
 | Useful-work incentives | `USEFUL_WORK_INCENTIVES.md` | Signed receipt protocol, SQLite settlement rules, read-only credits, VPS rollout, and remaining two-device acceptance |
+| Two-device acceptance evidence | `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized relay/direct captures, complete-route validation, shadow receipts, standby non-payment, and manual gates |
 | Errors and debugging | `ERRORS_AND_DEBUGGING.md` | Current OAuth, model access, CUDA/RAM, bootstrap, RPC/NAT, route, and trace troubleshooting |
 | Validation and testing | `VALIDATION_AND_TEST_PLAN.md` | Current regression status plus local, gated, instruction-ready, cleanup, and real multi-machine phase gates |
 | Starter-system architecture summary | `architecture.md` | Stack, folder ownership, key patterns, and external services |

@@ -58,3 +58,9 @@ Ranges remain half-open: `0-6` serves six layers and connects exactly to `6-12`.
 - Why: overlapping providers must not break a complete route, participants need useful range guidance instead of guessing, and future incentives need an authoritative selected route rather than rewarding advertisements.
 - Verification: 139 backend tests plus 19 subtests and 14 launcher tests pass; changed Python files compile; changed renderer files pass ESLint; frontend type checks and the production Electron build pass; `git diff --check` is clean. The built Electron UI was exercised against the live local API at 1280 by 800 and 900 by 600 with no document overflow. Run Inference reported the exact `0-12` gap, and Serve missing range returned to Recommended mode with the same model, capacity 12, and a `0-12` route-completing recommendation.
 - Status: implementation and local acceptance are complete on `feature/coverage-aware-serving`. The two-device relay validation remains open behind Sprint 16's live VPS gate, so the sprint stays active until the user approves that external evidence.
+
+### 2026-08-13 - Validate live selected and standby routes from captures
+
+- What changed: added evidence validation that rebuilds the complete adjacent route, accepts the actual round-robin replica used by generation, ties selected peer IDs to participant-local node snapshots, and can prove unchanged standby request and useful-position counters.
+- Why: coverage recommendations and incentive exclusions need live evidence of which replicas actually executed and which advertised ranges remained standby.
+- Status: replica and standby validation passes focused and full backend tests. The two-device relay capture is still required before Sprint 17's final live gate can be reviewed.

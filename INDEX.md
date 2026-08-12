@@ -25,6 +25,7 @@
 | Network reachability and relay review      | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` |
 | Windows managed WSL packaging        | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` |
 | Useful-work incentives and settlement | `docs/USEFUL_WORK_INCENTIVES.md`       |
+| Two-device acceptance evidence          | `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` |
 | Errors and debugging                      | `docs/ERRORS_AND_DEBUGGING.md`            |
 | Validation plan                           | `docs/VALIDATION_AND_TEST_PLAN.md`        |
 | Architectural decision history            | `docs/decisions.md`                       |
@@ -102,6 +103,7 @@
 | `docs/VPS_RELAY_OPERATIONS.md` | Persistent VPS relay installation, runtime validation, restart continuity, recovery, and rollback runbook. |
 | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, state locations, launcher contract, and smoke-test plan. |
 | `docs/USEFUL_WORK_INCENTIVES.md` | Signed useful-work receipt protocol, SQLite settlement policy, rollout modes, VPS deployment, and remaining acceptance gates. |
+| `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized relay/direct capture commands, route and ownership validation, shadow receipt evidence, standby non-payment, and manual gates. |
 | `docs/ERRORS_AND_DEBUGGING.md`     | Known errors, symptoms, and debugging guidance.           |
 | `docs/VALIDATION_AND_TEST_PLAN.md` | Validation phase gates before trusting inference or adding advanced features. |
 | `docs/architecture.md`             | Starter-system architecture summary adapted to this repo. |
@@ -126,6 +128,7 @@
 | `backend/traces/`        | Gitignored runtime JSON generation traces written by `/generator/trace`.             |
 | `backend/bootstrap.py`   | Hivemind DHT bootstrap, circuit relay, and reachability-check node.                  |
 | `backend/bootstrap_service_validate.py` | Validates non-secret VPS runtime evidence, deployed versions, relay state, and restart identity continuity. |
+| `backend/acceptance_evidence.py` | Captures sanitized participant evidence and validates two-device route, transport, timing, receipts, ownership, and optional standby non-payment. |
 | `backend/relay_probe.py` | Minimal Hivemind-only circuit-relay reservation probe for Sprint 16 diagnostics.     |
 | `backend/constants.py`   | Supported models, DHT constants, transport settings, and generation defaults.        |
 | `backend/pyproject.toml` | Python project metadata and dependencies.                                            |
@@ -135,6 +138,7 @@
 | `backend/tests/test_coverage_serving.py` | Coverage route scenarios, recommendations, revisions, standby selection, and HTTP conflict regressions. |
 | `backend/tests/test_sprint14_output_and_visibility.py` | Sprint 14 chat-template, context-aware streaming, and local lifecycle visibility regressions. |
 | `backend/tests/test_useful_work_incentives.py` | Receipt signatures and commitments, RPC wrapper, settlement abuse rejection, durability, concurrency, pagination, and rollout-mode regressions. |
+| `backend/tests/test_acceptance_evidence.py` | Evidence sanitization, route ownership, relay validation, replica selection, receipt deltas, and standby non-payment regressions. |
 
 ---
 

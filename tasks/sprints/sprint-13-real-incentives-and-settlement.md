@@ -102,3 +102,9 @@ Sprints 10 and 11 completed gated-model local import and instruction-ready model
 - What changed: added a real local Hivemind integration test that starts the legacy and receipt experts, connects a second client-mode DHT peer, forwards a normal variable-length tensor through the receipt expert, verifies the worker signature and tensor commitment, countersigns generator acceptance, and records the pair in shadow settlement with explicit remote-transport cleanup.
 - Why: wrapper-level tests could not prove that canonical byte metadata, signed receipts, output tensors, and Hivemind expert schemas survive the actual p2p serialization boundary.
 - Status: the independent-peer receipt RPC and settlement path passes in the full suite of 154 tests plus 19 subtests. Live VPS shadow deployment and two-device relay inference remain external acceptance gates; credit mode remains unapproved.
+
+### 2026-08-13 - Add reproducible two-device and standby evidence
+
+- What changed: added a sanitized acceptance collector and validator for local route ownership, adjacent selected ranges, actual replica-aware hop timing, relay/direct transport, generation output, shadow receipt deltas, settlement drain, and optional standby before/after non-payment counters; added an operator runbook and regression coverage.
+- Why: the remaining incentive gate must be reviewable from structured evidence produced by the real APIs instead of screenshots or cumulative counters that could belong to an earlier inference.
+- Status: 165 backend tests plus 19 subtests pass, including 11 focused evidence tests; Python compilation and `git diff --check` pass. The tool is ready on `feature/two-device-acceptance-evidence`, but separate physical devices, live VPS shadow settlement/restart evidence, and approval before credit mode remain open.
