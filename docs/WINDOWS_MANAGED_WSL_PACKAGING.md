@@ -80,7 +80,16 @@ The early-tester package uses an existing Ubuntu WSL distro:
 
 The later managed-distro installer will import a versioned root filesystem and prefill the distro/path fields, but it will reuse the same launcher state machine and IPC contract.
 
-`npm run build:win` produces the unsigned portable Windows artifact used for cross-build verification. `npm run build:win:installer` produces the NSIS setup executable on a Windows build host; electron-builder requires Wine when that NSIS target is invoked from Linux because it executes the generated installer to prepare its uninstaller. Signing and release-channel automation remain deferred.
+`npm run build:win` produces an unsigned portable Windows development artifact. A device-acceptance build must be made from a committed tree and inject that reviewed identity only after tracked changes are clean:
+
+```bash
+git diff --quiet && git diff --cached --quiet && \
+  DISTRIBLLM_BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)" \
+  DISTRIBLLM_BUILD_SOURCE_DIRTY=false \
+  npm run build:win
+```
+
+Without those explicit build values, the packaged report records an unknown or dirty source and cannot pass final acceptance. `npm run build:win:installer` produces the NSIS setup executable on a Windows build host; electron-builder requires Wine when that NSIS target is invoked from Linux because it executes the generated installer to prepare its uninstaller. Signing and release-channel automation remain deferred.
 
 ## Stop and Update Behavior
 
@@ -161,15 +170,15 @@ Two-device inference remains gated on Sprint 16 relay validation.
 
 On each physical Windows test device:
 
-1. record the portable artifact SHA-256 and compare it with the reviewed branch artifact,
-2. launch the portable application without manually starting the backend in WSL,
+1. launch the reviewed portable artifact; its exported report will record the executable SHA-256, byte size, source commit, and tracked-source state automatically,
+2. do not manually start the backend in WSL,
 3. configure the WSL 2 distro and backend path in Settings, leave dependency sync enabled, and retain `auto` mode with the reviewed VPS bootstrap and relay values,
 4. start the backend and wait for the launcher state to become `ready`,
 5. complete the relay probe and two-device inference capture described in `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md`,
 6. return to Settings and stop the managed backend,
 7. select **Export report** and retain the generated JSON beside the two-device evidence files.
 
-The Windows acceptance report proves only the packaged Electron-to-WSL lifecycle. It does not by itself prove relay reservation, route ownership, tensor forwarding, inference parity, or two-device operation; those remain separate live evidence gates. After both device reports and the network evidence exist, use the final manifest workflow in `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` to reject mixed application versions, VPS runs, or participant sets before manual review.
+The Windows acceptance report proves the packaged Electron-to-WSL lifecycle and binds it to the actual executable SHA-256 and clean source commit. It does not by itself prove relay reservation, route ownership, tensor forwarding, inference parity, or two-device operation; those remain separate live evidence gates. After both device reports and the network evidence exist, use the final manifest workflow in `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` to reject mixed executable hashes, source commits, application versions, VPS runs, or participant sets before manual review.
 
 The portable artifact produced from `feature/windows-package-acceptance-report` is 87,652,120 bytes with SHA-256 `2f88a3169110820edb3f4af57394aabd045fd5307b25e7a1c5a4f7b280dd5328`. Generated artifacts remain outside version control.
 

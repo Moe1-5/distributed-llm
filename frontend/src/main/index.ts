@@ -14,6 +14,14 @@ import {
   type BackendLauncherRuntime,
   type LauncherChild
 } from './backendLauncher'
+import {
+  readArtifactIdentity,
+  resolvePackagedArtifactPath,
+  type ArtifactIdentity
+} from './artifactIdentity'
+
+declare const __DISTRIBLLM_SOURCE_COMMIT__: string
+declare const __DISTRIBLLM_SOURCE_DIRTY__: boolean
 
 // Fix WSL GPU process errors — disable GPU rendering in WSL
 // since WSL doesn't have proper GPU access for Chromium rendering
@@ -185,11 +193,26 @@ app.whenReady().then(async () => {
     if (!backendLauncher) throw new Error('Managed backend launcher is unavailable.')
 
     const parentWindow = BrowserWindow.fromWebContents(event.sender)
+    let artifact: ArtifactIdentity | null = null
+    if (app.isPackaged) {
+      try {
+        artifact = await readArtifactIdentity(
+          resolvePackagedArtifactPath(process.execPath, process.env['PORTABLE_EXECUTABLE_FILE'])
+        )
+      } catch (error) {
+        console.warn('Could not identify the packaged executable for acceptance:', error)
+      }
+    }
     const report = backendLauncher.getAcceptanceReport({
       version: app.getVersion(),
       packaged: app.isPackaged,
       platform: process.platform,
-      arch: process.arch
+      arch: process.arch,
+      sourceCommit: __DISTRIBLLM_SOURCE_COMMIT__,
+      sourceDirty: __DISTRIBLLM_SOURCE_DIRTY__,
+      artifactFileName: artifact?.fileName ?? null,
+      artifactSha256: artifact?.sha256 ?? null,
+      artifactBytes: artifact?.bytes ?? null
     })
     const date = report.capturedAt.slice(0, 10)
     const options: SaveDialogOptions = {

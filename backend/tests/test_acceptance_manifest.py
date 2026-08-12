@@ -13,11 +13,19 @@ from acceptance_manifest import main, validate_acceptance_set
 
 RELAY = "/ip4/203.0.113.10/tcp/7001/p2p/QmRelay"
 VPS_REPORT_SHA256 = "a" * 64
+SOURCE_COMMIT = "b" * 40
+ARTIFACT_SHA256 = "c" * 64
 
 
-def windows_report(*, version: str = "1.0.0", mode: str = "auto") -> dict:
+def windows_report(
+    *,
+    version: str = "1.0.0",
+    mode: str = "auto",
+    source_commit: str = SOURCE_COMMIT,
+    artifact_sha256: str = ARTIFACT_SHA256,
+) -> dict:
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "capturedAt": "2026-08-13T00:00:00.000Z",
         "ok": True,
         "application": {
@@ -25,6 +33,11 @@ def windows_report(*, version: str = "1.0.0", mode: str = "auto") -> dict:
             "packaged": True,
             "platform": "win32",
             "arch": "x64",
+            "sourceCommit": source_commit,
+            "sourceDirty": False,
+            "artifactFileName": "DistribLLM-1.0.0-portable.exe",
+            "artifactSha256": artifact_sha256,
+            "artifactBytes": 87652373,
         },
         "configuration": {
             "distroName": "Ubuntu",
@@ -47,6 +60,8 @@ def windows_report(*, version: str = "1.0.0", mode: str = "auto") -> dict:
         "checks": {
             "windowsHost": True,
             "packagedApplication": True,
+            "sourceCommitIdentified": True,
+            "artifactIdentified": True,
             "wslAvailable": True,
             "distroPresent": True,
             "distroWsl2": True,
@@ -150,6 +165,8 @@ class AcceptanceManifestTests(unittest.TestCase):
         self.assertTrue(report["ok"], report["errors"])
         self.assertEqual(report["final_approval"], "pending_manual_review")
         self.assertEqual(report["windows"]["report_count"], 2)
+        self.assertEqual(report["windows"]["source_commits"], [SOURCE_COMMIT])
+        self.assertEqual(report["windows"]["artifact_sha256"], [ARTIFACT_SHA256])
         self.assertEqual(report["vps"]["peer_id"], "QmRelay")
         self.assertEqual(len(report["manual_gates"]), 4)
 
@@ -166,6 +183,18 @@ class AcceptanceManifestTests(unittest.TestCase):
         self.assertIn("application version is 2.0.0", rendered)
         self.assertIn("different application versions", rendered)
         self.assertIn("different participant labels", rendered)
+
+    def test_rejects_windows_reports_from_different_executables_or_commits(self) -> None:
+        report = validate(
+            windows_reports=[
+                windows_report(),
+                windows_report(source_commit="d" * 40, artifact_sha256="e" * 64),
+            ]
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertIn("Windows reports use different source commits", report["errors"])
+        self.assertIn("Windows reports use different executable hashes", report["errors"])
 
     def test_rejects_probe_not_bound_to_validated_vps(self) -> None:
         probe = relay_probe()

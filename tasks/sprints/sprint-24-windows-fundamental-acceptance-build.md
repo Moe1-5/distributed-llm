@@ -25,6 +25,7 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 - [x] Build the portable Windows executable and record filename, size, SHA-256, runtime source commit, and app version; packaged-device evidence will add Python and Hivemind versions.
 - [x] Run package-content audit and reject secrets, private runtime state, archives, and local absolute paths.
 - [x] Exercise start/stop/restart/recovery behavior in the launcher test contract.
+- [x] Bind each exported Windows report to the actual executable SHA-256, byte size, clean source commit, and application version.
 - [ ] Run the exact same artifact on two physical Windows devices for relay and direct acceptance capture.
 
 ## Test Plan
@@ -79,3 +80,10 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 - Verification: 250 backend tests plus 54 subtests, frontend type checks and production build, 17 launcher tests, two renderer timing tests, and the package audit pass.
 - Artifact: 87,652,373 bytes with SHA-256 `b5cfe37b29a501f431f1dcad7e6f8bb0b515e2da7dd136d0281b28d80edefd41`; its ASAR contains 36 entries and zero forbidden entries.
 - Status: this artifact supersedes every earlier local executable for physical acceptance. Relay/direct inference and lifecycle evidence on two physical Windows devices remain open.
+
+### 2026-08-13 - Make device reports self-identifying
+
+- What changed: upgraded Windows acceptance reports to schema version two, streamed SHA-256 calculation over the actual portable wrapper, embedded the build source commit and dirty-source flag, and made the final manifest reject missing or mixed identities.
+- Why: matching app versions do not prove two devices launched the same reviewed executable; manual filename or hash transcription is unnecessarily error-prone.
+- Verification: 251 backend tests plus 54 subtests, 18 launcher tests, two renderer timing tests, frontend type checks, and the production build pass. Artifact hashing is streamed and exports only filename, size, and digest rather than a local path.
+- Status: the final executable metadata will be replaced after this change is committed, rebuilt with explicit clean-source metadata, and audited.

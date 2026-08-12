@@ -52,6 +52,7 @@
 | Local failover probe tests                | `backend/tests/test_local_failover_probe.py` |
 | Distributed generation                    | `backend/client/generation.py`            |
 | Frontend API client                       | `frontend/src/renderer/src/api/client.ts` |
+| Packaged executable identity capture      | `frontend/src/main/artifactIdentity.ts`   |
 | Independent renderer refresh primitive    | `frontend/src/renderer/src/api/independentRefresh.ts` |
 | Renderer partial-state tests              | `frontend/tests/independentRefresh.test.ts` |
 | Renderer partial-state test runner         | `frontend/scripts/test-renderer-flow.mjs`  |

@@ -18,6 +18,8 @@ SCHEMA_VERSION = 1
 REQUIRED_WINDOWS_CHECKS = (
     "windowsHost",
     "packagedApplication",
+    "sourceCommitIdentified",
+    "artifactIdentified",
     "wslAvailable",
     "distroPresent",
     "distroWsl2",
@@ -53,13 +55,15 @@ def _validate_windows_reports(
 ) -> tuple[list[str], dict[str, Any]]:
     errors: list[str] = []
     versions: set[str] = set()
+    source_commits: set[str] = set()
+    artifact_hashes: set[str] = set()
     network_modes: list[str] = []
     if len(reports) < 2:
         errors.append("At least two Windows acceptance reports are required")
 
     for index, report in enumerate(reports, start=1):
         prefix = f"Windows report {index}"
-        if report.get("schemaVersion") != 1:
+        if report.get("schemaVersion") != 2:
             errors.append(f"{prefix} has an unsupported schema version")
         if report.get("ok") is not True:
             errors.append(f"{prefix} did not pass its managed WSL lifecycle")
@@ -73,6 +77,21 @@ def _validate_windows_reports(
             errors.append(f"{prefix} was not captured on Windows")
         if application.get("packaged") is not True:
             errors.append(f"{prefix} was not captured from a packaged application")
+        source_commit = str(application.get("sourceCommit", "")).strip()
+        if re.fullmatch(r"[0-9a-f]{40}", source_commit):
+            source_commits.add(source_commit)
+        else:
+            errors.append(f"{prefix} has no valid source commit")
+        if application.get("sourceDirty") is not False:
+            errors.append(f"{prefix} was built from dirty tracked source")
+        artifact_sha256 = str(application.get("artifactSha256", "")).strip()
+        if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256):
+            artifact_hashes.add(artifact_sha256)
+        else:
+            errors.append(f"{prefix} has no valid executable SHA-256")
+        artifact_bytes = _integer(application.get("artifactBytes"))
+        if artifact_bytes is None or artifact_bytes <= 0:
+            errors.append(f"{prefix} has no valid executable byte size")
         if expected_app_version and version != expected_app_version:
             errors.append(
                 f"{prefix} application version is {version or '<missing>'}; "
@@ -107,9 +126,15 @@ def _validate_windows_reports(
 
     if len(versions) > 1:
         errors.append("Windows reports use different application versions")
+    if len(source_commits) > 1:
+        errors.append("Windows reports use different source commits")
+    if len(artifact_hashes) > 1:
+        errors.append("Windows reports use different executable hashes")
     return errors, {
         "report_count": len(reports),
         "application_versions": sorted(versions),
+        "source_commits": sorted(source_commits),
+        "artifact_sha256": sorted(artifact_hashes),
         "network_modes": network_modes,
     }
 

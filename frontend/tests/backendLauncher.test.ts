@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 import {
@@ -15,8 +18,30 @@ import {
   type BackendLauncherConfig,
   type BackendLauncherRuntime,
   type CommandResult,
-  type LauncherChild
+  type LauncherChild,
+  type WindowsAcceptanceApplication
 } from '../src/main/backendLauncher'
+import { readArtifactIdentity, resolvePackagedArtifactPath } from '../src/main/artifactIdentity'
+
+const TEST_COMMIT = 'a'.repeat(40)
+const TEST_ARTIFACT_SHA256 = 'b'.repeat(64)
+
+function packagedApplication(
+  overrides: Partial<WindowsAcceptanceApplication> = {}
+): WindowsAcceptanceApplication {
+  return {
+    version: '1.0.0',
+    packaged: true,
+    platform: 'win32' as const,
+    arch: 'x64',
+    sourceCommit: TEST_COMMIT,
+    sourceDirty: false,
+    artifactFileName: 'DistribLLM-1.0.0-portable.exe',
+    artifactSha256: TEST_ARTIFACT_SHA256,
+    artifactBytes: 1024,
+    ...overrides
+  }
+}
 
 class FakeChild extends EventEmitter implements LauncherChild {
   exitCode: number | null = null
@@ -94,6 +119,25 @@ test('packaged defaults use the verified project VPS for bootstrap and relay', (
   assert.equal(DEFAULT_BACKEND_LAUNCHER_CONFIG.networkMode, 'auto')
   assert.deepEqual(DEFAULT_BACKEND_LAUNCHER_CONFIG.initialPeers, [PROJECT_VPS_RELAY_MADDR])
   assert.deepEqual(DEFAULT_BACKEND_LAUNCHER_CONFIG.trustedRelays, [PROJECT_VPS_RELAY_MADDR])
+})
+
+test('hashes the selected packaged artifact without exposing its path', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'distribllm-artifact-'))
+  const artifactPath = join(directory, 'DistribLLM-portable.exe')
+  try {
+    await writeFile(artifactPath, 'verified artifact')
+    const identity = await readArtifactIdentity(artifactPath)
+
+    assert.equal(resolvePackagedArtifactPath('/extracted/DistribLLM.exe', artifactPath), artifactPath)
+    assert.deepEqual(identity, {
+      fileName: 'DistribLLM-portable.exe',
+      sha256: '2127de9293abf1503418b9f78b3d530cdd2263417064815ee46b7ecdf1215ddc',
+      bytes: 17
+    })
+    assert.doesNotMatch(JSON.stringify(identity), /distribllm-artifact-/)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('requires a safe local backend configuration', () => {
@@ -271,15 +315,14 @@ test('exports sanitized acceptance evidence after a complete managed lifecycle',
   await launcher.start()
   await launcher.stop()
   const report = launcher.getAcceptanceReport({
-    version: '1.0.0',
-    packaged: true,
-    platform: 'win32',
-    arch: 'x64'
+    ...packagedApplication()
   })
 
   assert.equal(report.ok, true)
   assert.equal(report.checks.backendHealthReady, true)
   assert.equal(report.checks.backendStoppedCleanly, true)
+  assert.equal(report.checks.sourceCommitIdentified, true)
+  assert.equal(report.checks.artifactIdentified, true)
   assert.equal(report.configuration.backendPathConfigured, true)
   assert.equal(report.configuration.initialPeerCount, 1)
   assert.equal(report.launcher.currentStatus.state, 'idle')
@@ -315,13 +358,22 @@ test('acceptance report cannot pass outside a packaged Windows lifecycle', () =>
       backendHealthReady: true,
       backendStoppedCleanly: true
     },
-    { version: '1.0.0', packaged: false, platform: 'linux', arch: 'x64' },
+    packagedApplication({
+      packaged: false,
+      platform: 'linux' as const,
+      sourceDirty: true,
+      artifactFileName: null,
+      artifactSha256: null,
+      artifactBytes: null
+    }),
     '2026-08-13T00:00:00.000Z'
   )
 
   assert.equal(report.ok, false)
   assert.equal(report.checks.windowsHost, false)
   assert.equal(report.checks.packagedApplication, false)
+  assert.equal(report.checks.sourceCommitIdentified, false)
+  assert.equal(report.checks.artifactIdentified, false)
 })
 
 test('changing launcher configuration clears evidence from the previous lifecycle', async () => {
@@ -332,10 +384,7 @@ test('changing launcher configuration clears evidence from the previous lifecycl
 
   launcher.setConfig(validConfig({ syncDependencies: true, distroName: 'Ubuntu-24.04' }))
   const report = launcher.getAcceptanceReport({
-    version: '1.0.0',
-    packaged: true,
-    platform: 'win32',
-    arch: 'x64'
+    ...packagedApplication()
   })
 
   assert.equal(report.ok, false)

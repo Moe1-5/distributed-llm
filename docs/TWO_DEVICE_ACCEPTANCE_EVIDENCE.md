@@ -145,6 +145,6 @@ uv run --python 3.12 python -m acceptance_manifest \
   --output ~/distribllm-evidence/final-acceptance.json
 ```
 
-The validator requires two passing packaged-Windows and WSL lifecycle reports on the same application version, a passing VPS identity-preserving restart, effective relay flags, a timely Hivemind 1.1.12 circuit reservation through that exact VPS report, passing relay and direct split inference for the same participant labels, and shadow-mode incentives. It writes the final report with mode `0600`.
+The validator requires two passing packaged-Windows and WSL lifecycle reports on the same application version, clean source commit, and executable SHA-256; a passing VPS identity-preserving restart; effective relay flags; a timely Hivemind 1.1.12 circuit reservation through that exact VPS report; passing relay and direct split inference for the same participant labels; and shadow-mode incentives. It writes the final report with mode `0600`.
 
-`ok: true` means the artifacts are internally compatible and ready for review. `final_approval` deliberately remains `pending_manual_review`: software cannot prove that operator labels correspond to separate physical devices, that each person launched the reviewed portable executable hash, or that the visible output and Monitoring UI were reviewed. Do not close a sprint or enable credit mode from the automated flag alone.
+`ok: true` means the artifacts are internally compatible and ready for review. `final_approval` deliberately remains `pending_manual_review`: software cannot prove that operator labels correspond to separate physical devices or that the visible output and Monitoring UI were reviewed. Do not close a sprint or enable credit mode from the automated flag alone.

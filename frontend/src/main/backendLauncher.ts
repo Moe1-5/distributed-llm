@@ -57,10 +57,15 @@ export interface WindowsAcceptanceApplication {
   packaged: boolean
   platform: NodeJS.Platform
   arch: string
+  sourceCommit: string | null
+  sourceDirty: boolean
+  artifactFileName: string | null
+  artifactSha256: string | null
+  artifactBytes: number | null
 }
 
 export interface WindowsAcceptanceReport {
-  schemaVersion: 1
+  schemaVersion: 2
   capturedAt: string
   application: WindowsAcceptanceApplication
   configuration: {
@@ -80,6 +85,8 @@ export interface WindowsAcceptanceReport {
   checks: {
     windowsHost: boolean
     packagedApplication: boolean
+    sourceCommitIdentified: boolean
+    artifactIdentified: boolean
     wslAvailable: boolean
     distroPresent: boolean
     distroWsl2: boolean
@@ -154,6 +161,13 @@ export function buildWindowsAcceptanceReport(
   const checks = {
     windowsHost: application.platform === 'win32',
     packagedApplication: application.packaged,
+    sourceCommitIdentified:
+      /^[0-9a-f]{40}$/.test(application.sourceCommit ?? '') && !application.sourceDirty,
+    artifactIdentified:
+      /^[0-9a-f]{64}$/.test(application.artifactSha256 ?? '') &&
+      Number.isInteger(application.artifactBytes) &&
+      (application.artifactBytes ?? 0) > 0 &&
+      Boolean(application.artifactFileName?.trim()),
     wslAvailable: evidence.wslAvailable,
     distroPresent: evidence.distroPresent,
     distroWsl2: evidence.distroWsl2,
@@ -166,7 +180,7 @@ export function buildWindowsAcceptanceReport(
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     capturedAt,
     application: { ...application },
     configuration: {

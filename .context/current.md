@@ -36,4 +36,4 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 19 continuously probes DHT/protocol/transport/RPC health with hysteresis, deadlines, bounded concurrency, and clean lifecycle ownership.
 - Sprint 20 enforces tensor/metadata limits, bounded admission, cooperative deadlines, safe counters, and receipt accounting after successful output.
 - Sprint 21 selects revisioned healthy complete routes and has a real two-expert local failover pass; physical relay failure injection remains open.
-- Runtime commit `7c75b84` produced the initial audited portable executable; rebuild from the final runtime commit and physical relay/failover/direct acceptance remain open.
+- Sprint 24 now binds device reports to executable SHA-256 and clean source commit; one final post-commit rebuild plus physical relay/failover/direct acceptance remain open.
