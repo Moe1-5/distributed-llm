@@ -102,3 +102,10 @@ The live TinyLlama route now completes correctly, but the application does not e
 - What changed: expanded the network reachability review with a VPS relay deployment runbook, participant environment configuration, minimum relay validation checks, recommended direct-versus-auto test order, and a two-device inference validation checklist.
 - Why: the next open risk is live proof on real Windows/WSL devices, and the test plan needs to make clear that relay is the production fallback while direct LAN remains a separate performance/dev path.
 - Status: documentation is ready for the VPS relay deployment and two-device inference test; no live VPS deployment or inference run was performed in this documentation session.
+
+### 2026-08-13 - Fix generator relay-client daemon panic
+
+- What changed: reproduced the generator's hidden Go panic with its exact Hivemind arguments, removed the invalid static trusted-relay option from the outbound-only generator DHT, added a focused transport-contract regression, and documented the `main.go:220` symptom.
+- Why: Hivemind rejects `trustedRelays` when `autoRelay=0`; workers need AutoRelay reservations, but the generator only needs circuit-relay dialing to reach those workers.
+- Verification: the original arguments reproduced `panic: Found staticRelays but autoRelay is not enabled`; the corrected model-free DHT connected to the live VPS with relay dialing enabled. The focused suite passes with 110 tests and 19 subtests, and the full backend suite passes with 115 tests and 19 subtests.
+- Status: implementation and local/live transport-constructor verification are complete on `feature/generator-relay-client-startup`. The real UI generator start and two-device tensor inference remain open.

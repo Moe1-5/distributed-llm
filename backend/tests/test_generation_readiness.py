@@ -1137,6 +1137,17 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         self.assertEqual(peers, ["bootstrap", "local-peer"])
 
+    def test_generator_dials_relay_without_requesting_a_reservation(self) -> None:
+        from api import server as api_server
+
+        kwargs = api_server._generator_dht_kwargs(["bootstrap"])
+
+        self.assertEqual(kwargs["initial_peers"], ["bootstrap"])
+        self.assertTrue(kwargs["use_relay"])
+        self.assertTrue(kwargs["client_mode"])
+        self.assertNotIn("trusted_relays", kwargs)
+        self.assertNotIn("use_auto_relay", kwargs)
+
     def test_reachable_route_probes_each_expert(self) -> None:
         from client import sequential as sequential_module
 

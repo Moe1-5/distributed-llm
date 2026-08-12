@@ -62,7 +62,6 @@ from constants import (
     SUPPORTED_MODELS,
     DHT_PREFIX,
     get_initial_peers,
-    get_p2p_network_config,
 )
 
 load_project_env()
@@ -545,6 +544,17 @@ def _generator_initial_peers(
             continue
         peers.extend(local_node.get_visible_maddrs())
     return list(dict.fromkeys(peer for peer in peers if peer))
+
+
+def _generator_dht_kwargs(initial_peers: list[str]) -> dict:
+    """Build an outbound client that can dial workers through circuit addresses."""
+    return {
+        "initial_peers": initial_peers,
+        "start": True,
+        "use_ipfs": False,
+        "use_relay": True,
+        "client_mode": True,
+    }
 
 
 def _shutdown_local_nodes(
@@ -1612,19 +1622,10 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         req.model_name,
         req.dht_prefix,
     )
-    p2p_config = get_p2p_network_config()
-
     try:
         _shutdown_client_dht()
 
-        client_dht = hivemind.DHT(
-            initial_peers=peers,
-            start=True,
-            use_ipfs=False,
-            use_relay=True,
-            trusted_relays=list(p2p_config.trusted_relays) or None,
-            client_mode=True,
-        )
+        client_dht = hivemind.DHT(**_generator_dht_kwargs(peers))
         if client_dht.peer_id is None:
             raise RuntimeError("Generator DHT started but peer_id is None")
         client_dht_prefix = req.dht_prefix

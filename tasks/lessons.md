@@ -19,6 +19,11 @@
 
 > Lessons that still need active enforcement.
 
+### [2026-08-13] Reproduce minimal transport failures before requesting more logs
+**Problem:** I stopped at asking the user for a longer generator log even though the visible Go stack-frame and the known DHT arguments were enough to build a model-free reproduction against the already-running relay.
+**Rule:** When a network failure is isolated to one lightweight transport constructor, reproduce that exact constructor before asking the operator to repeat a model or multi-device run.
+**Why:** Minimal reproduction shortens live acceptance sessions and separates configuration panics from model loading, route planning, and physical-device behavior.
+
 ### [2026-07-06] Separate stop, offline, and unload semantics
 **Problem:** I treated stopping a local node as equivalent to deleting the node and unloading its layers, but the user expects stop to make a node offline while preserving loaded layers, with a separate delete/unload action for destructive cleanup.
 **Rule:** Model serving lifecycle controls must distinguish pause/offline, resume/online, and delete/unload. UI labels must not hide destructive behavior behind a generic stop button.

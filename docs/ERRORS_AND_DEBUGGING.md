@@ -56,6 +56,22 @@ Preserve `bootstrap.id`. Run exactly one persistent bootstrap instance. Use Pyth
 
 TCP reachability proves only bootstrap transport. A worker RPC may still require another reachable port, relay support, or an overlay network.
 
+## Generator Daemon Panics at `main.go:220`
+
+Symptoms:
+
+```text
+Daemon failed to start: .../p2pd/main.go:220 +0x...
+```
+
+With Hivemind debug logging, the preceding cause is:
+
+```text
+panic: Found staticRelays but autoRelay is not enabled, expected -autoRelay=1
+```
+
+The generator is an outbound-only DHT client. It needs `use_relay=True` so it can dial a worker's circuit address, but it does not need its own relay reservation. Do not pass `trusted_relays` to this client while Hivemind's `use_auto_relay` default remains false. Serving workers still use the configured trusted relay and AutoRelay because other peers must be able to reach them.
+
 ## Public Model Returns 401 or “Invalid Model Identifier”
 
 Observed root cause:
