@@ -1396,6 +1396,32 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         finally:
             sequential_module.get_experts = original_get_experts
 
+    def test_remote_expert_p2p_cleanup_closes_and_clears_cached_replica(self) -> None:
+        import client.sequential as sequential_module
+
+        class Replica:
+            stopped = False
+
+            async def shutdown(self) -> None:
+                self.stopped = True
+
+        class DHTWithReplica:
+            def __init__(self) -> None:
+                self._p2p_replica = Replica()
+
+        dht = DHTWithReplica()
+        replica = dht._p2p_replica
+        with patch.object(
+            sequential_module.RemoteExpertWorker,
+            "run_coroutine",
+            side_effect=asyncio.run,
+        ):
+            result = sequential_module.shutdown_remote_expert_p2p(dht)
+
+        self.assertTrue(result)
+        self.assertTrue(replica.stopped)
+        self.assertIsNone(dht._p2p_replica)
+
     def test_rpc_uid_includes_layer_slice_for_uniqueness(self) -> None:
         uid_a = RPCServer.build_rpc_uid("test-prefix", layer_start=0, layer_end=4)
         uid_b = RPCServer.build_rpc_uid("test-prefix", layer_start=4, layer_end=8)
@@ -3684,7 +3710,10 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             api_server.client_dht = original_client_dht
 
         self.assertLess(elapsed, 0.5)
-        self.assertEqual(result, {"status": "timeout"})
+        self.assertEqual(
+            result,
+            {"status": "timeout", "remote_expert_p2p": "stopped"},
+        )
         self.assertIsNone(client_after_shutdown)
         self.assertIs(api_server.client_dht, original_client_dht)
 

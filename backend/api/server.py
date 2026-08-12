@@ -36,7 +36,7 @@ from api.env_loader import load_project_env
 from node.gpu_monitor import GPUMonitor
 from node.node import Node
 from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, _run_with_timeout
-from client.sequential import RemoteSequential
+from client.sequential import RemoteSequential, shutdown_remote_expert_p2p
 from client.coverage import build_serving_plan, evaluate_candidate
 from client.generation import DistributedGenerator
 from incentives.runtime import get_useful_work_runtime
@@ -590,8 +590,19 @@ def _shutdown_client_dht(
         return None
     dht = client_dht
     client_dht = None
-    finished = _run_with_timeout("client-dht-shutdown", dht.shutdown, timeout)
-    return {"status": "stopped" if finished else "timeout"}
+    cleanup = {"remote_expert_p2p": "not_started"}
+
+    def _shutdown() -> None:
+        cleanup["remote_expert_p2p"] = (
+            "stopped" if shutdown_remote_expert_p2p(dht) else "error"
+        )
+        dht.shutdown()
+
+    finished = _run_with_timeout("client-dht-shutdown", _shutdown, timeout)
+    return {
+        "status": "stopped" if finished else "timeout",
+        **cleanup,
+    }
 
 
 @asynccontextmanager

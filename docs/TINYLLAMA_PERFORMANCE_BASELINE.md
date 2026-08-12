@@ -56,4 +56,4 @@ A separate fix branch explicitly requests non-dictionary chat-template output an
 | Maximum aggregate process-tree RSS | 6.680 GiB |
 | End-to-end time including cleanup | 7.535 s |
 
-The chat-template path produced two visible tokens, `The capital`, through one full-range `0-22` peer. All explicit cleanup checks passed, the private JSON file used mode `0600`, and no `p2pd` process remained. Hivemind still emitted the separately documented destructor-time control-task warning after successful cleanup.
+The chat-template path produced two visible tokens, `The capital`, through one full-range `0-22` peer. All explicit cleanup checks passed, the private JSON file used mode `0600`, and no `p2pd` process remained. That pass still emitted the separately documented destructor-time control-task warning; `feature/remote-expert-p2p-cleanup` subsequently adds explicit cached-replica teardown and verifies a clean process exit in a fresh real split pass.

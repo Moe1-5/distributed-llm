@@ -20,7 +20,7 @@ import torch
 from huggingface_hub import snapshot_download
 
 from client.generation import DistributedGenerator
-from client.sequential import RemoteSequential
+from client.sequential import RemoteSequential, shutdown_remote_expert_p2p
 from constants import P2PNetworkConfig, SUPPORTED_MODELS
 from node.node import Node
 from node.rpc_server import _run_with_timeout
@@ -342,6 +342,9 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
                 )
         cleanup["nodes"] = list(reversed(node_results))
         if client_dht is not None:
+            cleanup["remote_expert_p2p_stopped"] = shutdown_remote_expert_p2p(
+                client_dht
+            )
             cleanup["client_dht_stopped"] = _run_with_timeout(
                 "local-split-client-dht-shutdown", client_dht.shutdown, 10
             )
@@ -359,6 +362,7 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
         result["ok"]
         and cleanup.get("generator_unloaded") is True
         and cleanup.get("client_dht_stopped") is True
+        and cleanup.get("remote_expert_p2p_stopped") is True
         and cleanup.get("bootstrap_stopped") is True
         and all(item.get("stopped") is True for item in cleanup["nodes"])
     )

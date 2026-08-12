@@ -37,4 +37,4 @@ The 2026-08-13 CPU pass used Python 3.12.3, Hivemind 1.1.12, PyTorch 2.10.0, and
 - Each worker completed three requests and 19 token positions with zero failed requests.
 - All explicit shutdown calls completed and no `p2pd` process remained.
 
-After successful shutdown, Hivemind emitted destructor-time `no current event loop` messages and one pending control-client task. The functional acceptance passed, but that remote-expert cleanup warning remains documented in `ISSUES.md`; the pass was not rerun or patched during system testing.
+After successful shutdown, the initial pass emitted destructor-time `no current event loop` messages and one pending control-client task. That pass was not patched or rerun in place. A later dedicated cleanup branch now closes Hivemind's DHT-cached replicated P2P control client before DHT shutdown. A fresh split pass retained exact inference/parity, reported `remote_expert_p2p_stopped: true`, left no `p2pd` process, and exited without destructor tracebacks or pending tasks.

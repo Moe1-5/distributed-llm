@@ -36,6 +36,7 @@ from uuid import uuid4
 import hivemind
 import torch
 from hivemind.moe import get_experts
+from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
 from hivemind.utils.logging import get_logger
 
 from client.coverage import route_requirement_ranges, select_route
@@ -52,6 +53,26 @@ logger = get_logger(__name__)
  
 REQUEST_TIMEOUT = 30
 MAX_RETRIES     = 2          # ← unchanged from original
+
+
+def shutdown_remote_expert_p2p(dht: object) -> bool:
+    """Close Hivemind's cached replicated P2P control client before DHT teardown."""
+    replica = getattr(dht, "_p2p_replica", None)
+    if replica is None:
+        return True
+    try:
+        RemoteExpertWorker.run_coroutine(replica.shutdown())
+        return True
+    except Exception as exc:
+        logger.warning("Remote expert P2P cleanup failed: %s", exc, exc_info=True)
+        return False
+    finally:
+        # Hivemind 1.1.12 caches this wrapper but DHT.shutdown() does not close it.
+        # Clear the private cache so later lifecycle code cannot reuse a dead client.
+        try:
+            setattr(dht, "_p2p_replica", None)
+        except Exception:
+            logger.warning("Could not clear the cached remote expert P2P wrapper")
  
  
 # ─────────────────────────────────────────────────────────────────────────────

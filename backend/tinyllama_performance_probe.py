@@ -18,7 +18,7 @@ import psutil
 import torch
 
 from client.generation import DistributedGenerator
-from client.sequential import RemoteSequential
+from client.sequential import RemoteSequential, shutdown_remote_expert_p2p
 from constants import SUPPORTED_MODELS
 from local_split_probe import (
     _bootstrap_addresses,
@@ -348,6 +348,9 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
                 cleanup["node_stopped"] = False
                 cleanup["node_error"] = str(exc)
         if client_dht is not None:
+            cleanup["remote_expert_p2p_stopped"] = shutdown_remote_expert_p2p(
+                client_dht
+            )
             cleanup["client_dht_stopped"] = _run_with_timeout(
                 "tinyllama-client-dht-shutdown", client_dht.shutdown, 15
             )
@@ -368,6 +371,7 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
         and cleanup.get("generator_unloaded") is True
         and cleanup.get("node_stopped") is True
         and cleanup.get("client_dht_stopped") is True
+        and cleanup.get("remote_expert_p2p_stopped") is True
         and cleanup.get("bootstrap_stopped") is True
     )
     if options.output is not None:

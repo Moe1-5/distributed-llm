@@ -136,7 +136,7 @@ Checklist:
 
 2026-07-06 result: blocked in the current one-backend process flow. RPC UID uniqueness is covered by unit tests, but a second `/node/start` call returned `already_running` with the existing full-layer node. See `ISSUES.md` findings 24 and 25.
 
-2026-08-13 result: passed after later node-registry work removed the old one-node limitation. `python -m local_split_probe` started an isolated loopback bootstrap, two real OPT-125M serving peers for `0-6` and `6-12`, and a separate generator DHT. The route used both peers, direct and distributed next-token logits matched exactly, two-token greedy text matched exactly, and each worker recorded three successful requests plus 19 useful positions with zero failures. Explicit shutdown completed with no remaining `p2pd` process; Hivemind still emitted late event-loop destructor warnings and one pending control task, recorded in `ISSUES.md`. See [Local Split Acceptance](LOCAL_SPLIT_ACCEPTANCE.md).
+2026-08-13 result: passed after later node-registry work removed the old one-node limitation. `python -m local_split_probe` started an isolated loopback bootstrap, two real OPT-125M serving peers for `0-6` and `6-12`, and a separate generator DHT. The route used both peers, direct and distributed next-token logits matched exactly, two-token greedy text matched exactly, and each worker recorded three successful requests plus 19 useful positions with zero failures. The initial pass exposed a cached remote-expert control-task warning; a dedicated cleanup branch now closes that replica before DHT shutdown, and a fresh pass exits cleanly with no remaining `p2pd` process. See [Local Split Acceptance](LOCAL_SPLIT_ACCEPTANCE.md).
 
 ### Phase E: Real Multi-Machine Distributed Network Test
 
