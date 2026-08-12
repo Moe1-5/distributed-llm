@@ -169,6 +169,6 @@ On each physical Windows test device:
 6. return to Settings and stop the managed backend,
 7. select **Export report** and retain the generated JSON beside the two-device evidence files.
 
-The Windows acceptance report proves only the packaged Electron-to-WSL lifecycle. It does not by itself prove relay reservation, route ownership, tensor forwarding, inference parity, or two-device operation; those remain separate live evidence gates.
+The Windows acceptance report proves only the packaged Electron-to-WSL lifecycle. It does not by itself prove relay reservation, route ownership, tensor forwarding, inference parity, or two-device operation; those remain separate live evidence gates. After both device reports and the network evidence exist, use the final manifest workflow in `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` to reject mixed application versions, VPS runs, or participant sets before manual review.
 
 The portable artifact produced from `feature/windows-package-acceptance-report` is 87,652,120 bytes with SHA-256 `2f88a3169110820edb3f4af57394aabd045fd5307b25e7a1c5a4f7b280dd5328`. Generated artifacts remain outside version control.

@@ -118,3 +118,33 @@ The JSON report does not replace these operator observations:
 - explicit review before changing incentives from shadow to credit.
 
 Keep failed reports. Their `errors` array is the acceptance finding and should be added to the relevant sprint log without repeatedly rerunning the same failed system test.
+
+## Final Cross-Sprint Manifest
+
+After completing both relay and direct validation, collect these files in one approved operator directory:
+
+- two packaged Windows lifecycle reports exported from Settings after clean backend stops;
+- the live VPS restart report from `validate-bootstrap-service.sh --restart-test`;
+- the post-restart relay probe bound to that VPS report with `--validation-context`;
+- the passing relay inference report;
+- the passing direct inference report.
+
+Validate that they form one compatible set:
+
+```bash
+cd backend
+uv run --python 3.12 python -m acceptance_manifest \
+  --windows-report ~/distribllm-evidence/device-a-windows.json \
+  --windows-report ~/distribllm-evidence/device-b-windows.json \
+  --vps-report ~/distribllm-evidence/vps-restart.json \
+  --relay-probe ~/distribllm-evidence/post-restart-relay-probe.json \
+  --relay-report ~/distribllm-evidence/relay-report.json \
+  --direct-report ~/distribllm-evidence/direct-report.json \
+  --model facebook/opt-125m \
+  --expected-app-version 1.0.0 \
+  --output ~/distribllm-evidence/final-acceptance.json
+```
+
+The validator requires two passing packaged-Windows and WSL lifecycle reports on the same application version, a passing VPS identity-preserving restart, effective relay flags, a timely Hivemind 1.1.12 circuit reservation through that exact VPS report, passing relay and direct split inference for the same participant labels, and shadow-mode incentives. It writes the final report with mode `0600`.
+
+`ok: true` means the artifacts are internally compatible and ready for review. `final_approval` deliberately remains `pending_manual_review`: software cannot prove that operator labels correspond to separate physical devices, that each person launched the reviewed portable executable hash, or that the visible output and Monitoring UI were reviewed. Do not close a sprint or enable credit mode from the automated flag alone.

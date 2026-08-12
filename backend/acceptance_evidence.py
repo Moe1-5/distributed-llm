@@ -325,7 +325,7 @@ def _chat_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _write_private_json(path: Path, document: Mapping[str, Any]) -> None:
+def write_private_json(path: Path, document: Mapping[str, Any]) -> None:
     target = path.expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -501,7 +501,7 @@ def capture_evidence(
             _chat_evidence(generation) if isinstance(generation, Mapping) else None
         ),
     }
-    _write_private_json(options.output, document)
+    write_private_json(options.output, document)
     return document
 
 
@@ -903,7 +903,7 @@ def validate_evidence(
     return report
 
 
-def _load_documents(paths: Sequence[Path]) -> list[dict[str, Any]]:
+def load_documents(paths: Sequence[Path]) -> list[dict[str, Any]]:
     documents = []
     for path in paths:
         try:
@@ -965,9 +965,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(document, indent=2, sort_keys=True))
             return 0
-        documents = _load_documents(args.evidence)
+        documents = load_documents(args.evidence)
         standby_documents = (
-            _load_documents([args.standby_before, args.standby_after])
+            load_documents([args.standby_before, args.standby_after])
             if args.standby_before is not None and args.standby_after is not None
             else None
         )
@@ -983,7 +983,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             standby_after=standby_documents[1] if standby_documents else None,
         )
         if args.output:
-            _write_private_json(args.output, report)
+            write_private_json(args.output, report)
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0 if report["ok"] else 1
     except EvidenceError as exc:

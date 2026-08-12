@@ -9,11 +9,14 @@ waits for a visible p2p-circuit multiaddress.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import hivemind
@@ -26,6 +29,10 @@ from node.relay_compat import install_static_relay_compat
 logger = get_logger(__name__)
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 @dataclass(frozen=True)
 class RelayProbeResult:
     ok: bool
@@ -35,6 +42,8 @@ class RelayProbeResult:
     elapsed_seconds: float
     initial_peers: list[str]
     trusted_relays: list[str]
+    captured_at: str = field(default_factory=_utc_now)
+    validation_context_sha256: str | None = None
     python_version: str = platform.python_version()
     hivemind_version: str = hivemind.__version__
     force_reachability: str = "private"
@@ -68,6 +77,7 @@ def run_relay_probe(
     initial_peers: list[str] | None = None,
     p2p_config: P2PNetworkConfig | None = None,
     timeout: float | None = None,
+    validation_context_sha256: str | None = None,
 ) -> RelayProbeResult:
     config = p2p_config or get_p2p_network_config()
     peers = initial_peers if initial_peers is not None else get_initial_peers()
@@ -82,6 +92,7 @@ def run_relay_probe(
             elapsed_seconds=0.0,
             initial_peers=[],
             trusted_relays=list(config.trusted_relays),
+            validation_context_sha256=validation_context_sha256,
             error="Relay probe requires at least one bootstrap or relay peer.",
         )
     if not config.use_auto_relay:
@@ -93,6 +104,7 @@ def run_relay_probe(
             elapsed_seconds=0.0,
             initial_peers=peers,
             trusted_relays=list(config.trusted_relays),
+            validation_context_sha256=validation_context_sha256,
             error="Relay probe requires DISTRIBLLM_AUTO_RELAY=true.",
         )
 
@@ -125,6 +137,7 @@ def run_relay_probe(
                     elapsed_seconds=time.monotonic() - started_at,
                     initial_peers=peers,
                     trusted_relays=list(config.trusted_relays),
+                    validation_context_sha256=validation_context_sha256,
                 )
             if time.monotonic() >= deadline:
                 return RelayProbeResult(
@@ -135,6 +148,7 @@ def run_relay_probe(
                     elapsed_seconds=time.monotonic() - started_at,
                     initial_peers=peers,
                     trusted_relays=list(config.trusted_relays),
+                    validation_context_sha256=validation_context_sha256,
                     error=(
                         "No /p2p-circuit/ address became visible before "
                         f"{wait_timeout:g} seconds elapsed. The participant "
@@ -152,6 +166,7 @@ def run_relay_probe(
             elapsed_seconds=time.monotonic() - started_at,
             initial_peers=peers,
             trusted_relays=list(config.trusted_relays),
+            validation_context_sha256=validation_context_sha256,
             error=str(e),
         )
     finally:
@@ -177,13 +192,35 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the result as JSON for copying into diagnostics.",
     )
+    parser.add_argument(
+        "--validation-context",
+        type=Path,
+        help=(
+            "Hash this VPS validation report into the probe result so final "
+            "acceptance can prove the probe followed that exact restart check."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     load_project_env()
     args = parse_args()
-    result = run_relay_probe(timeout=args.timeout)
+    try:
+        validation_context_sha256 = (
+            hashlib.sha256(
+                args.validation_context.expanduser().read_bytes()
+            ).hexdigest()
+            if args.validation_context
+            else None
+        )
+    except OSError as exc:
+        print(f"Could not read validation context: {exc}", file=sys.stderr)
+        return 2
+    result = run_relay_probe(
+        timeout=args.timeout,
+        validation_context_sha256=validation_context_sha256,
+    )
 
     if args.json:
         print(json.dumps(asdict(result), indent=2, sort_keys=True))

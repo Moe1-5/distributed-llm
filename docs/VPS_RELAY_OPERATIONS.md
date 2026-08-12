@@ -1,7 +1,7 @@
 # VPS Relay Operations
 
 **Status:** Service implementation complete; live VPS restart validation pending
-**Last updated:** 2026-08-12
+**Last updated:** 2026-08-13
 
 This runbook manages the project-owned Hivemind DHT bootstrap and circuit relay as a persistent `systemd` service. The service does not run the Electron application, expose the participant FastAPI API, or serve model layers.
 
@@ -58,14 +58,16 @@ sudo journalctl -u distribllm-bootstrap.service -b --no-pager
 sudo /opt/distribllm/deploy/vps/validate-bootstrap-service.sh
 ```
 
-The validator checks the active and enabled state, peer ID, public multiaddress, deployed commit, identity path, Python version, Hivemind version, relay state, forced public reachability, and effective p2pd relay flags. It prints runtime status JSON, but never the private identity.
+The validator checks the active and enabled state, peer ID, public multiaddress, deployed commit, identity path, Python version, Hivemind version, relay state, forced public reachability, and effective p2pd relay flags. It prints a versioned validation report containing non-secret runtime status, but never the private identity.
 
 ## Restart Validation
 
 Run the destructive-to-process but identity-preserving restart check during a maintenance window:
 
 ```bash
-sudo /opt/distribllm/deploy/vps/validate-bootstrap-service.sh --restart-test
+mkdir -p ~/distribllm-evidence
+sudo /opt/distribllm/deploy/vps/validate-bootstrap-service.sh --restart-test \
+  > ~/distribllm-evidence/vps-restart.json
 ```
 
 The command records the pre-restart status and identity hash, restarts the unit, waits for fresh status, and requires all of the following:
@@ -82,10 +84,14 @@ Afterward, run a participant relay probe. This proves a reservation from outside
 cd /path/to/distribllm/backend
 HIVEMIND_LOGLEVEL=DEBUG \
 GOLOG_LOG_LEVEL=autorelay=debug,relay=debug \
-uv run --python 3.12 python -m relay_probe --timeout 90 --json
+uv run --python 3.12 python -m relay_probe --timeout 90 --json \
+  --validation-context ~/distribllm-evidence/vps-restart.json \
+  > ~/distribllm-evidence/post-restart-relay-probe.json
 ```
 
 A passing result contains a complete `/p2p-circuit/p2p/<participant-peer-id>` address and reports `relay_discovery` as false for the single configured trusted relay.
+
+The validator writes only its versioned JSON report to standard output after runtime status, effective relay flags, PID replacement, peer identity, identity-file hash continuity, and service state have all passed. Its human success message goes to standard error, so shell redirection keeps the report valid JSON. The relay probe records the SHA-256 of that exact report through `--validation-context`; final acceptance rejects an older probe paired with a newer restart report.
 
 ## Upgrade
 

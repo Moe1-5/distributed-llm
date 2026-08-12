@@ -163,7 +163,7 @@ Checklist:
 
 2026-07-12/13 update: the VPS bootstrap at a public address passed an external TCP connectivity check after opening port 7001. Laptop and Colab attempts exposed duplicate/stuck bootstrap process risk, Python 3.14 incompatibility on the VPS, Colab CPU-only runtime selection, insufficient 12.7 GB RAM for Llama 2 full-model construction, and possible Colab NAT restrictions. No successful remote worker RPC/inference route has been recorded yet.
 
-2026-08-13 tooling update: `python -m acceptance_evidence` captures sanitized local ownership, selected/standby coverage, transport, generation timing, and shadow-settlement evidence, then validates a complete executed route across at least two participant labels. The exact relay, direct, and standby workflows are in [Two-Device Acceptance Evidence](TWO_DEVICE_ACCEPTANCE_EVIDENCE.md). The tool does not replace physical-device observation, clean Windows packaging validation, or live VPS restart verification.
+2026-08-13 tooling update: `python -m acceptance_evidence` captures sanitized local ownership, selected/standby coverage, transport, generation timing, and shadow-settlement evidence, then validates a complete executed route across at least two participant labels. `python -m acceptance_manifest` additionally binds the post-restart relay probe to the exact VPS report and checks that Windows lifecycle, relay inference, and direct inference artifacts form one compatible review set. The exact workflows are in [Two-Device Acceptance Evidence](TWO_DEVICE_ACCEPTANCE_EVIDENCE.md). These tools do not replace physical-device observation or explicit closure approval.
 
 ### Phase E.1: Hugging Face OAuth and Gated Local Model Validation
 

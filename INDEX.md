@@ -25,7 +25,7 @@
 | Network reachability and relay review      | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` |
 | Windows managed WSL packaging and acceptance capture | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` |
 | Useful-work incentives and settlement | `docs/USEFUL_WORK_INCENTIVES.md`       |
-| Two-device acceptance evidence          | `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` |
+| Two-device and final acceptance evidence | `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` |
 | Local split acceptance                   | `docs/LOCAL_SPLIT_ACCEPTANCE.md` |
 | TinyLlama performance baseline            | `docs/TINYLLAMA_PERFORMANCE_BASELINE.md` |
 | Errors and debugging                      | `docs/ERRORS_AND_DEBUGGING.md`            |
@@ -102,10 +102,10 @@
 | `docs/PETALS_COMPARISON.md`        | Comparison with Petals and project-owned public swarm direction. |
 | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Review proposal for Petals-style direct reachability, automatic relay fallback, VPS infrastructure, security, and production validation. |
 | `docs/COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, serving recommendations, stale-plan validation, and serving/inference workflow. |
-| `docs/VPS_RELAY_OPERATIONS.md` | Persistent VPS relay installation, runtime validation, restart continuity, recovery, and rollback runbook. |
+| `docs/VPS_RELAY_OPERATIONS.md` | Persistent VPS relay installation, machine-readable restart validation, external probe binding, recovery, and rollback runbook. |
 | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, launcher contract, sanitized acceptance report, and clean-Windows runbook. |
 | `docs/USEFUL_WORK_INCENTIVES.md` | Signed useful-work receipt protocol, SQLite settlement policy, rollout modes, VPS deployment, and remaining acceptance gates. |
-| `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized relay/direct capture commands, route and ownership validation, shadow receipt evidence, standby non-payment, and manual gates. |
+| `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized relay/direct capture commands, cross-sprint artifact assembly, route and ownership validation, shadow receipts, and manual gates. |
 | `docs/LOCAL_SPLIT_ACCEPTANCE.md` | Isolated real two-peer OPT split inference, direct parity, accounting evidence, cleanup, and recorded local result. |
 | `docs/TINYLLAMA_PERFORMANCE_BASELINE.md` | Bounded cached TinyLlama distributed timing probe and the active chat-template compatibility finding. |
 | `docs/ERRORS_AND_DEBUGGING.md`     | Known errors, symptoms, and debugging guidance.           |
@@ -133,6 +133,7 @@
 | `backend/bootstrap.py`   | Hivemind DHT bootstrap, circuit relay, and reachability-check node.                  |
 | `backend/bootstrap_service_validate.py` | Validates non-secret VPS runtime evidence, deployed versions, relay state, and restart identity continuity. |
 | `backend/acceptance_evidence.py` | Captures sanitized participant evidence and validates two-device route, transport, timing, receipts, ownership, and optional standby non-payment. |
+| `backend/acceptance_manifest.py` | Cross-validates packaged Windows, VPS restart, bound relay probe, relay inference, and direct inference artifacts while preserving manual approval gates. |
 | `backend/local_split_probe.py` | Runs cached-model local split inference through two real Hivemind serving peers and records parity, accounting, and cleanup evidence. |
 | `backend/tinyllama_performance_probe.py` | Runs a bounded cached TinyLlama distributed timing, accounting, resource, and cleanup baseline. |
 | `backend/relay_probe.py` | Minimal Hivemind-only circuit-relay reservation probe for Sprint 16 diagnostics.     |
@@ -145,6 +146,7 @@
 | `backend/tests/test_sprint14_output_and_visibility.py` | Sprint 14 chat-template, context-aware streaming, and local lifecycle visibility regressions. |
 | `backend/tests/test_useful_work_incentives.py` | Receipt signatures and commitments, RPC wrapper, settlement abuse rejection, durability, concurrency, pagination, and rollout-mode regressions. |
 | `backend/tests/test_acceptance_evidence.py` | Evidence sanitization, route ownership, relay validation, replica selection, receipt deltas, and standby non-payment regressions. |
+| `backend/tests/test_acceptance_manifest.py` | Cross-sprint artifact compatibility, VPS/probe binding, version mismatch, manual-gate, and private-output regressions. |
 | `backend/tests/test_local_split_probe.py` | Local split probe option, range, evidence sanitization, and private-output regressions. |
 | `backend/tests/test_tinyllama_performance_probe.py` | TinyLlama probe bounds, metric sanitization, and acceptance-contract regressions. |
 

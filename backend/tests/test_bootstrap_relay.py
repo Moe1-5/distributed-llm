@@ -10,7 +10,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 from bootstrap import _bootstrap_dht_kwargs, _bootstrap_status, _write_status
-from bootstrap_service_validate import validate_status
+from bootstrap_service_validate import build_validation_report, validate_status
 
 
 class BootstrapRelayConfigTests(unittest.TestCase):
@@ -139,6 +139,41 @@ class BootstrapRelayConfigTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(len(errors), 10)
+
+    def test_service_report_marks_completed_restart_and_relay_checks(self) -> None:
+        report = build_validation_report(
+            {"peer_id": "QmRelay", "pid": 200},
+            [],
+            restart_requested=True,
+            identity_hash_preserved=True,
+            relay_flags_observed=True,
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["kind"], "vps_bootstrap_validation")
+        self.assertTrue(report["restart"]["passed"])
+        self.assertTrue(report["checks"]["relay_flags_observed"])
+
+    def test_service_report_does_not_overstate_incomplete_post_restart_checks(self) -> None:
+        report = build_validation_report(
+            {"peer_id": "QmRelay", "pid": 200},
+            [],
+            restart_requested=True,
+            identity_hash_preserved=False,
+            relay_flags_observed=False,
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["restart"]["passed"])
+
+        identity_failure = build_validation_report(
+            {"peer_id": "QmRelay", "pid": 200},
+            [],
+            restart_requested=True,
+            identity_hash_preserved=False,
+            relay_flags_observed=True,
+        )
+        self.assertFalse(identity_failure["ok"])
 
 
 if __name__ == "__main__":

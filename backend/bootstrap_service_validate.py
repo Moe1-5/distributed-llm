@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,44 @@ def validate_status(status: dict[str, Any], expected: dict[str, Any]) -> list[st
     return errors
 
 
+def build_validation_report(
+    status: dict[str, Any],
+    errors: list[str],
+    *,
+    restart_requested: bool,
+    identity_hash_preserved: bool,
+    relay_flags_observed: bool,
+) -> dict[str, Any]:
+    status_valid = not errors
+    restart_passed = (
+        restart_requested
+        and status_valid
+        and identity_hash_preserved
+        and relay_flags_observed
+    )
+    return {
+        "schema_version": 1,
+        "kind": "vps_bootstrap_validation",
+        "validated_at": datetime.now(timezone.utc).isoformat(),
+        "ok": (
+            status_valid
+            and relay_flags_observed
+            and (not restart_requested or restart_passed)
+        ),
+        "checks": {
+            "runtime_status_valid": status_valid,
+            "relay_flags_observed": relay_flags_observed,
+        },
+        "restart": {
+            "requested": restart_requested,
+            "passed": restart_passed,
+            "identity_hash_preserved": identity_hash_preserved,
+        },
+        "errors": errors,
+        "status": status,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", required=True)
@@ -70,6 +109,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-port", type=int)
     parser.add_argument("--python-prefix", default="3.12")
     parser.add_argument("--before-restart-status")
+    parser.add_argument("--identity-hash-preserved", action="store_true")
+    parser.add_argument("--relay-flags-observed", action="store_true")
     return parser.parse_args()
 
 
@@ -91,13 +132,15 @@ def main() -> int:
         )
 
     errors = validate_status(status, expected)
-    result = {
-        "ok": not errors,
-        "errors": errors,
-        "status": status,
-    }
+    result = build_validation_report(
+        status,
+        errors,
+        restart_requested=bool(args.before_restart_status),
+        identity_hash_preserved=args.identity_hash_preserved,
+        relay_flags_observed=args.relay_flags_observed,
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0 if not errors else 1
+    return 0 if result["ok"] else 1
 
 
 if __name__ == "__main__":

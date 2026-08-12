@@ -31,6 +31,10 @@ done
 
 before_status=""
 before_identity_hash=""
+cleanup() {
+  [[ -n "$before_status" ]] && rm -f "$before_status"
+}
+trap cleanup EXIT
 if $restart_test; then
   before_status="$(mktemp)"
   cp "$status_path" "$before_status"
@@ -53,12 +57,6 @@ validator_args=(
   --expected-public-maddr "$public_maddr"
   --expected-port "$DISTRIBLLM_BOOTSTRAP_PORT"
 )
-if [[ -n "$before_status" ]]; then
-  validator_args+=(--before-restart-status "$before_status")
-fi
-
-"$repo_root/.venv/bin/python" "$repo_root/bootstrap_service_validate.py" "${validator_args[@]}"
-
 logs="$(journalctl -u "$service_name" -n 500 --no-pager)"
 for flag in '-relay=1' '-forceReachabilityPublic=1'; do
   grep -F -- "$flag" <<< "$logs" >/dev/null || {
@@ -66,6 +64,7 @@ for flag in '-relay=1' '-forceReachabilityPublic=1'; do
     exit 1
   }
 done
+validator_args+=(--relay-flags-observed)
 
 if $restart_test; then
   after_identity_hash="$(sha256sum "$DISTRIBLLM_BOOTSTRAP_IDENTITY_PATH" | cut -d' ' -f1)"
@@ -73,7 +72,11 @@ if $restart_test; then
     echo "Persistent identity file changed across restart." >&2
     exit 1
   }
-  rm -f "$before_status"
+  validator_args+=(
+    --before-restart-status "$before_status"
+    --identity-hash-preserved
+  )
 fi
 
-echo "Service, runtime evidence, relay flags, and identity continuity are valid."
+"$repo_root/.venv/bin/python" "$repo_root/bootstrap_service_validate.py" "${validator_args[@]}"
+echo "Service, runtime evidence, relay flags, and identity continuity are valid." >&2
