@@ -54,8 +54,8 @@ The participant now selects the configured trusted relay statically and requests
 - [x] Run an independent expert metadata RPC through the relay address.
 - [ ] Run two-device OPT-125M inference with non-overlapping `0-6` and `6-12` layer slices.
 - [ ] Record connection mode, route trace, RPC latency, generation result, and relevant logs.
-- [ ] Convert the verified VPS bootstrap/relay command into a persistent `systemd` service.
-- [ ] Update the operator runbook with the exact verified deployment and troubleshooting commands.
+- [x] Convert the verified VPS bootstrap/relay command into a persistent `systemd` service.
+- [x] Update the operator runbook with the exact deployment, validation, recovery, and rollback commands.
 
 ## Test Order
 
@@ -77,7 +77,7 @@ The participant now selects the configured trusted relay statically and requests
 - [ ] Directly reachable workers still select direct mode in `auto` mode.
 - [ ] Restarting the persistent VPS service preserves the configured peer ID and restores relay operation.
 - [x] Automated tests cover the live-discovered configuration or lifecycle defect.
-- [ ] Documentation contains the verified deployment, validation, and recovery procedure.
+- [x] Documentation contains the deployment, validation, and recovery procedure, with live-only evidence clearly identified.
 
 ---
 
@@ -124,3 +124,9 @@ The participant now selects the configured trusted relay statically and requests
 - What changed: started a full-layer cached OPT-125M expert in forced relay mode, then started a second independent Hivemind peer whose only initial address was the expert's public circuit multiaddress; `RemoteSequential.validate_reachable_route()` discovered the complete `0-12` route and completed the real `expert.info` RPC in 10.116 seconds total.
 - Why: a circuit address proves reservation but not that the relay can carry DistribLLM expert traffic. The independent caller exercised the existing production readiness RPC instead of relying on DHT metadata alone.
 - Status: same-host independent-peer expert metadata RPC through the public VPS is verified, and both temporary peers shut down with no remaining p2pd processes. Hivemind emitted harmless late destructor warnings after successful shutdown. The backend suite passes 114 tests plus 19 subtests, changed Python files compile, and `git diff --check` is clean. Tensor forwarding, two-device distributed inference, persistent service restart, and final operator validation remain open.
+
+### 2026-08-12 - Add persistent VPS relay service and validation tooling
+
+- What changed: added a hardened `systemd` unit, root installer, validated launcher, environment template, atomic non-secret runtime status, automated service and restart validator, and a dedicated operations runbook covering installation, upgrades, recovery, rollback, backup, and external probing.
+- Why: the relay command had been proven manually, but a production-style bootstrap needs reproducible deployment evidence, stable identity continuity, automatic restart, and an operator-safe way to detect a wrong commit, runtime, address, or relay configuration.
+- Status: service implementation is complete on the dedicated feature branch. Six focused relay/service tests and the full backend suite of 126 tests plus 19 subtests pass; changed Python files compile, all deployment scripts pass `bash -n`, the generated unit passes `systemd-analyze verify`, and `git diff --check` is clean. Live installation on the project VPS, restart continuity there, a fresh external probe after restart, monitoring-mode accuracy, direct-mode validation, and two-device OPT-125M inference remain open user-device acceptance gates.

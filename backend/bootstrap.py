@@ -26,11 +26,14 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import platform
 import time
 import signal
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import hivemind
@@ -54,11 +57,55 @@ def _bootstrap_dht_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _bootstrap_status(
+    args: argparse.Namespace,
+    peer_id: str,
+    visible_maddrs: list[str],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        "peer_id": peer_id,
+        "visible_maddrs": visible_maddrs,
+        "python_version": platform.python_version(),
+        "hivemind_version": hivemind.__version__,
+        "deployment_commit": args.deployment_commit or None,
+        "identity_path": str(Path(args.identity_path).resolve()),
+        "relay_enabled": bool(args.use_relay),
+        "force_reachability": "public" if args.announce_maddr else "automatic",
+        "host": args.host,
+        "port": args.port,
+        "announce_maddrs": list(args.announce_maddr),
+    }
+
+
+def _write_status(path: str, status: dict[str, Any]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temporary.write_text(f"{json.dumps(status, indent=2, sort_keys=True)}\n", encoding="utf-8")
+    os.chmod(temporary, 0o640)
+    temporary.replace(target)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="DistribLLM Bootstrap Node")
     parser.add_argument(
         "--port", type=int, default=7001,
         help="TCP port to listen on (default: 7001)"
+    )
+    parser.add_argument(
+        "--status-path",
+        type=str,
+        default="",
+        help="Optional path for atomic non-secret runtime status JSON.",
+    )
+    parser.add_argument(
+        "--deployment-commit",
+        type=str,
+        default="",
+        help="Commit identifier recorded in runtime status for operator validation.",
     )
     parser.add_argument(
         "--identity_path", type=str, default="bootstrap.id",
@@ -124,13 +171,18 @@ def main() -> None:
         dht,
         await_ready=True,
     )
+    if args.status_path:
+        _write_status(
+            args.status_path,
+            _bootstrap_status(args, str(dht.peer_id), visible),
+        )
 
     print("  Bootstrap addresses (share these with your nodes):")
     for addr in visible:
         print(f"    {addr}")
     print()
-    print("  Copy ONE of these into backend/constants.py")
-    print("  as DISTRIBLLM_INITIAL_PEERS and DISTRIBLLM_TRUSTED_RELAYS.")
+    print("  Configure one address as DISTRIBLLM_INITIAL_PEERS")
+    print("  and DISTRIBLLM_TRUSTED_RELAYS on participants.")
     print()
     print("  Keep this process running — nodes need it to join the swarm.")
     print("=" * 60)
@@ -140,6 +192,8 @@ def main() -> None:
         print("\nShutting down bootstrap node...")
         reachability_protocol.shutdown()
         dht.shutdown()
+        if args.status_path:
+            Path(args.status_path).unlink(missing_ok=True)
         sys.exit(0)
 
     signal.signal(signal.SIGINT,  _shutdown)

@@ -1,0 +1,33 @@
+[Unit]
+Description=DistribLLM public DHT bootstrap and circuit relay
+Documentation=file://@REPO_ROOT@/docs/VPS_RELAY_OPERATIONS.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=distribllm
+Group=distribllm
+WorkingDirectory=@REPO_ROOT@/backend
+EnvironmentFile=/etc/distribllm/bootstrap.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+RuntimeDirectory=distribllm
+RuntimeDirectoryMode=0750
+StateDirectory=distribllm
+StateDirectoryMode=0750
+ExecStart=@REPO_ROOT@/deploy/vps/run-bootstrap.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/distribllm /run/distribllm
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

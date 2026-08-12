@@ -45,7 +45,7 @@ Remaining validation:
 
 - Tensor forwarding through the relay has not yet been validated independently of metadata RPC.
 - Two Windows/WSL participants have not yet completed distributed inference over the relay fallback.
-- The persistent VPS service and final operator recovery procedure still need live validation.
+- The persistent VPS service and recovery tooling are checked in; installation and restart continuity still need live VPS validation.
 
 The original timeout was corrected by selecting the one configured trusted relay statically and polling fresh daemon addresses. Increasing the timeout alone would not have fixed either cause. Sprint 16 now progresses to relayed tensor forwarding and two-device inference.
 
@@ -325,6 +325,8 @@ Do not publish merely to solve this issue:
 
 ### VPS Relay Deployment Runbook
 
+The maintained service installation, validation, restart, upgrade, rollback, and recovery procedure is in [VPS Relay Operations](VPS_RELAY_OPERATIONS.md). The commands below remain useful for a foreground diagnosis before service installation.
+
 The first production-style deployment should run one public VPS process that provides the stable bootstrap address, relay reservations, and the direct-reachability check protocol. This VPS does not expose the desktop app, the local FastAPI control API, or participant model layers.
 
 1. Choose a stable TCP port, such as `7001`.
@@ -404,7 +406,14 @@ If the prompt already ends in `.../backend`, do not run `cd backend` again. The 
 
 The JSON must also include `python_version`, `hivemind_version`, `force_reachability`, and `relay_discovery: false`. Their absence proves that the participant is still running the older probe implementation.
 
-10. Only after the manual probe succeeds, move the VPS process to `systemd` or another process manager. The identity file must remain persistent across restarts; deleting it changes the peer ID and invalidates existing configured addresses.
+10. Only after the manual probe succeeds, install the checked-in `systemd` service and run its validator. The identity file must remain persistent across restarts; deleting it changes the peer ID and invalidates existing configured addresses.
+
+```bash
+sudo /opt/distribllm/deploy/vps/install-bootstrap-service.sh /opt/distribllm
+sudo /opt/distribllm/deploy/vps/validate-bootstrap-service.sh --restart-test
+```
+
+The restart validator checks service state, runtime versions, deployment commit, public multiaddress, effective relay flags, and identity continuity. Run the participant relay probe again after the restart to prove that the local service evidence corresponds to a usable external reservation.
 
 Minimum VPS validation before testing inference:
 

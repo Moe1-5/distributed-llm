@@ -96,6 +96,7 @@
 | `docs/IMPLEMENTATION.md`           | Practical implementation roadmap and long-term phases.    |
 | `docs/PETALS_COMPARISON.md`        | Comparison with Petals and project-owned public swarm direction. |
 | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Review proposal for Petals-style direct reachability, automatic relay fallback, VPS infrastructure, security, and production validation. |
+| `docs/VPS_RELAY_OPERATIONS.md` | Persistent VPS relay installation, runtime validation, restart continuity, recovery, and rollback runbook. |
 | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, state locations, launcher contract, and smoke-test plan. |
 | `docs/ERRORS_AND_DEBUGGING.md`     | Known errors, symptoms, and debugging guidance.           |
 | `docs/VALIDATION_AND_TEST_PLAN.md` | Validation phase gates before trusting inference or adding advanced features. |
@@ -118,6 +119,7 @@
 | `backend/models/`        | Model-specific adapter placeholders and architecture-specific preprocessing helpers. |
 | `backend/traces/`        | Gitignored runtime JSON generation traces written by `/generator/trace`.             |
 | `backend/bootstrap.py`   | Hivemind DHT bootstrap, circuit relay, and reachability-check node.                  |
+| `backend/bootstrap_service_validate.py` | Validates non-secret VPS runtime evidence, deployed versions, relay state, and restart identity continuity. |
 | `backend/relay_probe.py` | Minimal Hivemind-only circuit-relay reservation probe for Sprint 16 diagnostics.     |
 | `backend/constants.py`   | Supported models, DHT constants, transport settings, and generation defaults.        |
 | `backend/pyproject.toml` | Python project metadata and dependencies.                                            |
@@ -154,6 +156,14 @@
 | ----------------------------------------- | -------------------------------------------------------------------------- |
 | `scripts/sprint-log/record-edit.mjs`      | Claude Code PostToolUse hook that records source/sprint edits.             |
 | `scripts/sprint-log/check-sprint-log.mjs` | Claude Code Stop hook that enforces sprint-log updates after source edits. |
+
+---
+
+## `deploy/` - deployment operations
+
+| Path | What's inside |
+| --- | --- |
+| `deploy/vps/` | Versioned systemd unit template, environment example, locked installer, relay launcher, and live service validator. |
 
 ---
 
