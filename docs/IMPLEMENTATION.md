@@ -2,18 +2,17 @@
 
 This plan turns the current prototype into a reliable Petals-inspired distributed inference system for this project's own public/discoverable swarm. The network should be open enough for external devices to join and contribute resources, but isolated from public Petals/IPFS infrastructure by project-owned bootstrap nodes, DHT namespaces, metadata contracts, model registry, and routing rules.
 
-## Current Position - 2026-07-13
+## Current Position - 2026-08-12
 
 Phases 0 through 3 have substantial implemented foundations: structured readiness, contiguous route planning, cancellation, OPT/Llama-family adapter behavior, parity/trace tooling, multi-node local registries, monitoring, Hugging Face OAuth downloads, validated gated local imports, and instruction-ready model metadata. These areas still require broader live multi-machine validation; their presence in earlier roadmap phases no longer means they are wholly unimplemented.
 
 Current active validation work:
 
-- Sprint 10: complete live gated-model startup/generation/offline reuse evidence.
-- Sprint 11: complete TinyLlama/Llama 2 instruction-ready inference evidence.
-- Sprint 12: live-check anonymous public loading and failed-start cleanup after the expired-token fix.
-- Sprint 13: real incentives and settlement remain gated by live multi-device correctness evidence.
+- Sprint 13: signed useful-work receipts, read-only accounting, and shadow/credit settlement are implemented; live two-device shadow evidence and credit approval remain open.
 - Sprint 14: chat/instruct templates, context-aware streaming, local lifecycle separation, and performance contracts are implemented; live TinyLlama and two-device baselines remain open.
 - Sprint 15: the Electron main-process managed WSL launcher, health states, persisted relay configuration, first-run Settings controls, safe PID shutdown, and focused launcher tests are implemented; managed-distro import and clean-Windows package validation remain open.
+- Sprint 16: persistent VPS relay service and validation tooling are implemented; live restart, direct transport, tensor forwarding, and two-device inference remain open.
+- Sprint 17: coverage-aware routing, serving recommendations, stale-plan checks, and route/standby visibility are implemented; two-device acceptance remains open.
 
 ## Phase 0: Stabilize the Current Prototype
 
@@ -212,7 +211,7 @@ Keep one backend process equal to one serving participant for the current protot
 
 Goal: make the UI reflect actual distributed readiness.
 
-### Add
+### Implemented Foundation
 
 - readiness badge for selected model
 - route preview before inference
@@ -279,16 +278,16 @@ Goal: create a path toward token-based incentives for devices that serve useful 
 
 - contribution accounting for served layer requests
 - signed node identity and request receipts
-- proof-of-work or proof-of-service design for completed inference hops
+- proof-of-useful-work receipts for completed inference hops
 - anti-spam and anti-fake-work rules
 - token/reward ledger design
-- payout rules based on reliability, latency, served model, and resource cost
+- integer reward policy based on accepted positions, served layers, and versioned model weight
 
-This phase should wait until core inference, health checks, and route correctness are reliable. Incentives before correctness would reward untrusted or useless work.
+The implementation remains gated behind off, shadow, and credit modes. Hardware and latency claims are intentionally excluded because they are easy to manipulate. Credit mode follows two-device shadow review.
 
 ### 2026-07-06 Sprint 06 Decision
 
-Initial incentives are simulated accounting only. The backend records model-aware and contribution-aware serving metrics for local nodes: peer identity, model, layer range, layers served, device, successful requests, failed requests, token positions served, latency totals, average latency, and last success/error timestamps. Token UI, balances, claims, and reward settlement stay disabled until route correctness, health checks, anti-abuse checks, and receipt/proof design are validated. Real incentives are deferred to Sprint 13.
+Sprint 06 introduced simulated accounting only. Sprint 13 supersedes that endpoint with signed application identities, selected-route receipts, generator acceptance, replay and self-dealing rejection, and a read-only SQLite ledger. There are still no token, claim, transfer, withdrawal, conversion, or model-access controls.
 
 ## Phase 11: API Access for Served Models
 
@@ -328,7 +327,7 @@ This is intentionally last because training is harder than inference. It require
 7. Add stable session routing and distributed KV cache.
 8. Harden public swarm operations, protocol/version compatibility, and bootstrap rotation.
 9. Add API-key access for inferenced models.
-10. Implement Sprint 13 receipts, anti-abuse checks, incentives, and settlement.
+10. Validate Sprint 13 receipts and shadow settlement across two devices before approving credit mode.
 11. Consider distributed training/fine-tuning resource requests last.
 
 ## Definition of Done for Correct Inference

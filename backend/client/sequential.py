@@ -31,6 +31,7 @@ import sys
 import time
 import traceback
 from typing import Optional
+from uuid import uuid4
  
 import hivemind
 import torch
@@ -38,6 +39,14 @@ from hivemind.moe import get_experts
 from hivemind.utils.logging import get_logger
 
 from client.coverage import route_requirement_ranges, select_route
+from incentives.protocol import decode_metadata_tensor, encode_metadata_tensor
+from incentives.receipts import (
+    accept_worker_receipt,
+    build_submission,
+    create_inference_request,
+    verify_presence,
+)
+from incentives.runtime import UsefulWorkRuntime, get_useful_work_runtime
  
 logger = get_logger(__name__)
  
@@ -140,6 +149,7 @@ class RemoteSequential:
         dht_prefix: str,
         num_layers: int,
         model_name: Optional[str] = None,
+        useful_work_runtime: Optional[UsefulWorkRuntime] = None,
     ):
         if dht is None:
             raise ValueError("dht must not be None")
@@ -152,8 +162,10 @@ class RemoteSequential:
         self.dht_prefix = dht_prefix
         self.num_layers = num_layers
         self.model_name = model_name
+        self.useful_work_runtime = useful_work_runtime or get_useful_work_runtime()
         self._replica_cursors: dict[tuple[int, int], int] = {}
         self._last_forward_metrics: dict = {}
+        self._session_id: Optional[str] = None
 
     def _validate_node_metadata(self, info: dict, peer_id: str = "unknown") -> dict:
         required = {"peer_id", "layer_start", "layer_end", "model_name", "rpc_uid"}
@@ -203,8 +215,52 @@ class RemoteSequential:
         rpc_running = bool(info.get("rpc_running", True))
         running = bool(info.get("running", layers_loaded and rpc_running))
 
+        receipt_capability: dict = {}
+        receipt_fields = {
+            "receipt_protocol_version",
+            "receipt_rpc_uid",
+            "application_public_key",
+            "application_presence",
+            "model_revision",
+        }
+        if any(field in info for field in receipt_fields):
+            try:
+                missing_receipt_fields = receipt_fields - set(info)
+                if missing_receipt_fields:
+                    raise ValueError(
+                        f"missing receipt fields: {sorted(missing_receipt_fields)}"
+                    )
+                if int(info["receipt_protocol_version"]) != 1:
+                    raise ValueError("unsupported receipt protocol version")
+                receipt_rpc_uid = str(info["receipt_rpc_uid"]).strip()
+                application_public_key = str(info["application_public_key"]).strip()
+                model_revision = str(info["model_revision"]).strip()
+                if not receipt_rpc_uid or not application_public_key or not model_revision:
+                    raise ValueError("empty receipt capability field")
+                verify_presence(
+                    info["application_presence"],
+                    public_key=application_public_key,
+                    peer_id=metadata_peer_id,
+                )
+                receipt_capability = {
+                    "receipt_protocol_version": 1,
+                    "receipt_rpc_uid": receipt_rpc_uid,
+                    "application_public_key": application_public_key,
+                    "application_presence": info["application_presence"],
+                    "model_revision": model_revision,
+                }
+            except Exception as exc:
+                logger.warning(
+                    "Ignoring invalid receipt capability from %s: %s",
+                    metadata_peer_id[:8],
+                    exc,
+                )
+
+        sanitized_info = {
+            key: value for key, value in info.items() if key not in receipt_fields
+        }
         return {
-            **info,
+            **sanitized_info,
             "peer_id": metadata_peer_id,
             "model_name": model_name,
             "layer_start": layer_start,
@@ -215,7 +271,56 @@ class RemoteSequential:
             "layers_loaded": layers_loaded,
             "rpc_running": rpc_running,
             "running": running,
+            **receipt_capability,
         }
+
+    def start_session(self, session_id: Optional[str] = None) -> str:
+        self._session_id = session_id or str(uuid4())
+        return self._session_id
+
+    def end_session(self) -> None:
+        self._session_id = None
+
+    def _receipt_route(self, ordered_nodes: list[dict]) -> Optional[list[dict]]:
+        runtime = self.useful_work_runtime
+        if (
+            not runtime.enabled
+            or runtime.identity is None
+            or self._session_id is None
+            or self.model_name is None
+        ):
+            return None
+        peer_id = getattr(self.dht, "peer_id", None)
+        if peer_id is None:
+            return None
+        generator_peer_id = str(peer_id)
+        runtime.bind_peer_id(generator_peer_id)
+        route = []
+        revisions = {str(node.get("model_revision", "")) for node in ordered_nodes}
+        if len(revisions) != 1:
+            logger.warning("Receipt accounting requires one model revision across the route")
+            return None
+        for node in ordered_nodes:
+            if not all(
+                node.get(field)
+                for field in (
+                    "receipt_rpc_uid",
+                    "application_public_key",
+                    "application_presence",
+                    "model_revision",
+                )
+            ):
+                return None
+            route.append(
+                {
+                    "peer_id": node["peer_id"],
+                    "application_public_key": node["application_public_key"],
+                    "rpc_uid": node["receipt_rpc_uid"],
+                    "layer_start": node["layer_start"],
+                    "layer_end": node["layer_end"],
+                }
+            )
+        return route
 
     def _is_serving_node(self, node: dict) -> bool:
         return (
@@ -340,6 +445,7 @@ class RemoteSequential:
         )
         route_started_at = time.perf_counter()
         ordered_nodes = self.validate_route(nodes)
+        receipt_route = self._receipt_route(ordered_nodes)
         route_validation_ms = (time.perf_counter() - route_started_at) * 1000
         logger.info(
             f"[forward] Step 2/3 ✓ — route validated for {len(ordered_nodes)} node(s)"
@@ -348,6 +454,7 @@ class RemoteSequential:
         # ── Step 3: sequential RPC calls ─────────────────────────────────────
         node_trace = []
         hop_metrics: list[dict] = []
+        pending_receipts: list[dict] = []
  
         route_str = " → ".join(
             f"layers {n['layer_start']}–{n['layer_end']} @ {_peer_short(n['peer_id'])}"
@@ -380,7 +487,10 @@ class RemoteSequential:
                 peer_id=peer_id,
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
-                position_ids=position_ids
+                position_ids=position_ids,
+                node_info=node_info,
+                receipt_route=receipt_route,
+                pending_receipts=pending_receipts,
             )
             hop_ms = (time.perf_counter() - t_hop) * 1000
             hop_metrics.append(
@@ -390,6 +500,7 @@ class RemoteSequential:
                     "layer_start": int(layer_start),
                     "layer_end": int(layer_end),
                     "latency_ms": hop_ms,
+                    "receipt_requested": receipt_route is not None,
                 }
             )
  
@@ -400,6 +511,9 @@ class RemoteSequential:
             )
  
             node_trace.append(f"{peer_id[:8]}… (layers {layer_start}→{layer_end})")
+
+        for submission in pending_receipts:
+            self.useful_work_runtime.submit(submission)
  
         total_ms = (time.perf_counter() - t_start) * 1000
         self._last_forward_metrics = {
@@ -439,10 +553,31 @@ class RemoteSequential:
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids:   Optional[torch.Tensor] = None,
+        node_info: Optional[dict] = None,
+        receipt_route: Optional[list[dict]] = None,
+        pending_receipts: Optional[list[dict]] = None,
     ) -> torch.Tensor:
         last_error = None
         for attempt in range(MAX_RETRIES + 1):
             try:
+                if node_info is not None and receipt_route is not None:
+                    try:
+                        response, submission = self._rpc_forward_with_receipt(
+                            node_info=node_info,
+                            route=receipt_route,
+                            hidden_states=hidden_states,
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                        )
+                        if pending_receipts is not None:
+                            pending_receipts.append(submission)
+                        return response
+                    except Exception as exc:
+                        logger.warning(
+                            "Receipt RPC failed for %s; using legacy RPC without credit: %s",
+                            peer_id[:8],
+                            exc,
+                        )
                 return self._rpc_forward(
                     rpc_uid, peer_id, hidden_states,
                     attention_mask=attention_mask,
@@ -487,7 +622,7 @@ class RemoteSequential:
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict]:
         """Call remote node using its rpc_uid stored in DHT metadata."""
         experts = get_experts(self.dht, [rpc_uid])
 
@@ -514,6 +649,77 @@ class RemoteSequential:
         if output is None:
             raise RuntimeError(f"Node {rpc_uid} returned None")
         return output
+
+    def _rpc_forward_with_receipt(
+        self,
+        *,
+        node_info: dict,
+        route: list[dict],
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        runtime = self.useful_work_runtime
+        if runtime.identity is None or self._session_id is None:
+            raise RuntimeError("Useful-work session is not initialized")
+        if hidden_states.shape[0] != 1:
+            raise RuntimeError("Receipt protocol v1 currently requires batch size one")
+        generator_peer_id = str(getattr(self.dht, "peer_id", ""))
+        worker = next(
+            member
+            for member in route
+            if member["peer_id"] == node_info["peer_id"]
+            and member["layer_start"] == node_info["layer_start"]
+            and member["layer_end"] == node_info["layer_end"]
+        )
+        request_document = create_inference_request(
+            runtime.identity,
+            generator_peer_id=generator_peer_id,
+            session_id=self._session_id,
+            model_name=str(self.model_name),
+            model_revision=str(node_info["model_revision"]),
+            route=route,
+            worker=worker,
+            hidden_states=hidden_states,
+            position_count=int(hidden_states.shape[0] * hidden_states.shape[1]),
+        )
+        experts = get_experts(self.dht, [worker["rpc_uid"]])
+        if not experts or experts[0] is None:
+            raise RuntimeError(f"Receipt expert {worker['rpc_uid']} was not found")
+        output = experts[0].forward(
+            hidden_states,
+            encode_metadata_tensor(request_document),
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
+        if not isinstance(output, tuple) or len(output) != 2:
+            raise RuntimeError("Receipt expert returned an invalid response")
+        response, metadata_tensor = output
+        metadata = decode_metadata_tensor(metadata_tensor)
+        worker_receipt = metadata.get("worker_receipt")
+        worker_presence = metadata.get("worker_presence")
+        if not isinstance(worker_receipt, dict) or not isinstance(worker_presence, dict):
+            raise RuntimeError("Receipt expert omitted its signed receipt or presence")
+        verify_presence(
+            worker_presence,
+            public_key=str(node_info["application_public_key"]),
+            peer_id=str(node_info["peer_id"]),
+        )
+        acceptance = accept_worker_receipt(
+            runtime.identity,
+            request_document,
+            worker_receipt,
+            response,
+            generator_peer_id=generator_peer_id,
+        )
+        submission = build_submission(
+            worker_receipt=worker_receipt,
+            generator_acceptance=acceptance,
+            worker_presence=worker_presence,
+            generator_presence=runtime.presence(),
+            route=route,
+        )
+        return response, submission
 
     # ------------------------------------------------------------------
     # DHT discovery

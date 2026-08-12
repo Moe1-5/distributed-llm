@@ -137,6 +137,26 @@ export interface NetworkStatus {
   local_models?: LocalModelImport[]
 }
 
+export interface IncentivesStatus {
+  mode: 'off' | 'shadow' | 'credit'
+  protocol_version: number
+  application_public_key: string | null
+  p2p_peer_id: string | null
+  settlement_url_configured: boolean
+  settlement_connectivity: 'disabled' | 'unconfigured' | 'idle' | 'connected' | 'error'
+  pending_submissions: number
+  accepted_submissions: number
+  rejected_submissions: number
+  last_error: string | null
+  verified_credits: number
+  ledger_entries: number
+  accepted_receipts: number
+  useful_positions_served: number
+  token_ui_enabled: false
+  transfers_enabled: false
+  withdrawals_enabled: false
+}
+
 export interface GeneratorStatus {
   ready: boolean
   model_name: string | null
@@ -471,6 +491,7 @@ export const api = {
   getStats: () => get<Stats>('/stats'),
   getNodes: () => get<{ nodes: NodeInfo[]; error?: string; warning?: string }>('/nodes'),
   getLocalNodes: () => get<{ nodes: NodeInfo[] }>('/nodes/local'),
+  getIncentives: () => get<IncentivesStatus>('/incentives/accounting'),
 
   // Models — validated list from server, used for dropdown
   getModels: () =>

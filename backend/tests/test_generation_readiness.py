@@ -3688,7 +3688,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertIsNone(client_after_shutdown)
         self.assertIs(api_server.client_dht, original_client_dht)
 
-    def test_incentive_accounting_endpoint_is_simulated_only(self) -> None:
+    def test_incentive_accounting_endpoint_is_read_only_useful_work_status(self) -> None:
         from api import server as api_server
 
         class DummyNode:
@@ -3708,11 +3708,13 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         finally:
             api_server.node = original_node
 
-        self.assertEqual(result["mode"], "simulated")
+        self.assertIn(result["mode"], {"off", "shadow", "credit"})
         self.assertFalse(result["token_ui_enabled"])
-        self.assertFalse(result["reward_settlement_enabled"])
+        self.assertFalse(result["transfers_enabled"])
+        self.assertFalse(result["withdrawals_enabled"])
         self.assertEqual(result["local_contribution"]["model_name"], "facebook/opt-125m")
-        self.assertIn("token_positions_served", result["fields"])
+        self.assertIn("application_public_key", result)
+        self.assertNotIn("private_key", result)
 
     def test_handler_expands_token_mask_to_causal_decoder_mask(self) -> None:
         handler = InferenceHandler(

@@ -23,6 +23,15 @@ from hivemind.moe.server import ModuleBackend
 from hivemind.utils.tensor_descr import BatchTensorDescriptor
 from hivemind.utils.logging import get_logger
 
+from incentives.config import IncentivesConfig, get_incentives_config
+from incentives.identity import ApplicationIdentity, load_application_identity
+from incentives.protocol import (
+    METADATA_TENSOR_SIZE,
+    PROTOCOL_VERSION,
+    decode_metadata_tensor,
+    encode_metadata_tensor,
+)
+from incentives.receipts import create_worker_receipt, verify_inference_request
 from node.handler import InferenceHandler
 
 logger = get_logger(__name__)
@@ -72,6 +81,84 @@ class _HandlerModule(nn.Module):
         return self._handler.forward(hidden_states=hidden_states, attention_mask=attention_mask, position_ids=position_ids)
 
 
+class _ReceiptHandlerModule(nn.Module):
+    """Receipt-capable wrapper registered under a separate optional expert UID."""
+
+    def __init__(
+        self,
+        handler: InferenceHandler,
+        identity: ApplicationIdentity,
+        peer_id: str,
+        rpc_uid: str,
+        model_revision: str,
+    ) -> None:
+        super().__init__()
+        self._handler = handler
+        self._identity = identity
+        self._peer_id = peer_id
+        self._rpc_uid = rpc_uid
+        self._model_revision = model_revision
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        receipt_metadata: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if hidden_states.shape[0] != receipt_metadata.shape[0]:
+            raise ValueError("Receipt metadata batch does not match hidden states")
+        outputs: list[torch.Tensor] = []
+        receipts: list[torch.Tensor] = []
+        for index in range(hidden_states.shape[0]):
+            sample = hidden_states[index : index + 1]
+            request_document = decode_metadata_tensor(
+                receipt_metadata[index : index + 1]
+            )
+            request = verify_inference_request(
+                request_document,
+                worker_public_key=self._identity.public_key,
+                worker_peer_id=self._peer_id,
+                rpc_uid=self._rpc_uid,
+                layer_start=self._handler.layer_start,
+                layer_end=self._handler.layer_end,
+                hidden_states=sample,
+            )
+            if request["model_name"] != self._handler.model_name:
+                raise ValueError("Inference request model does not match this worker")
+            if request["model_revision"] != self._model_revision:
+                raise ValueError("Inference request revision does not match this worker")
+            output = self._handler.forward(
+                hidden_states=sample,
+                attention_mask=(
+                    attention_mask[index : index + 1]
+                    if attention_mask is not None
+                    else None
+                ),
+                position_ids=(
+                    position_ids[index : index + 1]
+                    if position_ids is not None
+                    else None
+                ),
+            )
+            receipt = create_worker_receipt(
+                self._identity,
+                request,
+                output,
+                worker_peer_id=self._peer_id,
+            )
+            outputs.append(output)
+            receipts.append(
+                encode_metadata_tensor(
+                    {
+                        "worker_receipt": receipt,
+                        "worker_presence": self._identity.presence(self._peer_id),
+                    }
+                )
+            )
+        return torch.cat(outputs, dim=0), torch.cat(receipts, dim=0)
+
+
 class RPCServer:
     """
     Registers this node's layers with hivemind and serves
@@ -84,6 +171,8 @@ class RPCServer:
         dht:        hivemind.DHT,
         dht_prefix: str,
         uid_suffix: Optional[int] = None,
+        incentives_config: Optional[IncentivesConfig] = None,
+        application_identity: Optional[ApplicationIdentity] = None,
     ):
         if not handler.is_loaded():
             raise RuntimeError("RPCServer requires a loaded InferenceHandler")
@@ -96,10 +185,21 @@ class RPCServer:
         self.dht        = dht
         self.dht_prefix = dht_prefix
         self.uid_suffix = uid_suffix
+        self.incentives_config = incentives_config or get_incentives_config()
+        self.application_identity = (
+            application_identity
+            if application_identity is not None
+            else (
+                load_application_identity()
+                if self.incentives_config.enabled
+                else None
+            )
+        )
 
         self._server:  Optional[hivemind.moe.Server] = None
         self._running  = False
         self._uid:     Optional[str] = None
+        self._receipt_uid: Optional[str] = None
         self._lock     = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -127,6 +227,20 @@ class RPCServer:
         if uid_suffix < 0:
             raise ValueError(f"uid_suffix must be >= 0, got {uid_suffix}")
         return f"{base_uid}.{uid_suffix}"
+
+    @staticmethod
+    def build_receipt_rpc_uid(
+        dht_prefix: str,
+        layer_start: int,
+        layer_end: int,
+        uid_suffix: Optional[int] = None,
+    ) -> str:
+        return RPCServer.build_rpc_uid(
+            f"{dht_prefix}.999999",
+            layer_start,
+            layer_end,
+            uid_suffix,
+        )
 
     def start(self) -> None:
         with self._lock:
@@ -182,6 +296,38 @@ class RPCServer:
                 outputs_schema=(hidden_descriptor,),
                 max_batch_size=4096,
             )
+            module_backends = {self._uid: backend}
+            if self.incentives_config.enabled:
+                if self.application_identity is None:
+                    raise RuntimeError("Incentives mode requires an application identity")
+                self._receipt_uid = self.build_receipt_rpc_uid(
+                    self.dht_prefix,
+                    self.handler.layer_start,
+                    self.handler.layer_end,
+                    self.uid_suffix,
+                )
+                metadata_descriptor = BatchTensorDescriptor(
+                    METADATA_TENSOR_SIZE,
+                    dtype=torch.uint8,
+                )
+                receipt_backend = ModuleBackend(
+                    name=self._receipt_uid,
+                    module=_ReceiptHandlerModule(
+                        self.handler,
+                        self.application_identity,
+                        str(self.dht.peer_id),
+                        self._receipt_uid,
+                        self.incentives_config.model_revision,
+                    ),
+                    args_schema=(hidden_descriptor, metadata_descriptor),
+                    kwargs_schema={
+                        "attention_mask": mask_descriptor,
+                        "position_ids": mask_descriptor,
+                    },
+                    outputs_schema=(hidden_descriptor, metadata_descriptor),
+                    max_batch_size=4096,
+                )
+                module_backends[self._receipt_uid] = receipt_backend
 
             logger.info(
                 f"[RPCServer] ModuleBackend registered | uid={self._uid}\n"
@@ -192,7 +338,7 @@ class RPCServer:
 
             self._server = hivemind.moe.Server(
                 dht=self.dht,
-                module_backends={self._uid: backend},
+                module_backends=module_backends,
                 num_connection_handlers=4,
                 device=torch.device(self.handler.device),
             )
@@ -208,6 +354,7 @@ class RPCServer:
                 _run_with_timeout("rpc-server-shutdown", server.shutdown, timeout)
                 self._server = None
             self._running = False
+            self._receipt_uid = None
             logger.info("RPC server stopped.")
 
     # ------------------------------------------------------------------
@@ -219,6 +366,21 @@ class RPCServer:
 
     def get_uid(self) -> Optional[str]:
         return self._uid
+
+    def get_receipt_capability(self, peer_id: str) -> Optional[dict]:
+        if (
+            not self._running
+            or self._receipt_uid is None
+            or self.application_identity is None
+        ):
+            return None
+        return {
+            "receipt_protocol_version": PROTOCOL_VERSION,
+            "receipt_rpc_uid": self._receipt_uid,
+            "application_public_key": self.application_identity.public_key,
+            "application_presence": self.application_identity.presence(peer_id),
+            "model_revision": self.incentives_config.model_revision,
+        }
 
     # ------------------------------------------------------------------
     # Helpers

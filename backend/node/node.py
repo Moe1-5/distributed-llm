@@ -376,6 +376,10 @@ class Node:
             return
         expiry  = time.time() + DHT_EXPIRY_TIME   # fixed import
 
+        capability_getter = getattr(self.rpc, "get_receipt_capability", None)
+        receipt_capability = (
+            capability_getter(peer_id) if callable(capability_getter) else None
+        )
         # Write full metadata
         self.dht.store(
             key=f"{self.dht_prefix}.node_info.{peer_id}",
@@ -397,6 +401,7 @@ class Node:
                 "direct_reachability": self.direct_reachability,
                 "transport_verified": self.transport_verified,
                 "timestamp":     time.time(),
+                **(receipt_capability or {}),
             },
             expiration_time=expiry,
         )
@@ -452,8 +457,15 @@ class Node:
         )
 
     def get_info(self) -> dict:
+        peer_id = self.get_peer_id()
+        capability_getter = getattr(self.rpc, "get_receipt_capability", None)
+        receipt_capability = (
+            capability_getter(peer_id)
+            if callable(capability_getter) and peer_id is not None
+            else None
+        )
         return {
-            "peer_id":       self.get_peer_id(),
+            "peer_id":       peer_id,
             "node_id":       self.node_id,
             "model_name":    self.model_name,
             "layer_start":   self.layer_start,
@@ -467,6 +479,7 @@ class Node:
             "direct_reachability": self.direct_reachability,
             "transport_verified": self.transport_verified,
             "accounting":    self.get_accounting_snapshot(),
+            **(receipt_capability or {}),
         }
 
     def get_accounting_snapshot(self) -> dict:

@@ -1,7 +1,7 @@
 # Sprint 13 - Real Incentives and Settlement
 
 **Goal:** Turn simulated contribution accounting into real incentive/reward behavior only after inference correctness, route health, anti-abuse checks, proof/receipt prerequisites, and gated-model local import reliability are ready.
-**Start:** TBD
+**Start:** 2026-08-12
 **End:** TBD
 
 ---
@@ -12,7 +12,7 @@ Sprint 06 intentionally added simulated contribution accounting, not real token 
 
 Real incentives should wait until useful work can be measured reliably and abuse-resistant proof exists. Rewarding compute before route correctness, health checks, and receipt validation would risk paying for stale, failed, fake, or low-quality work.
 
-Sprints 10 and 11 completed the gated-model local import flow and instruction-ready model expansion. Incentives remain important, but this sprint stays open because real multi-device inference, route-health evidence, signed contribution receipts, and anti-abuse rules are not yet proven.
+Sprints 10 and 11 completed gated-model local import and instruction-ready model expansion. Sprint 17 now provides authoritative selected routes and standby classification. This sprint implements useful-work receipts and shadow settlement while credit mode remains gated behind protocol tests and live multi-device review.
 
 ---
 
@@ -21,41 +21,47 @@ Sprints 10 and 11 completed the gated-model local import flow and instruction-re
 - [ ] Direct HuggingFace versus distributed parity is validated for the target demo/transport model.
 - [ ] Local multi-node split inference is proven with complete compatible layer coverage.
 - [ ] Real multi-machine inference is proven across separate devices.
-- [ ] Gated-model local import is reliable enough that model access does not depend on pasted tokens.
-- [ ] Route health checks exist for selected nodes before inference starts.
-- [ ] Serving nodes produce signed request/response receipts or another verifiable proof-of-service record.
-- [ ] Accounting records include model, layer range, device/hardware class, peer identity, request success/failure, latency, token positions served, and route/session identifier.
-- [ ] Anti-abuse rules exist for fake work, repeated failed requests, stale DHT metadata, duplicate identities, and self-dealing routes.
+- [x] Gated-model local import is reliable enough that model access does not depend on pasted tokens.
+- [x] Route health checks exist for selected nodes before inference starts.
+- [x] Serving nodes produce signed request/response receipts or another verifiable proof-of-service record.
+- [x] Accounting records include model, layer range, peer identity, accepted token positions, and route/session identifier without rewarding hardware or latency claims.
+- [x] Anti-abuse rules exist for malformed work, stale signed presence, replayed receipts, duplicate request IDs/nonces, altered counters, incomplete routes, and self-dealing identities.
 - [ ] Reward formulas are reviewed against model size, layer count, hardware cost, reliability, latency, and successful completed work.
 
 ## In Progress
 
-- [ ] Not started.
+- [x] Add persistent Ed25519 application identities and signed p2p presence bindings.
+- [x] Add optional receipt protocol version one without changing the existing inference RPC.
+- [x] Commit to request and response tensors with BLAKE3 and countersign accepted work.
+- [x] Add the VPS settlement service with an append-only SQLite WAL ledger and versioned policy.
+- [x] Support off, shadow, and credit modes with credit disabled by default.
+- [x] Add read-only incentives visibility without exposing private keys or payout controls.
 
 ## Todo
 
-- [ ] Design signed contribution receipts for served layer requests.
-- [ ] Add route/session IDs that connect generator requests to serving-node accounting records.
-- [ ] Define reward weighting by model, layer range, hardware/device class, latency, reliability, and success/failure.
-- [ ] Define slashing or non-payment rules for failed, stale, malformed, or unverifiable work.
-- [ ] Decide whether rewards settle on-chain, off-chain, or through a simulated ledger first.
-- [ ] Add backend tests for receipt validation, accounting aggregation, and abuse cases.
-- [ ] Add a read-only rewards/accounting UI only after backend semantics are validated.
-- [ ] Add claim/payout UI only after settlement mechanics are proven.
+- [x] Design signed contribution receipts for served layer requests.
+- [x] Add route/session IDs that connect generator requests to serving-node accounting records.
+- [x] Define the initial integer reward as position count times served layer count times versioned model compute weight times reward scale; do not reward hardware claims or latency.
+- [x] Define non-payment rules for failed, stale, malformed, standby, or unverifiable work; slashing remains out of scope for non-transferable credits.
+- [x] Use a project-owned off-chain FastAPI and SQLite settlement service first, with no transfer, withdrawal, conversion, or model-access gate.
+- [x] Add backend tests for receipt validation, accounting aggregation, and abuse cases.
+- [x] Add a read-only rewards/accounting UI only after backend semantics are validated.
+- [ ] Add claim/payout UI only in a later approved sprint after settlement mechanics are proven.
 
 ## Done
 
-- [ ] None yet.
+- [x] Local protocol, settlement, backward-compatibility, and frontend validation.
+- [x] Locked VPS settlement service templates and shadow-to-credit rollout runbook.
 
 ---
 
 ## Acceptance Criteria
 
 - [ ] The system can verify that a serving node actually contributed to a completed route.
-- [ ] Reward accounting is model-aware, layer-aware, hardware-aware, reliability-aware, and latency-aware.
-- [ ] Failed or unverifiable work cannot earn rewards.
-- [ ] Token/reward UI is not exposed before backend accounting and proof validation pass tests.
-- [ ] Real settlement is behind an explicit feature gate.
+- [x] Reward accounting is model-aware, layer-aware, route-aware, and based only on accepted useful positions; manipulable hardware and latency claims do not affect rewards.
+- [x] Failed or unverifiable work cannot earn rewards in local protocol and settlement tests.
+- [x] The UI exposes read-only accounting only after backend proof validation; no token, transfer, withdrawal, or claim controls exist.
+- [x] Real settlement is behind an explicit off, shadow, or credit feature gate and defaults to off for clients and shadow for VPS installation.
 
 ---
 
@@ -78,3 +84,15 @@ Sprints 10 and 11 completed the gated-model local import flow and instruction-re
 - What changed: renumbered the real incentives and settlement plan from Sprint 11 to Sprint 13.
 - Why: the next future sprint slot is needed for model expansion before incentives, so rewards stay behind model access and model-quality work.
 - Status: planned for a later sprint; not started.
+
+### 2026-08-12 - Start approved proof-of-useful-work implementation
+
+- What changed: refined Sprint 13 with the approved useful-work protocol, off-chain settlement, three rollout modes, and non-transferable accounting scope; started `feature/useful-work-incentives` from the pushed coverage-aware routing branch.
+- Why: Sprint 17 now identifies the route that actually performs inference, so receipts can reward selected successful RPC work and exclude advertisements, standby providers, failures, and idle time.
+- Status: protocol and settlement implementation started. Credit remains disabled by default, and live two-device receipt evidence remains an external acceptance gate.
+
+### 2026-08-12 - Implement signed useful-work receipts and shadow settlement
+
+- What changed: added persistent Ed25519 identities, signed p2p presence, canonical JSON byte tensors, BLAKE3 request/response commitments, a separate optional receipt RPC, generator validation and countersigning, complete-forward receipt release, asynchronous fail-open settlement submission, SQLite WAL policy and ledger APIs, read-only incentives UI, and locked VPS service templates and operations documentation.
+- Why: reward only selected providers that return accepted inference tensors on a complete adjacent route while preserving the original inference contract for off mode, older nodes, and receipt failures.
+- Status: 153 backend tests plus 19 subtests, 14 launcher tests, frontend typecheck/build, changed-file lint, Python compilation, shell syntax, and service-factory smoke checks pass. Shadow mode is ready for deployment review. Direct parity, live VPS shadow deployment, two-device signed receipt submission, standby non-payment evidence, and approval before credit mode remain open, so Sprint 13 is not closed.

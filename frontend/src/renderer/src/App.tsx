@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from 'react'
 import Chat from './pages/Chat'
 import Dashboard from './pages/Dashboard'
+import Incentives from './pages/Incentives'
 import Monitoring from './pages/Monitoring'
 import Network from './pages/Network'
 import Settings from './pages/Settings'
 import Sidebar from './components/Sidebar'
 import './assets/main.css'
 
-export type Page = 'dashboard' | 'network' | 'chat' | 'monitoring' | 'settings'
+export type Page = 'dashboard' | 'network' | 'chat' | 'monitoring' | 'incentives' | 'settings'
 
 interface PageErrorBoundaryProps {
   children: React.ReactNode
@@ -48,9 +49,9 @@ class PageErrorBoundary extends React.Component<PageErrorBoundaryProps, PageErro
 
 function App(): React.JSX.Element {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard')
-  const [backendLauncherStatus, setBackendLauncherStatus] = useState<
-    Awaited<ReturnType<Window['api']['getBackendLauncherStatus']>> | null
-  >(null)
+  const [backendLauncherStatus, setBackendLauncherStatus] = useState<Awaited<
+    ReturnType<Window['api']['getBackendLauncherStatus']>
+  > | null>(null)
 
   useEffect(() => {
     void window.api.getBackendLauncherStatus().then(setBackendLauncherStatus)
@@ -83,6 +84,7 @@ function App(): React.JSX.Element {
           {currentPage === 'chat' && <Chat />}
           {currentPage === 'network' && <Network />}
           {currentPage === 'monitoring' && <Monitoring />}
+          {currentPage === 'incentives' && <Incentives />}
           {currentPage === 'settings' && <Settings />}
         </PageErrorBoundary>
       </main>

@@ -16,6 +16,7 @@ Remote components (P2P network via RemoteSequential):
 import copy
 import time
 from typing import AsyncGenerator, Optional
+from uuid import uuid4
 
 import torch
 import torch.nn as nn
@@ -331,6 +332,11 @@ class DistributedGenerator:
             raise ValueError("prompt must not be empty")
 
         self.clear_stop()
+        session_started = False
+        start_session = getattr(self.sequential, "start_session", None)
+        if callable(start_session):
+            start_session(str(uuid4()))
+            session_started = True
         generation_started_at = time.perf_counter()
         first_token_at: Optional[float] = None
         generated_token_count = 0
@@ -536,6 +542,10 @@ class DistributedGenerator:
         except Exception as e:
             logger.error(f"Generation error: {e}", exc_info=True)
             yield {"error": str(e)}
+        finally:
+            end_session = getattr(self.sequential, "end_session", None)
+            if session_started and callable(end_session):
+                end_session()
 
     async def compare_generated_output(
         self,

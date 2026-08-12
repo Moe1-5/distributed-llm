@@ -39,6 +39,7 @@ from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, _run_with_timeout
 from client.sequential import RemoteSequential
 from client.coverage import build_serving_plan, evaluate_candidate
 from client.generation import DistributedGenerator
+from incentives.runtime import get_useful_work_runtime
 from api.local_models import (
     LocalModelDeletionError,
     LocalModelValidationError,
@@ -1181,42 +1182,32 @@ def _get_model_route_status(
 
 
 # ---------------------------------------------------------------------------
-# Simulated contribution accounting
+# Useful-work incentive accounting
 # ---------------------------------------------------------------------------
 
 @app.get("/incentives/accounting")
 async def get_incentive_accounting() -> dict:
-    """
-    Return simulated contribution accounting only.
-    This intentionally does not expose balances, token claims, or payout actions.
-    """
+    """Return public receipt and ledger status without exposing private key material."""
+    runtime = get_useful_work_runtime()
+    local_nodes_list = _local_node_list()
+    display_peer_id = None
+    for local_node in local_nodes_list:
+        peer_getter = getattr(local_node, "get_peer_id", None)
+        peer_id = peer_getter() if callable(peer_getter) else None
+        if peer_id:
+            display_peer_id = peer_id
+            break
+    if runtime.config.settlement_url and runtime.enabled:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, runtime.refresh_account)
     local_contributions = [
-        local_node.get_accounting_snapshot() for local_node in _local_node_list()
+        local_node.get_accounting_snapshot() for local_node in local_nodes_list
     ]
     return {
-        "mode": "simulated",
+        **runtime.snapshot(display_peer_id=display_peer_id),
         "token_ui_enabled": False,
-        "reward_settlement_enabled": False,
-        "policy": (
-            "Initial accounting is model-aware and contribution-aware only. "
-            "No real token rewards are issued until route correctness, health checks, "
-            "and anti-abuse validation are proven."
-        ),
-        "fields": [
-            "peer_id",
-            "model_name",
-            "layer_start",
-            "layer_end",
-            "layers_served",
-            "device",
-            "requests_served",
-            "failed_requests",
-            "token_positions_served",
-            "total_latency_ms",
-            "avg_latency_ms",
-            "last_success_at",
-            "last_error_at",
-        ],
+        "transfers_enabled": False,
+        "withdrawals_enabled": False,
         "local_contribution": local_contributions[0] if local_contributions else None,
         "local_contributions": local_contributions,
     }

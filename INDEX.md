@@ -24,6 +24,7 @@
 | Petals comparison                         | `docs/PETALS_COMPARISON.md`               |
 | Network reachability and relay review      | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` |
 | Windows managed WSL packaging        | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` |
+| Useful-work incentives and settlement | `docs/USEFUL_WORK_INCENTIVES.md`       |
 | Errors and debugging                      | `docs/ERRORS_AND_DEBUGGING.md`            |
 | Validation plan                           | `docs/VALIDATION_AND_TEST_PLAN.md`        |
 | Architectural decision history            | `docs/decisions.md`                       |
@@ -100,6 +101,7 @@
 | `docs/COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, serving recommendations, stale-plan validation, and serving/inference workflow. |
 | `docs/VPS_RELAY_OPERATIONS.md` | Persistent VPS relay installation, runtime validation, restart continuity, recovery, and rollback runbook. |
 | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, state locations, launcher contract, and smoke-test plan. |
+| `docs/USEFUL_WORK_INCENTIVES.md` | Signed useful-work receipt protocol, SQLite settlement policy, rollout modes, VPS deployment, and remaining acceptance gates. |
 | `docs/ERRORS_AND_DEBUGGING.md`     | Known errors, symptoms, and debugging guidance.           |
 | `docs/VALIDATION_AND_TEST_PLAN.md` | Validation phase gates before trusting inference or adding advanced features. |
 | `docs/architecture.md`             | Starter-system architecture summary adapted to this repo. |
@@ -116,6 +118,7 @@
 | `backend/api/`           | FastAPI app, root `.env` loading, settings/token endpoints, Hugging Face OAuth/download helpers, and local model import registry. |
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
 | `backend/client/coverage.py` | Pure adjacent-range route planning, provider segmentation, snapshot revision, and serving recommendation logic. |
+| `backend/incentives/` | Ed25519 application identities, canonical BLAKE3 receipt protocol, runtime submission queue, and SQLite settlement service. |
 | `backend/node/`          | Serving node, layer loading, direct/relay transport, Hivemind RPC, and GPU monitoring. |
 | `backend/node/reachability.py` | Petals-derived independent direct-reachability probe used before relay fallback. |
 | `backend/node/relay_compat.py` | Hivemind 1.1.12 compatibility shim that selects configured trusted relays as static AutoRelay candidates. |
@@ -131,6 +134,7 @@
 | `backend/tests/test_bootstrap_relay.py` | Focused public bootstrap relay and reachability-argument tests.                    |
 | `backend/tests/test_coverage_serving.py` | Coverage route scenarios, recommendations, revisions, standby selection, and HTTP conflict regressions. |
 | `backend/tests/test_sprint14_output_and_visibility.py` | Sprint 14 chat-template, context-aware streaming, and local lifecycle visibility regressions. |
+| `backend/tests/test_useful_work_incentives.py` | Receipt signatures and commitments, RPC wrapper, settlement abuse rejection, durability, concurrency, pagination, and rollout-mode regressions. |
 
 ---
 
@@ -167,7 +171,7 @@
 
 | Path | What's inside |
 | --- | --- |
-| `deploy/vps/` | Versioned systemd unit template, environment example, locked installer, relay launcher, and live service validator. |
+| `deploy/vps/` | Versioned systemd templates, environment examples, locked installers, relay validation, and useful-work settlement deployment. |
 
 ---
 

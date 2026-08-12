@@ -135,6 +135,7 @@ Inference page opens /stream WebSocket
   -> tokenizes the resulting prompt
   -> prepares architecture-specific inputs
   -> sends hidden states through selected RPC route
+  -> optionally verifies signed useful-work receipts and queues generator acceptance
   -> applies local output components
   -> samples/decodes next token
   -> records first-token, total, throughput, and per-hop RPC timings
@@ -165,7 +166,24 @@ In automatic network mode, a NAT-separated worker keeps an outbound reservation 
 ## 10. Monitoring and Cleanup
 
 - `/nodes/local` supplies process-owned nodes for lifecycle controls, while `/nodes` supplies DHT-discovered and local peers for network-wide Monitoring. `/status`, `/stats`, `/models`, and `/generator/status` drive readiness and performance views. Monitoring combines sampled machine/process/GPU metrics with the latest completed generation and aggregated RPC-hop timings.
-- `/incentives/accounting` reports simulated contribution metrics only.
+- `/incentives/accounting` reports read-only useful-work mode, public identity, verified credits, receipt counts, useful positions, queue state, and settlement connectivity. It never exposes private keys, transfers, withdrawals, or claims.
 - Managed Hugging Face snapshots can be removed with file deletion; arbitrary manual folders are unregistered but not recursively deleted.
 - Backend shutdown uses bounded cleanup for local nodes and the generator DHT.
 - Trace files live under `backend/traces/` or `DISTRIBLLM_TRACE_DIR` and remain gitignored.
+
+## 11. Useful-Work Settlement
+
+```text
+off mode
+  -> use the unchanged legacy inference expert
+
+shadow or credit mode
+  -> worker advertises signed application presence and a separate receipt expert
+  -> generator signs request, selected route, tensor commitment, and counters
+  -> worker verifies request and route membership, runs layers, and signs response receipt
+  -> generator verifies output, countersigns acceptance, and queues settlement submission
+  -> settlement validates signatures, freshness, route, bounds, revision, and replay keys
+  -> shadow stores the pair without balance change; credit appends a ledger entry
+```
+
+Receipt failure falls back to legacy inference without credit. Failed RPCs, rejected output, advertisements, idle nodes, and standby providers do not produce accepted receipt pairs.
