@@ -25,6 +25,20 @@ export interface NodeInfo {
   connection_mode?: 'checking' | 'direct' | 'relay'
   direct_reachability?: boolean | null
   transport_verified?: boolean
+  loading?: {
+    strategy: string
+    architecture: string
+    weight_format: string
+    model_revision: string
+    loaded_parameter_count: number
+    loaded_parameter_bytes: number
+    selected_checkpoint_bytes: number
+    checkpoint_total_bytes: number | null
+    source_shard_count: number
+    elapsed_seconds: number
+    peak_rss_delta_bytes: number
+    fallback_reason?: string | null
+  } | null
 }
 
 export interface LifecycleJob {

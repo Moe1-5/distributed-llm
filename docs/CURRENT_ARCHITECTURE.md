@@ -74,7 +74,7 @@ OAuth credentials are stored outside the repository by default under the user co
 
 1. Probe direct reachability with relay disabled when network mode is `auto`.
 2. Start a direct DHT peer or reserve an outbound circuit-relay path.
-3. Load the selected model and retain the requested layer range.
+3. Build only the requested decoder blocks and materialize their indexed safetensors.
 4. Start a Hivemind RPC expert.
 5. Announce validated model and transport metadata and periodically refresh it.
 
@@ -82,7 +82,9 @@ Nodes support pause, resume, and delete/unload as distinct operations. Failed st
 
 `DISTRIBLLM_NETWORK_MODE`, `DISTRIBLLM_P2P_PORT`, `DISTRIBLLM_ANNOUNCE_MADDRS`, and the relay settings control transport. Direct Windows/WSL operation requires a fixed port, a Windows LAN/public announce address, and mirrored networking or Windows port forwarding. Auto mode falls back to an outbound relay reservation and does not require the ordinary participant to expose a public router port.
 
-Current layer-loading limitation: Transformers constructs the complete model in CPU memory before DistribLLM retains the assigned layers. Layer slicing reduces final device memory, but not peak download/CPU-loading memory.
+Workers use architecture-aware selective loading for indexed or single-file safetensors checkpoints from OPT, Llama, and Mistral families. Decoder blocks are created on the meta device, only keys for the requested half-open range are read, and tensors are materialized directly at the configured dtype/device. Node metadata reports strategy, selected shards, loaded parameter bytes, elapsed time, and measured RSS growth without exposing local paths. PyTorch binary or unsupported checkpoints use an explicitly reported full-model compatibility fallback by default; operators can reject that path with `DISTRIBLLM_ALLOW_FULL_MODEL_FALLBACK=false`.
+
+On the cached TinyLlama checkpoint, a measured one-layer CPU float32 load completed in 0.28 seconds with about 230 MB of RSS growth. The prior full-model construction baseline took 4.38 seconds and added about 4.73 GB. Single-file safetensors still occupy their full size on disk, but memory mapping avoids materializing unrelated decoder blocks.
 
 ## Routing and Generation
 
@@ -110,7 +112,7 @@ There is no distributed KV cache, health-aware failover, or concurrent generator
 
 ## Current Validation State
 
-- Backend regression suite: 195 tests and 22 subtests passing as of 2026-08-13, including an independent-peer Hivemind receipt RPC with an activation larger than 128 KiB and a shadow-settlement round trip.
+- Backend regression suite: 204 tests and 26 subtests passing as of 2026-08-13, including selective layer parity and an independent-peer Hivemind receipt RPC with an activation larger than 128 KiB and a shadow-settlement round trip.
 - Frontend TypeScript checks, production build, 17 managed-launcher tests, Python compilation, and Windows package audit pass.
 - Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
 - Hugging Face device OAuth and real gated Llama 2 download have been exercised.
@@ -120,7 +122,7 @@ There is no distributed KV cache, health-aware failover, or concurrent generator
 ## Known Operational Limits
 
 - Colab sessions are temporary, may lack GPU/high RAM, and may block inbound peer RPC behind NAT.
-- VPS workers need enough RAM for full-model construction and reachable worker RPC ports or relay support.
+- Workers using selective safetensors need memory for their requested blocks and transient tensors. Binary-checkpoint compatibility fallback still needs enough RAM for full-model construction.
 - Python 3.12 is the supported runtime; Hivemind/Pydantic compatibility is unreliable on Python 3.14.
 - Bootstrap reachability proves discovery transport only, not model-worker RPC reachability.
 - Useful-work receipts and shadow/credit settlement are implemented locally, but credit approval still requires live two-device shadow evidence. API keys, route failover, stronger collusion/Sybil resistance, and distributed training remain future work.

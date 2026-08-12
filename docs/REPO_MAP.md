@@ -21,7 +21,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 
 - `backend/node/node.py`: direct-reachability selection, relay fallback, DHT, layer handler, RPC, announcements, pause/resume/delete lifecycle, and contribution state for one layer slice.
 - `backend/node/reachability.py`: Petals-derived protocol that asks an independent peer to test direct libp2p dialing with relay disabled.
-- `backend/node/block_loader.py`: anonymous/public or offline/local model construction and decoder-layer extraction. It currently constructs the complete model before retaining a range.
+- `backend/node/block_loader.py`: architecture-aware selective safetensors planning/materialization, strict tensor validation, load-memory diagnostics, and explicit binary-format fallback policy.
 - `backend/node/handler.py`: validated remote forward execution, architecture adapter integration, dtype/device conversion, and accounting.
 - `backend/node/rpc_server.py`: legacy Hivemind expert plus optional receipt expert, unique RPC UIDs, and bounded server shutdown helpers.
 - `backend/node/gpu_monitor.py`: CPU, RAM, GPU, and VRAM sampling.

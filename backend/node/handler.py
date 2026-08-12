@@ -46,6 +46,7 @@ class InferenceHandler:
         self.local_model_path = local_model_path
 
         self.layers: Optional[nn.ModuleList] = None
+        self.load_diagnostics: Optional[dict] = None
         self._rotary_embedding: Optional[nn.Module] = None
         self._lock   = threading.Lock()
         self._accounting_lock = threading.Lock()
@@ -84,6 +85,7 @@ class InferenceHandler:
             raise RuntimeError(
                 f"Expected {expected_layers} layers, got {len(self.layers)}"
             )
+        self.load_diagnostics = getattr(self.layers, "load_diagnostics", None)
         self._loaded = True
         logger.info(f"Loaded {len(self.layers)} layers on {self.device}")
 
@@ -94,6 +96,8 @@ class InferenceHandler:
             if self.device == "cuda":
                 torch.cuda.empty_cache()
         self._loaded = False
+        self.load_diagnostics = None
+        self._rotary_embedding = None
         logger.info("Layers unloaded.")
 
     # ------------------------------------------------------------------
@@ -298,6 +302,7 @@ class InferenceHandler:
             "device":      self.device,
             "loaded":      self._loaded,
             "num_layers":  len(self.layers) if self.layers else 0,
+            "loading":     self.load_diagnostics,
         }
 
     def get_accounting_snapshot(self) -> dict:

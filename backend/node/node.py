@@ -400,6 +400,7 @@ class Node:
                 "connection_mode": self.connection_mode,
                 "direct_reachability": self.direct_reachability,
                 "transport_verified": self.transport_verified,
+                "loading":       getattr(self.handler, "load_diagnostics", None),
                 "timestamp":     time.time(),
                 **(receipt_capability or {}),
             },
@@ -478,6 +479,7 @@ class Node:
             "connection_mode": self.connection_mode,
             "direct_reachability": self.direct_reachability,
             "transport_verified": self.transport_verified,
+            "loading":       getattr(self.handler, "load_diagnostics", None),
             "accounting":    self.get_accounting_snapshot(),
             **(receipt_capability or {}),
         }

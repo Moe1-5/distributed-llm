@@ -14,14 +14,14 @@ Current active validation work:
 - Sprint 16: persistent VPS relay service, validation tooling, public circuit reservation, expert metadata RPC, and a cross-sprint evidence manifest are implemented; the bound live two-device run remains open.
 - Sprint 17: coverage-aware routing, serving recommendations, stale-plan checks, and route/standby visibility are implemented; two-device acceptance remains open.
 
-Proposed work that can proceed without treating the live two-device evidence as complete:
+Approved work that can proceed without treating the live two-device evidence as complete:
 
-- Sprint 18: replace full-model worker construction with architecture-aware selective layer loading and measured memory reduction.
+- Sprint 18: architecture-aware selective safetensors loading, node diagnostics, strict validation, and measured TinyLlama memory reduction are implemented with full regression coverage; physical package integration remains.
 - Sprint 19: maintain continuous provider RPC health and invalidate stale readiness.
 - Sprint 20: enforce typed resource, payload, concurrency, and timeout limits at the public expert RPC boundary.
 - Sprint 21: consume accepted health and RPC semantics for bounded health-aware route failover.
 
-These four sprint documents are proposals awaiting user review. Session/key-value cache routing, API keys, transferable incentives, and distributed training remain deferred.
+Sprints 18 through 21 were approved for implementation. Session/key-value cache routing, API keys, transferable incentives, and distributed training remain deferred.
 
 ## Phase 0: Stabilize the Current Prototype
 
@@ -330,7 +330,7 @@ This is intentionally last because training is harder than inference. It require
 1. Complete live TinyLlama and gated Llama 2 startup/inference validation.
 2. Prove a real multi-machine contiguous route through a public VPS bootstrap.
 3. Add reliable worker RPC reachability through fixed ports, relay, or an overlay network.
-4. Implement Sprint 18 selective worker loading and record peak-memory evidence.
+4. Complete Sprint 18 regression and device validation for the implemented selective worker loader.
 5. Expand architecture parity evidence for every user-facing model.
 6. Implement Sprint 19 continuous health and Sprint 20 RPC resource safety.
 7. Implement Sprint 21 health-aware route failover after Sprints 19 and 20 are accepted.

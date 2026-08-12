@@ -560,6 +560,26 @@ export default function Monitoring(): React.JSX.Element {
                         {node.connection_mode}
                       </span>
                     )}
+                    {node.loading && (
+                      <span
+                        className={`rounded border px-2 py-0.5 font-mono text-[10px] uppercase ${
+                          node.loading.strategy === 'selective_safetensors'
+                            ? 'border-green/20 bg-green/5 text-green'
+                            : 'border-amber/30 bg-amber/10 text-amber'
+                        }`}
+                        title={node.loading.fallback_reason ?? undefined}
+                      >
+                        {node.loading.strategy === 'selective_safetensors'
+                          ? 'SELECTIVE LOAD'
+                          : 'FULL LOAD FALLBACK'}
+                      </span>
+                    )}
+                    {node.loading && (
+                      <span className="rounded border border-border px-2 py-0.5 font-mono text-[10px] text-text-dim">
+                        {(node.loading.loaded_parameter_bytes / 1024 / 1024).toFixed(1)} MB /{' '}
+                        {node.loading.elapsed_seconds.toFixed(2)}s
+                      </span>
+                    )}
                     {node.transport_verified === false && (
                       <span className="rounded border border-red/20 bg-red/5 px-2 py-0.5 font-mono text-[10px] text-red">
                         TRANSPORT UNVERIFIED

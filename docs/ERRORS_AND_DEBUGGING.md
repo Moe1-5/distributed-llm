@@ -156,13 +156,13 @@ Structured error:
 cuda_out_of_memory
 ```
 
-Reduce the served layer range, delete/unload other nodes or generator state, use CPU, or select a smaller model. Layer slicing reduces final device memory but the current loader still constructs the complete model on CPU first.
+Reduce the served layer range, delete/unload other nodes or generator state, use CPU, or select a smaller model. Confirm the node reports `selective_safetensors`; a `full_model_fallback` checkpoint can still create a large CPU-memory peak before device transfer.
 
 ## CPU RAM Exhaustion During Model Loading
 
-Llama 2 7B downloads about 13.5 GB of fp16 weights. The current loader needs enough CPU RAM to construct the complete model before retaining a slice. A 12.7 GB Colab runtime is insufficient even if the assigned GPU layers would fit.
+Llama 2 7B downloads about 13.5 GB of fp16 weights. With safetensors, workers map the checkpoint and materialize only the assigned decoder blocks. Disk requirements remain unchanged, and the generator still loads its local embedding and output components through Transformers.
 
-Use a high-RAM runtime/VPS, choose a smaller model, or implement selective shard/layer loading in a future sprint.
+If node status reports `full_model_fallback`, use a safetensors checkpoint, choose a smaller model, or provide more CPU RAM. Set `DISTRIBLLM_ALLOW_FULL_MODEL_FALLBACK=false` to reject such checkpoints before expensive construction. Loading diagnostics in Nodes and Monitoring report the selected strategy, parameter bytes, elapsed time, and measured RSS increase.
 
 ## No Nodes or Incomplete Route
 
@@ -250,7 +250,7 @@ Trace JSON defaults to `backend/traces/`; override with `DISTRIBLLM_TRACE_DIR`. 
 3. Bootstrap TCP port is externally reachable.
 4. Public models are loading anonymously; gated models have validated local imports.
 5. Requested device exists and has enough VRAM.
-6. Host has enough CPU RAM for full-model construction.
+6. Host has enough CPU RAM for the reported selective slice, or for full-model construction when fallback is active.
 7. `/nodes` shows fresh compatible nodes and RPC UIDs.
 8. `/generator/status` reports complete contiguous coverage.
 9. Worker transport reports direct or relay, and every selected expert passes its RPC probe.

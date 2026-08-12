@@ -152,6 +152,14 @@ function NodeCard({
             LAYERS LOADED
           </span>
         )}
+        {node.loading && (
+          <span
+            className="rounded border border-border px-1.5 py-0.5 font-mono text-[9px] text-text-dim"
+            title={`${(node.loading.loaded_parameter_bytes / 1024 / 1024).toFixed(1)} MB of layer parameters loaded in ${node.loading.elapsed_seconds.toFixed(2)} seconds`}
+          >
+            {node.loading.strategy.replaceAll('_', ' ').toUpperCase()}
+          </span>
+        )}
         {node.rpc_running && (
           <span className="rounded border border-cyan/20 bg-cyan-dim px-1.5 py-0.5 font-mono text-[9px] text-cyan">
             RPC ACTIVE
