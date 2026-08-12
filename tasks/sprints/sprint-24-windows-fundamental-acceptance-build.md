@@ -65,3 +65,10 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 - What changed: rebuilt `DistribLLM-1.0.0-portable.exe` from runtime source commit `7c75b84`, reran the package audit, and recorded the final local artifact identity.
 - Why: the device-test executable must be distinguishable from the earlier package produced before the relay and responsiveness implementation was committed.
 - Status: the artifact is 87,654,381 bytes with SHA-256 `22038dc3f6c045105e39d3051a8180d7b84bbd3c5ba4565480e607b5bacc4ba2`; the audit reports 34 ASAR entries and zero forbidden entries. Python/Hivemind runtime binding and relay/direct inference still require the two physical Windows runs.
+
+### 2026-08-13 - Rebuild after reliability sprints
+
+- What changed: rebuilt `DistribLLM-1.0.0-portable.exe` after Sprints 18 through 21 were integrated in runtime commit `b6aef305892686575e189cabed281d27a3b8dedc`.
+- Verification: all 17 managed-WSL launcher tests passed, frontend type checks and production build passed, and the package audit found 34 ASAR entries with zero forbidden entries.
+- Artifact: 87,654,070 bytes with SHA-256 `1c52dc54575d99971efdd921c26210493ac90d44449c431070b06c26f590c91e`.
+- Status: this supersedes the earlier local artifacts for physical acceptance. Python/Hivemind runtime binding, relay failover, direct inference, and clean lifecycle evidence still require the two physical Windows devices.
