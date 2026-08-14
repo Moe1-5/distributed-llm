@@ -17,6 +17,8 @@
 | Sprint 22 | `tasks/sprints/sprint-22-relay-tensor-rpc-stability.md` | Stabilize relayed tensor RPC with correlated evidence and strictly bounded attempts. |
 | Sprint 23 | `tasks/sprints/sprint-23-responsive-startup-and-generation.md` | Keep startup and generation responsive while removing repeated route and polling work. |
 | Sprint 24 | `tasks/sprints/sprint-24-windows-fundamental-acceptance-build.md` | Produce an audited Windows executable for repeatable two-device fundamental acceptance. |
+| Sprint 25 | `tasks/sprints/sprint-25-runtime-state-validation.md` | Make node, route, generator, and Monitoring readiness authoritative and reject unusable inference state. |
+| Sprint 26 | `tasks/sprints/sprint-26-credit-gated-api-access.md` | Let useful-work credits unlock authenticated API access while preserving fair-use Electron chat. |
 
 ## Completed Sprints
 

@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ from pydantic import BaseModel, field_validator
 
 from api.env_loader import load_project_env
 from api.lifecycle_jobs import LifecycleJobStore
+from api.runtime_state import RuntimeStateStore
 from node.gpu_monitor import GPUMonitor
 from node.node import Node
 from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, _run_with_timeout
@@ -428,6 +430,16 @@ generator:   Optional[DistributedGenerator] = None
 client_dht:  Optional[hivemind.DHT]         = None
 client_dht_prefix: str = DHT_PREFIX
 _lifecycle_jobs = LifecycleJobStore()
+_runtime_state = RuntimeStateStore()
+_serving_plan_cache: dict[tuple[str, int], tuple[float, dict]] = {}
+_serving_plan_cache_lock = threading.RLock()
+_serving_plan_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
+_nodes_cache: Optional[tuple[float, dict]] = None
+_nodes_refresh_task: Optional[asyncio.Task] = None
+SERVING_PLAN_CACHE_SECONDS = max(
+    1.0,
+    float(os.environ.get("DISTRIBLLM_SERVING_PLAN_CACHE_SECONDS", "5")),
+)
 
 
 def _sync_primary_node() -> None:
@@ -535,6 +547,94 @@ def _next_rpc_uid_suffix(req) -> Optional[int]:
     return max(used_suffixes) + 1
 
 
+def _matching_local_replicas(req) -> list[Node]:
+    return [
+        local_node
+        for local_node in _local_node_list()
+        if (
+            local_node.model_name == req.model_name
+            and local_node.layer_start == req.layer_start
+            and local_node.layer_end == req.layer_end
+            and local_node.dht_prefix == req.dht_prefix
+        )
+    ]
+
+
+def _invalidate_serving_plan_cache(model_name: str) -> None:
+    global _nodes_cache
+    with _serving_plan_cache_lock:
+        for key in [key for key in _serving_plan_cache if key[0] == model_name]:
+            _serving_plan_cache.pop(key, None)
+        _nodes_cache = None
+
+
+def _route_contains_local_node(route: list[dict], local_node: Node) -> bool:
+    peer_id = local_node.get_peer_id()
+    return any(
+        str(item.get("peer_id")) == str(peer_id)
+        and int(item.get("layer_start", -1)) == local_node.layer_start
+        and int(item.get("layer_end", -1)) == local_node.layer_end
+        for item in route
+    )
+
+
+def _generator_dependency(local_node: Node) -> dict:
+    if (
+        generator is None
+        or not generator.is_loaded()
+        or generator.model_name != local_node.model_name
+    ):
+        return {"required": False, "alternate_available": False}
+    health_getter = getattr(generator.sequential, "get_health_readiness", None)
+    if not callable(health_getter):
+        return {"required": True, "alternate_available": False}
+    health = health_getter()
+    selected_route = health.get("selected_route", [])
+    if not _route_contains_local_node(selected_route, local_node):
+        return {"required": False, "alternate_available": False, "health": health}
+    alternate_available = any(
+        not _route_contains_local_node(candidate.get("route", []), local_node)
+        for candidate in health.get("alternate_routes", [])
+    )
+    return {
+        "required": not alternate_available,
+        "alternate_available": alternate_available,
+        "health": health,
+    }
+
+
+async def _unload_generator_runtime(reason: str) -> dict:
+    global generator
+    if generator is None:
+        _runtime_state.transition_generator(
+            "stopped",
+            model_name=None,
+            components_loaded=False,
+            route_ready=False,
+            reasons=[reason],
+        )
+        return {"status": "not_running"}
+    candidate = generator
+    generator = None
+    _runtime_state.transition_generator(
+        "stopping",
+        model_name=getattr(candidate, "model_name", None),
+        route_ready=False,
+        reasons=[reason],
+    )
+    candidate.request_stop()
+    await asyncio.to_thread(candidate.unload)
+    network = await asyncio.to_thread(_shutdown_client_dht)
+    _runtime_state.transition_generator(
+        "stopped",
+        model_name=None,
+        components_loaded=False,
+        route_ready=False,
+        reasons=[reason],
+    )
+    return {"status": "unloaded", "network": network, "reason": reason}
+
+
 def _generator_initial_peers(
     configured_peers: list[str],
     model_name: str,
@@ -632,6 +732,13 @@ async def lifespan(app: FastAPI):
     _cleanup_failed_generator(generator)
     generator = None
     client_shutdown_result = _shutdown_client_dht()
+    _runtime_state.transition_generator(
+        "stopped",
+        model_name=None,
+        components_loaded=False,
+        route_ready=False,
+        reasons=["Backend shutdown completed."],
+    )
     logger.info(
         "Shutdown cleanup status | local_nodes=%s client_dht=%s",
         node_shutdown_results,
@@ -667,6 +774,7 @@ class NodeStartRequest(BaseModel):
     device:        str = "cuda" if torch.cuda.is_available() else "cpu"
     coverage_revision: Optional[str] = None
     confirm_redundancy: bool = False
+    confirm_local_replica: bool = False
 
     @field_validator("model_name")
     @classmethod
@@ -963,6 +1071,7 @@ class HuggingFaceDownloadRequest(BaseModel):
 @app.get("/status")
 async def get_status() -> dict:
     local_infos = _local_node_infos()
+    generator_status = await get_generator_status()
     return {
         "status":          "online",
         "node_running":    any(local_node.is_running() for local_node in _local_node_list()),
@@ -970,7 +1079,11 @@ async def get_status() -> dict:
         "node_infos":      local_infos,
         "local_node_ids":  [info["node_id"] for info in local_infos if info.get("node_id")],
         "gpu_available":   torch.cuda.is_available(),
-        "generator_ready": generator.is_loaded() if generator else False,
+        "generator_ready": generator_status["ready"],
+        "generator_state": generator_status["state"],
+        "generator_components_loaded": generator_status["components_loaded"],
+        "route_ready": generator_status["route_ready"],
+        "generator_reasons": generator_status["reasons"],
         "token_set":       token_is_set(),
         "local_models":    list_local_models(),
     }
@@ -985,7 +1098,45 @@ async def get_stats() -> dict:
 
 @app.get("/nodes")
 async def get_nodes() -> dict:
-    return await asyncio.to_thread(_get_nodes_sync)
+    global _nodes_refresh_task
+    now = time.monotonic()
+    with _serving_plan_cache_lock:
+        cached = _nodes_cache
+        refresh_task = _nodes_refresh_task
+    if cached is not None and now - cached[0] <= SERVING_PLAN_CACHE_SECONDS:
+        return {**cached[1], "snapshot_stale": False, "refreshing": False}
+    if refresh_task is None or refresh_task.done():
+        refresh_task = asyncio.create_task(_refresh_nodes_cache())
+        with _serving_plan_cache_lock:
+            _nodes_refresh_task = refresh_task
+    if cached is not None:
+        return {**cached[1], "snapshot_stale": True, "refreshing": True}
+    return {
+        "nodes": _local_node_infos(),
+        "warning": "Network discovery is refreshing; showing local nodes first.",
+        "snapshot_stale": True,
+        "refreshing": True,
+    }
+
+
+async def _refresh_nodes_cache() -> None:
+    global _nodes_cache, _nodes_refresh_task
+    try:
+        result = await asyncio.wait_for(asyncio.to_thread(_get_nodes_sync), timeout=30.0)
+        with _serving_plan_cache_lock:
+            _nodes_cache = (time.monotonic(), result)
+    except Exception as exc:
+        logger.warning("Background node discovery failed: %s", exc)
+        _runtime_state.record_event(
+            kind="monitoring",
+            phase="node_discovery",
+            status="error",
+            message=f"Node discovery refresh failed: {exc}",
+        )
+    finally:
+        with _serving_plan_cache_lock:
+            if _nodes_refresh_task is asyncio.current_task():
+                _nodes_refresh_task = None
 
 
 def _get_nodes_sync() -> dict:
@@ -1191,7 +1342,61 @@ async def get_model_serving_plan(
     model_id: str,
     layer_count: int = Query(..., ge=1),
 ) -> dict:
-    return await asyncio.to_thread(_build_model_serving_plan, model_id, layer_count)
+    key = (model_id, layer_count)
+    now = time.monotonic()
+    with _serving_plan_cache_lock:
+        cached = _serving_plan_cache.get(key)
+        refresh_task = _serving_plan_refresh_tasks.get(key)
+    if cached is not None and now - cached[0] <= SERVING_PLAN_CACHE_SECONDS:
+        return {**cached[1], "snapshot_stale": False, "refreshing": False}
+
+    if refresh_task is None or refresh_task.done():
+        refresh_task = asyncio.create_task(_refresh_serving_plan(key))
+        with _serving_plan_cache_lock:
+            _serving_plan_refresh_tasks[key] = refresh_task
+
+    if cached is not None:
+        return {**cached[1], "snapshot_stale": True, "refreshing": True}
+
+    local_infos = [
+        info
+        for info in _local_node_infos()
+        if info.get("model_name") == model_id and info.get("running")
+    ]
+    immediate = _build_model_serving_plan(
+        model_id,
+        layer_count,
+        serving_nodes=local_infos,
+    )
+    return {**immediate, "snapshot_stale": True, "refreshing": True}
+
+
+async def _refresh_serving_plan(key: tuple[str, int]) -> None:
+    model_id, layer_count = key
+    try:
+        plan = await asyncio.wait_for(
+            asyncio.to_thread(_build_model_serving_plan, model_id, layer_count),
+            timeout=30.0,
+        )
+        with _serving_plan_cache_lock:
+            _serving_plan_cache[key] = (time.monotonic(), plan)
+    except Exception as exc:
+        logger.warning(
+            "Background serving-plan refresh failed for %s: %s",
+            model_id,
+            exc,
+        )
+        _runtime_state.record_event(
+            kind="coverage",
+            phase="refresh",
+            status="error",
+            message=f"Serving-plan refresh failed for {model_id}: {exc}",
+        )
+    finally:
+        with _serving_plan_cache_lock:
+            current = _serving_plan_refresh_tasks.get(key)
+            if current is asyncio.current_task():
+                _serving_plan_refresh_tasks.pop(key, None)
 
 
 def _get_model_route_status(
@@ -1574,6 +1779,28 @@ async def start_node(req: NodeStartRequest) -> dict:
             ),
         }
 
+    replicas = _matching_local_replicas(req)
+    if len(replicas) >= 2:
+        return {
+            "status": "error",
+            "error": "local_replica_limit_reached",
+            "message": (
+                "At most two identical local replicas are allowed for one layer range. "
+                "Use another device or serve a different range."
+            ),
+        }
+    if len(replicas) == 1 and not req.confirm_local_replica:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "local_replica_confirmation_required",
+                "message": (
+                    f"One local replica already serves layers {req.layer_start}-"
+                    f"{req.layer_end}. Confirm the advanced replica to continue."
+                ),
+            },
+        )
+
     serving_nodes = _active_serving_nodes(req.model_name, req.dht_prefix)
     fresh_plan = _build_model_serving_plan(
         req.model_name,
@@ -1677,6 +1904,17 @@ async def start_node(req: NodeStartRequest) -> dict:
         if not local_node.is_running():
             raise RuntimeError("node.start() completed but is_running() is False")
         _register_local_node(local_node)
+        _invalidate_serving_plan_cache(req.model_name)
+        _runtime_state.record_event(
+            kind="node",
+            phase="ready",
+            status="info",
+            message=(
+                f"Node {local_node.node_id} is serving {req.model_name} "
+                f"layers {req.layer_start}-{req.layer_end}."
+            ),
+            details=local_node.get_info(),
+        )
         return {"status": "started", "info": local_node.get_info()}
 
     except AssertionError as e:
@@ -1734,6 +1972,7 @@ async def turn_on_node(node_id: Optional[str] = None) -> dict:
     try:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, local_node.start)
+        _invalidate_serving_plan_cache(local_node.model_name)
         return {"status": "turned_on", "info": local_node.get_info()}
     except Exception as e:
         logger.error(f"Node turn-on failed: {e}", exc_info=True)
@@ -1757,8 +1996,30 @@ async def turn_off_node(node_id: Optional[str] = None) -> dict:
     if not local_node.is_running():
         return {"status": "already_off", "info": local_node.get_info()}
     try:
+        dependency = _generator_dependency(local_node)
+        if dependency.get("required") and generator is not None:
+            generator.request_stop()
+            _runtime_state.transition_generator(
+                "suspended",
+                model_name=generator.model_name,
+                components_loaded=True,
+                route_ready=False,
+                reasons=[
+                    "A required local serving node was turned off. "
+                    "Restore complete RPC-healthy coverage before generating."
+                ],
+                health=dependency.get("health"),
+            )
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, local_node.turn_off)
+        _invalidate_serving_plan_cache(local_node.model_name)
+        _runtime_state.record_event(
+            kind="node",
+            phase="turned_off",
+            status="info",
+            message=f"Node {local_node.node_id} stopped serving.",
+            details={"generator_suspended": bool(dependency.get("required"))},
+        )
         return {"status": "turned_off", "info": local_node.get_info()}
     except Exception as e:
         logger.error(f"Node turn-off failed: {e}", exc_info=True)
@@ -1766,7 +2027,10 @@ async def turn_off_node(node_id: Optional[str] = None) -> dict:
 
 
 @app.delete("/node")
-async def delete_node(node_id: Optional[str] = None) -> dict:
+async def delete_node(
+    node_id: Optional[str] = None,
+    confirm_generator_stop: bool = False,
+) -> dict:
     try:
         local_node = _find_local_node(node_id)
     except ValueError as e:
@@ -1774,10 +2038,33 @@ async def delete_node(node_id: Optional[str] = None) -> dict:
     if local_node is None:
         return {"status": "not_found"}
     try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, local_node.stop)
+        dependency = _generator_dependency(local_node)
+        if dependency.get("required") and not confirm_generator_stop:
+            return {
+                "status": "error",
+                "error": "generator_dependency_confirmation_required",
+                "message": (
+                    "This node is required by the active generator route. "
+                    "Deleting it will stop and unload the generator."
+                ),
+                "requires_generator_stop": True,
+            }
+        generator_result = None
+        if dependency.get("required"):
+            generator_result = await _unload_generator_runtime(
+                "A required local serving node was deleted."
+            )
+        await asyncio.to_thread(local_node.stop)
         _unregister_local_node(local_node)
-        return {"status": "deleted"}
+        _invalidate_serving_plan_cache(local_node.model_name)
+        _runtime_state.record_event(
+            kind="node",
+            phase="deleted",
+            status="info",
+            message=f"Node {local_node.node_id} was deleted.",
+            details={"generator": generator_result},
+        )
+        return {"status": "deleted", "generator": generator_result}
     except Exception as e:
         logger.error(f"Node delete failed: {e}", exc_info=True)
         return {"status": "error", "error": str(e)}
@@ -1833,6 +2120,27 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         req.model_name,
         req.dht_prefix,
     )
+    if generator is not None and generator.is_loaded():
+        status = await get_generator_status()
+        return {
+            "status": "already_ready" if status["ready"] else "suspended",
+            "message": (
+                "Unload the current generator before starting another model."
+                if generator.model_name != req.model_name
+                else "The generator is already loaded."
+            ),
+            "generator": status,
+        }
+
+    operation_id = str(uuid4())
+    _runtime_state.transition_generator(
+        "starting",
+        model_name=req.model_name,
+        components_loaded=False,
+        route_ready=False,
+        reasons=["Starting the generator network client."],
+    )
+    sequential: Optional[RemoteSequential] = None
     try:
         _cleanup_failed_generator(generator)
         generator = None
@@ -1850,6 +2158,75 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
             model_name=req.model_name,
         )
 
+        start_health_monitor = getattr(sequential, "start_health_monitor", None)
+        if callable(start_health_monitor):
+            start_health_monitor()
+
+        _runtime_state.transition_generator(
+            "validating_route",
+            model_name=req.model_name,
+            components_loaded=False,
+            route_ready=False,
+            reasons=["Waiting for a complete RPC-healthy provider route."],
+        )
+        route_timeout = max(
+            1.0,
+            float(os.environ.get("DISTRIBLLM_GENERATOR_ROUTE_START_TIMEOUT", "45")),
+        )
+        deadline = time.monotonic() + route_timeout
+        readiness: Optional[dict] = None
+        while True:
+            health_getter = getattr(sequential, "get_health_readiness", None)
+            if callable(health_getter):
+                readiness = health_getter()
+                if readiness.get("route_ready"):
+                    break
+                if time.monotonic() >= deadline:
+                    reasons = readiness.get("reasons") or [
+                        "No complete RPC-healthy provider route became available."
+                    ]
+                    raise RuntimeError(
+                        f"Generator route validation timed out after {route_timeout:g} seconds: "
+                        + "; ".join(str(reason) for reason in reasons)
+                    )
+                await asyncio.sleep(0.25)
+                continue
+            route_validator = getattr(sequential, "validate_reachable_route", None)
+            if callable(route_validator):
+                route = await asyncio.to_thread(route_validator)
+                readiness = {"route_ready": True, "selected_route": route}
+            else:
+                readiness = {
+                    "route_ready": True,
+                    "selected_route": [],
+                    "warnings": ["Legacy sequential implementation skipped route preflight."],
+                }
+            break
+
+        canary_validator = getattr(sequential, "validate_tensor_route", None)
+        if callable(canary_validator):
+            canary = await asyncio.to_thread(
+                canary_validator,
+                int(model_info["hidden_size"]),
+            )
+        else:
+            canary = {
+                "ok": True,
+                "skipped": True,
+                "reason": "Legacy sequential implementation has no tensor canary.",
+            }
+
+        _runtime_state.transition_generator(
+            "loading",
+            model_name=req.model_name,
+            components_loaded=False,
+            route_ready=True,
+            reasons=[],
+            node_trace=_format_route_trace(readiness.get("selected_route", [])),
+            health=readiness,
+            canary=canary,
+        )
+
         generator = DistributedGenerator(
             model_name=req.model_name,
             sequential=sequential,
@@ -1863,16 +2240,45 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         await loop.run_in_executor(None, generator.load)
         if not generator.is_loaded():
             raise RuntimeError("generator.load() completed but is_loaded() is False")
-        start_health_monitor = getattr(generator.sequential, "start_health_monitor", None)
-        if callable(start_health_monitor):
-            start_health_monitor()
+
+        final_readiness = readiness
+        health_getter = getattr(sequential, "get_health_readiness", None)
+        if callable(health_getter):
+            final_readiness = health_getter()
+            if not final_readiness.get("route_ready"):
+                raise RuntimeError(
+                    "Provider route became unhealthy while generator components were loading: "
+                    + "; ".join(
+                        str(reason) for reason in final_readiness.get("reasons", [])
+                    )
+                )
 
         startup_duration_ms = (time.perf_counter() - startup_started_at) * 1000
         set_startup_duration = getattr(generator, "set_startup_duration_ms", None)
         if callable(set_startup_duration):
             set_startup_duration(startup_duration_ms)
+        _runtime_state.transition_generator(
+            "ready",
+            model_name=req.model_name,
+            components_loaded=True,
+            route_ready=True,
+            reasons=[],
+            node_trace=_format_route_trace(final_readiness.get("selected_route", [])),
+            health=final_readiness,
+            canary=canary,
+        )
+        _runtime_state.record_event(
+            kind="generator",
+            phase="ready",
+            status="info",
+            message=f"Generator for {req.model_name} passed route and tensor validation.",
+            operation_id=operation_id,
+            details={"startup_duration_ms": startup_duration_ms, "canary": canary},
+        )
         return {
             "status": "ready",
+            "route_ready": True,
+            "canary": canary,
             "performance": (
                 generator.get_performance_snapshot()
                 if hasattr(generator, "get_performance_snapshot")
@@ -1881,15 +2287,44 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         }
 
     except AssertionError as e:
+        if sequential is not None:
+            stop_health_monitor = getattr(sequential, "stop_health_monitor", None)
+            if callable(stop_health_monitor):
+                stop_health_monitor()
         _cleanup_failed_generator(generator)
         generator = None
         _shutdown_client_dht()
+        _runtime_state.transition_generator(
+            "failed",
+            model_name=req.model_name,
+            components_loaded=False,
+            route_ready=False,
+            reasons=[str(e)],
+        )
         return {"status": "error", "error": str(e)}
     except Exception as e:
         logger.error(f"Generator start failed: {e}", exc_info=True)
+        if sequential is not None:
+            stop_health_monitor = getattr(sequential, "stop_health_monitor", None)
+            if callable(stop_health_monitor):
+                stop_health_monitor()
         _cleanup_failed_generator(generator)
         generator = None
         _shutdown_client_dht()
+        _runtime_state.transition_generator(
+            "failed",
+            model_name=req.model_name,
+            components_loaded=False,
+            route_ready=False,
+            reasons=[str(e)],
+        )
+        _runtime_state.record_event(
+            kind="generator",
+            phase="startup",
+            status="error",
+            message=str(e),
+            operation_id=operation_id,
+        )
         if _is_cuda_out_of_memory(e):
             return _cuda_memory_error_response(req.model_name)
         if _is_huggingface_auth_expired(e):
@@ -1905,17 +2340,14 @@ async def start_generator_async(req: GeneratorStartRequest) -> dict:
         progress("networking", "Starting the generator network client.")
         if cancelled.is_set():
             return {"status": "cancelled"}
-        progress("loading", "Loading embeddings and the output head.")
+        progress("validating_route", "Proving a complete RPC-healthy tensor route.")
         try:
             result = asyncio.run(start_generator(req))
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
             result = {"status": "error", **detail}
         if cancelled.is_set() and result.get("status") == "ready":
-            global generator
-            _cleanup_failed_generator(generator)
-            generator = None
-            _shutdown_client_dht()
+            asyncio.run(_unload_generator_runtime("Generator startup was cancelled."))
             return {"status": "cancelled"}
         return result
 
@@ -1941,14 +2373,26 @@ async def cancel_lifecycle_job(job_id: str) -> dict:
 @app.get("/generator/status")
 async def get_generator_status() -> dict:
     if generator is None or not generator.is_loaded():
+        snapshot = _runtime_state.generator_snapshot()
+        if snapshot["state"] not in {"starting", "validating_route", "loading", "failed"}:
+            snapshot = _runtime_state.transition_generator(
+                "stopped",
+                model_name=None,
+                components_loaded=False,
+                route_ready=False,
+                reasons=["Generator not loaded."],
+            )
         return {
             "ready": False,
-            "model_name": None,
+            "state": snapshot["state"],
+            "components_loaded": False,
+            "model_name": snapshot.get("model_name"),
             "route_ready": False,
-            "reasons": ["Generator not loaded."],
-            "node_trace": [],
+            "reasons": snapshot["reasons"],
+            "node_trace": snapshot["node_trace"],
             "performance": None,
-            "health": None,
+            "health": snapshot["health"],
+            "canary": snapshot["canary"],
         }
 
     reasons: list[str] = []
@@ -1960,7 +2404,7 @@ async def get_generator_status() -> dict:
     try:
         health_getter = getattr(generator.sequential, "get_health_readiness", None)
         if callable(health_getter):
-            health = await asyncio.to_thread(health_getter)
+            health = health_getter()
         if health is not None and health.get("enabled"):
             route = health.get("selected_route", [])
             route_ready = bool(health.get("route_ready"))
@@ -1986,15 +2430,59 @@ async def get_generator_status() -> dict:
     )
     performance["route_validation_ms"] = route_validation_ms
 
+    state = "ready" if route_ready else "suspended"
+    snapshot = _runtime_state.transition_generator(
+        state,
+        model_name=generator.model_name,
+        components_loaded=True,
+        route_ready=route_ready,
+        reasons=reasons,
+        node_trace=node_trace,
+        health=health,
+    )
+
     return {
         "ready": generator.is_loaded() and route_ready,
+        "state": state,
+        "components_loaded": True,
         "model_name": generator.model_name,
         "route_ready": route_ready,
         "reasons": reasons,
         "node_trace": node_trace,
         "performance": performance,
         "health": health,
+        "canary": snapshot.get("canary"),
     }
+
+
+@app.get("/runtime/snapshot")
+async def get_runtime_snapshot() -> dict:
+    generator_status = await get_generator_status()
+    snapshot = _runtime_state.snapshot()
+    snapshot.update(
+        {
+            "generator": generator_status,
+            "local_nodes": _local_node_infos(),
+            "lifecycle_jobs": _lifecycle_jobs.list_recent(),
+        }
+    )
+    return snapshot
+
+
+async def _require_generator_ready() -> DistributedGenerator:
+    status = await get_generator_status()
+    if not status["ready"] or generator is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "generator_route_not_ready",
+                "state": status["state"],
+                "message": "; ".join(status["reasons"]) or "Generator route is not ready.",
+                "route_ready": status["route_ready"],
+                "components_loaded": status["components_loaded"],
+            },
+        )
+    return generator
 
 
 @app.post("/generator/stop")
@@ -2008,24 +2496,15 @@ async def stop_generator() -> dict:
 @app.post("/generator/unload")
 async def unload_generator() -> dict:
     """Stop the generator lifecycle, then release its DHT transport."""
-    global generator
-    if generator is None:
-        return {"status": "not_running"}
-    candidate = generator
-    generator = None
-    candidate.request_stop()
-    await asyncio.to_thread(candidate.unload)
-    network = await asyncio.to_thread(_shutdown_client_dht)
-    return {"status": "unloaded", "network": network}
+    return await _unload_generator_runtime("Generator unloaded by the user.")
 
 
 @app.post("/generator/parity/next-token")
 async def compare_generator_next_token(req: NextTokenParityRequest) -> dict:
-    if generator is None or not generator.is_loaded():
-        raise HTTPException(status_code=503, detail="Generator not ready.")
+    active_generator = await _require_generator_ready()
     try:
         return await asyncio.to_thread(
-            generator.compare_next_token_logits,
+            active_generator.compare_next_token_logits,
             prompt=req.prompt,
             atol=req.atol,
             rtol=req.rtol,
@@ -2037,10 +2516,9 @@ async def compare_generator_next_token(req: NextTokenParityRequest) -> dict:
 
 @app.post("/generator/parity/generate")
 async def compare_generator_output(req: GeneratedParityRequest) -> dict:
-    if generator is None or not generator.is_loaded():
-        raise HTTPException(status_code=503, detail="Generator not ready.")
+    active_generator = await _require_generator_ready()
     try:
-        return await generator.compare_generated_output(
+        return await active_generator.compare_generated_output(
             prompt=req.prompt,
             max_new_tokens=req.max_new_tokens,
             temperature=req.temperature,
@@ -2056,11 +2534,10 @@ async def compare_generator_output(req: GeneratedParityRequest) -> dict:
 
 @app.post("/generator/trace")
 async def trace_generator(req: GenerationTraceRequest) -> dict:
-    if generator is None or not generator.is_loaded():
-        raise HTTPException(status_code=503, detail="Generator not ready.")
+    active_generator = await _require_generator_ready()
     try:
         trace = await asyncio.to_thread(
-            generator.trace_generation,
+            active_generator.trace_generation,
             prompt=req.prompt,
             max_new_tokens=req.max_new_tokens,
             temperature=req.temperature,
@@ -2095,14 +2572,13 @@ async def analyze_generator_traces(model_name: Optional[str] = None) -> dict:
 
 @app.post("/chat")
 async def chat(req: ChatRequest) -> dict:
-    if generator is None or not generator.is_loaded():
-        raise HTTPException(status_code=503, detail="Generator not ready.")
+    active_generator = await _require_generator_ready()
 
     full_response         = ""
     node_trace: list[str] = []
     generation_metrics: Optional[dict] = None
 
-    async for chunk in generator.generate_stream(
+    async for chunk in active_generator.generate_stream(
         prompt=req.message,
         max_new_tokens=req.max_new_tokens,
         temperature=req.temperature,
@@ -2186,7 +2662,8 @@ async def stream(websocket: WebSocket) -> None:
                 await websocket.send_json({"error": "do_sample must be a boolean"})
                 continue
 
-            if generator is not None and generator.is_loaded():
+            generator_status = await get_generator_status()
+            if generator_status["ready"] and generator is not None:
                 async for chunk in generator.generate_stream(
                     prompt=message,
                     max_new_tokens=max_new_tokens,
@@ -2198,7 +2675,14 @@ async def stream(websocket: WebSocket) -> None:
                 ):
                     await websocket.send_json(chunk)
             else:
-                await websocket.send_json({"error": "Generator not ready."})
+                await websocket.send_json(
+                    {
+                        "error": "generator_route_not_ready",
+                        "state": generator_status["state"],
+                        "message": "; ".join(generator_status["reasons"])
+                        or "Generator route is not ready.",
+                    }
+                )
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected: {websocket.client}")

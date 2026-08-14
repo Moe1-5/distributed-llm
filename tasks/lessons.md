@@ -17,7 +17,16 @@
 
 ## Active
 
+### Relay reservation is not RPC health
+
+A successful `/p2p-circuit/` reservation proves that a peer can reserve transport through the VPS, but it does not prove that expert metadata or tensor RPC completes within the health deadline. Test reservation, metadata latency, and tensor forwarding as separate acceptance gates.
+
 > Lessons that still need active enforcement.
+
+### [2026-08-14] Test packaged Windows command transport, not only generated shell text
+**Problem:** Launcher unit tests validated the generated multiline Bash script, but the Windows Electron to WSL process boundary did not preserve it reliably and the packaged application executed a malformed command.
+**Rule:** Commands sent through `wsl.exe` must use a transport that does not depend on multiline Windows argument preservation, and launcher tests must decode and verify the command at the final process-argument boundary.
+**Why:** A shell script can be valid in isolation while failing after Windows argument serialization, so packaged acceptance must cover the actual boundary users run.
 
 ### [2026-08-13] Keep sprint implementation on dedicated feature branches
 **Problem:** Sprint work and closure preparation must not continue on a shared or default branch while live acceptance is still pending.

@@ -186,6 +186,10 @@ export interface NetworkStatus {
   local_node_ids?: string[]
   gpu_available: boolean
   generator_ready: boolean
+  generator_state: GeneratorState
+  generator_components_loaded: boolean
+  route_ready: boolean
+  generator_reasons: string[]
   token_set: boolean
   local_models?: LocalModelImport[]
 }
@@ -212,13 +216,32 @@ export interface IncentivesStatus {
 
 export interface GeneratorStatus {
   ready: boolean
+  state: GeneratorState
+  components_loaded: boolean
   model_name: string | null
   route_ready: boolean
   reasons: string[]
   node_trace: string[]
   performance: GeneratorPerformance | null
   health: ProviderHealthStatus | null
+  canary?: {
+    ok: boolean
+    elapsed_ms?: number
+    shape?: number[]
+    skipped?: boolean
+    reason?: string
+  } | null
 }
+
+export type GeneratorState =
+  | 'stopped'
+  | 'starting'
+  | 'validating_route'
+  | 'loading'
+  | 'ready'
+  | 'suspended'
+  | 'stopping'
+  | 'failed'
 
 export interface ProviderHealth {
   peer_id: string
@@ -437,6 +460,7 @@ export interface NodeStartParams {
   device: string
   coverage_revision?: string
   confirm_redundancy?: boolean
+  confirm_local_replica?: boolean
 }
 
 export interface GeneratorStartParams {
@@ -686,9 +710,17 @@ export const api = {
     post<{ status: string; info?: NodeInfo; error?: string }>(
       `/node/turn-off${nodeId ? `?node_id=${encodeURIComponent(nodeId)}` : ''}`
     ),
-  deleteNode: (nodeId?: string) =>
-    del<{ status: string; error?: string }>(
-      `/node${nodeId ? `?node_id=${encodeURIComponent(nodeId)}` : ''}`
+  deleteNode: (nodeId?: string, confirmGeneratorStop = false) =>
+    del<{
+      status: string
+      error?: string
+      message?: string
+      requires_generator_stop?: boolean
+    }>(
+      `/node?${[
+        nodeId ? `node_id=${encodeURIComponent(nodeId)}` : '',
+        confirmGeneratorStop ? 'confirm_generator_stop=true' : ''
+      ].filter(Boolean).join('&')}`
     ),
   stopNode: () => post<{ status: string }>('/node/stop'),
 

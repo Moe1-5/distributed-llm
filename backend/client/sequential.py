@@ -1178,6 +1178,35 @@ class RemoteSequential:
             raise RuntimeError("Route RPC probe failed: " + "; ".join(failures))
         return route
 
+    def validate_tensor_route(self, hidden_size: int) -> dict:
+        """Send one deterministic position through the selected route before readiness."""
+        if hidden_size <= 0:
+            raise ValueError("hidden_size must be positive")
+        route = self.validate_reachable_route()
+        started_at = time.perf_counter()
+        hidden_states = torch.zeros((1, 1, hidden_size), dtype=torch.float32)
+        attention_mask = torch.ones((1, 1), dtype=torch.long)
+        position_ids = torch.zeros((1, 1), dtype=torch.long)
+        output, node_trace = self.forward(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
+        if tuple(output.shape) != tuple(hidden_states.shape):
+            raise RuntimeError(
+                "Tensor route canary returned an unexpected shape: "
+                f"expected {tuple(hidden_states.shape)}, got {tuple(output.shape)}"
+            )
+        if not bool(torch.isfinite(output).all()):
+            raise RuntimeError("Tensor route canary returned non-finite values")
+        return {
+            "ok": True,
+            "elapsed_ms": (time.perf_counter() - started_at) * 1000,
+            "route": [dict(node) for node in route],
+            "node_trace": list(node_trace),
+            "shape": list(output.shape),
+        }
+
     def _rpc_forward(
         self,
         rpc_uid:       str,

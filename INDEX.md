@@ -94,6 +94,8 @@
 | `tasks/sprints/sprint-22-relay-tensor-rpc-stability.md` | Active sprint for relayed tensor RPC diagnostics, bounded attempts, route reuse, and live inference acceptance. |
 | `tasks/sprints/sprint-23-responsive-startup-and-generation.md` | Active sprint for startup jobs, progress, request deadlines, partial UI state, and generation-path performance. |
 | `tasks/sprints/sprint-24-windows-fundamental-acceptance-build.md` | Active sprint for one audited Windows executable bound to fundamental two-device acceptance evidence. |
+| `tasks/sprints/sprint-25-runtime-state-validation.md` | Active sprint for authoritative runtime readiness, lifecycle dependency validation, and staged diagnostics. |
+| `tasks/sprints/sprint-26-credit-gated-api-access.md` | Active sprint for fair-use chat, verified-credit API access, and signed inference capabilities. |
 | `tasks/archive/sprint-10-gated-model-local-import.md`          | Completed sprint for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
 | `tasks/archive/sprint-11-instruction-ready-model-expansion.md` | Completed sprint for instruction-ready/chat-ready model registry expansion, tuning labels, local-import contracts, and live TinyLlama generation validation. |
 | `tasks/archive/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Completed sprint for public-model auth isolation, failed-start cleanup, model cache cleanup, local expert routing, and safetensors/bin-index gated import validation. |
@@ -123,7 +125,7 @@
 | `docs/PETALS_COMPARISON.md`        | Comparison with Petals and project-owned public swarm direction. |
 | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Review proposal for Petals-style direct reachability, automatic relay fallback, VPS infrastructure, security, and production validation. |
 | `docs/COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, serving recommendations, stale-plan validation, and serving/inference workflow. |
-| `docs/VPS_RELAY_OPERATIONS.md` | Persistent VPS relay installation, machine-readable restart validation, external probe binding, recovery, and rollback runbook. |
+| `docs/VPS_RELAY_OPERATIONS.md` | Manual foreground launch, persistent VPS relay installation, machine-readable restart validation, external probe binding, recovery, and rollback runbook. |
 | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, launcher contract, sanitized acceptance report, and clean-Windows runbook. |
 | `docs/USEFUL_WORK_INCENTIVES.md` | Signed useful-work receipt protocol, SQLite settlement policy, rollout modes, VPS deployment, and remaining acceptance gates. |
 | `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized relay/direct capture commands, cross-sprint artifact assembly, route and ownership validation, shadow receipts, and manual gates. |
@@ -144,6 +146,7 @@
 | `backend/colab_worker.py` | Headless remote worker entry point with browser OAuth support for Colab and GPU hosts. |
 | `backend/api/`           | FastAPI app, root `.env` loading, settings/token endpoints, Hugging Face OAuth/download helpers, and local model import registry. |
 | `backend/api/lifecycle_jobs.py` | Thread-safe long-running node/generator job state, deduplication, progress, and cancellation requests. |
+| `backend/api/runtime_state.py` | Authoritative generator readiness state machine and bounded structured runtime diagnostic events. |
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
 | `backend/client/coverage.py` | Pure adjacent-range route planning, provider segmentation, snapshot revision, and serving recommendation logic. |
 | `backend/client/rpc_policy.py` | Validated remote-expert attempt policy, failure classification, and safe receipt fallback rules. |
@@ -173,6 +176,7 @@
 | `backend/tests/test_local_split_probe.py` | Local split probe option, range, evidence sanitization, and private-output regressions. |
 | `backend/tests/test_tinyllama_performance_probe.py` | TinyLlama probe bounds, metric sanitization, and acceptance-contract regressions. |
 | `backend/tests/test_lifecycle_jobs.py` | Long-running startup job progress, deduplication, cancellation, failure, and prompt-response regressions. |
+| `backend/tests/test_runtime_state_validation.py` | Generator state, tensor canary, local replica limits, route suspension, and dependent-node deletion regressions. |
 
 ---
 

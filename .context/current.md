@@ -8,8 +8,8 @@
 **Stage:** [ ] Scaffolding [x] MVP prototype [ ] Feature-complete [ ] Production
 
 ## Active Sprint
-**Sprint:** Sprints 18 through 24 are implemented locally on `feature/fundamental-live-stability`; physical two-device acceptance remains open.
-**Goal:** Rebuild the audited Windows executable and collect relay, failover, and direct-LAN evidence on two physical devices.
+**Sprint:** Sprint 25 runtime state validation is in progress on `feature/runtime-state-validation`; Sprint 26 credit-gated API access is queued behind it.
+**Goal:** Make route and generator readiness authoritative before adding contributor-only developer API access.
 
 ## Tech Stack
 React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Transformers/PyTorch, uv for backend dependencies, npm for frontend scripts.

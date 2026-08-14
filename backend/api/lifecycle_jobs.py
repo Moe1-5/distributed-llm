@@ -86,6 +86,17 @@ class LifecycleJobStore:
             job = self._jobs.get(job_id)
             return job.snapshot() if job is not None else None
 
+    def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        with self._lock:
+            jobs = sorted(
+                self._jobs.values(),
+                key=lambda job: job.updated_at,
+                reverse=True,
+            )
+            return [job.snapshot() for job in jobs[:limit]]
+
     def cancel(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             job = self._jobs.get(job_id)

@@ -37,11 +37,14 @@ class ProviderKey:
 class ProviderHealthConfig:
     selected_interval_seconds: float = 5.0
     standby_interval_seconds: float = 15.0
-    probe_timeout_seconds: float = 3.0
+    # Relayed expert metadata can include connection setup and circuit
+    # reservation latency; three seconds is shorter than the verified VPS
+    # relay baseline and incorrectly marks usable providers offline.
+    probe_timeout_seconds: float = 15.0
     failure_threshold: int = 2
     offline_threshold: int = 4
     recovery_successes: int = 2
-    dht_stale_seconds: float = 10.0
+    dht_stale_seconds: float = 30.0
     max_concurrency: int = 4
     jitter_ratio: float = 0.15
     scheduler_interval_seconds: float = 0.25
@@ -509,11 +512,11 @@ def get_provider_health_config() -> ProviderHealthConfig:
     return ProviderHealthConfig(
         selected_interval_seconds=_env_float("DISTRIBLLM_HEALTH_SELECTED_INTERVAL", 5.0),
         standby_interval_seconds=_env_float("DISTRIBLLM_HEALTH_STANDBY_INTERVAL", 15.0),
-        probe_timeout_seconds=_env_float("DISTRIBLLM_HEALTH_PROBE_TIMEOUT", 3.0),
+        probe_timeout_seconds=_env_float("DISTRIBLLM_HEALTH_PROBE_TIMEOUT", 15.0),
         failure_threshold=_env_int("DISTRIBLLM_HEALTH_FAILURE_THRESHOLD", 2),
         offline_threshold=_env_int("DISTRIBLLM_HEALTH_OFFLINE_THRESHOLD", 4),
         recovery_successes=_env_int("DISTRIBLLM_HEALTH_RECOVERY_SUCCESSES", 2),
-        dht_stale_seconds=_env_float("DISTRIBLLM_HEALTH_DHT_STALE_SECONDS", 10.0),
+        dht_stale_seconds=_env_float("DISTRIBLLM_HEALTH_DHT_STALE_SECONDS", 30.0),
         max_concurrency=_env_int("DISTRIBLLM_HEALTH_MAX_CONCURRENCY", 4),
         jitter_ratio=_env_float("DISTRIBLLM_HEALTH_JITTER_RATIO", 0.15),
         scheduler_interval_seconds=_env_float("DISTRIBLLM_HEALTH_SCHEDULER_INTERVAL", 0.25),

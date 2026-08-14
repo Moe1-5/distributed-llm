@@ -347,7 +347,16 @@ export default function Dashboard(): React.JSX.Element {
 
     setNodeAction({ nodeId, action: 'deleting' })
     try {
-      const res = await api.deleteNode(nodeId)
+      let res = await api.deleteNode(nodeId)
+      if (
+        res.status === 'error' &&
+        res.error === 'generator_dependency_confirmation_required'
+      ) {
+        if (!window.confirm(res.message ?? 'Delete this node and unload its dependent generator?')) {
+          return
+        }
+        res = await api.deleteNode(nodeId, true)
+      }
       if (res.status === 'error') throw new Error(res.error ?? 'Failed to delete local node')
       await refreshLocalNodeState()
     } catch (err) {
@@ -435,6 +444,18 @@ export default function Dashboard(): React.JSX.Element {
             <p className="font-mono text-[12px] text-green">
               Generator ready — go to Inference page to start chatting
             </p>
+          </div>
+        )}
+        {status?.generator_components_loaded && !status.generator_ready && (
+          <div className="rounded-xl border border-amber/20 bg-amber/5 px-5 py-4">
+            <p className="font-mono text-[12px] text-amber">
+              Generator suspended — complete RPC-healthy coverage is required
+            </p>
+            {status.generator_reasons?.length > 0 && (
+              <p className="mt-1 font-mono text-[10px] text-amber/70">
+                {status.generator_reasons.join('; ')}
+              </p>
+            )}
           </div>
         )}
 

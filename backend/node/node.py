@@ -473,6 +473,7 @@ class Node:
         return {
             "peer_id":       peer_id,
             "node_id":       self.node_id,
+            "rpc_uid":       self.rpc.get_uid() if self.rpc else None,
             "model_name":    self.model_name,
             "layer_start":   self.layer_start,
             "layer_end":     self.layer_end,

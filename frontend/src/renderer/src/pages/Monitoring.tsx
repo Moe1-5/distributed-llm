@@ -94,32 +94,51 @@ export default function Monitoring(): React.JSX.Element {
       }))
     }
     const requests = [
-      applyIndependently(api.getGeneratorStatus(), (generator) => {
-        setState((prev) => ({
-          ...prev,
-          generator,
-          selectedModel: prev.selectedModel || generator.model_name || '',
-          lastUpdated: new Date()
-        }))
-      }, failed),
-      applyIndependently(api.getModels(), (result) => {
-        setState((prev) => ({
-          ...prev,
-          models: result.models,
-          selectedModel: prev.selectedModel || result.models[0]?.id || '',
-          lastUpdated: new Date()
-        }))
-      }, failed),
-      applyIndependently(api.getNodes(), (result) => {
-        setState((prev) => ({
-          ...prev,
-          nodes: result.nodes ?? [],
-          lastUpdated: new Date()
-        }))
-      }, failed),
-      applyIndependently(api.getStats(), (stats) => {
-        setState((prev) => ({ ...prev, stats, lastUpdated: new Date() }))
-      }, failed)
+      applyIndependently(
+        api.getGeneratorStatus(),
+        (generator) => {
+          setState((prev) => ({
+            ...prev,
+            generator,
+            selectedModel: prev.selectedModel || generator.model_name || '',
+            lastUpdated: new Date()
+          }))
+        },
+        failed
+      ),
+      // Monitoring only needs the stable model catalog here. The full /models
+      // endpoint performs a route scan for every supported model and can be
+      // slower than the five-second monitoring refresh cadence over a relay.
+      applyIndependently(
+        api.getModelCatalog(),
+        (result) => {
+          setState((prev) => ({
+            ...prev,
+            models: result.models,
+            selectedModel: prev.selectedModel || result.models[0]?.id || '',
+            lastUpdated: new Date()
+          }))
+        },
+        failed
+      ),
+      applyIndependently(
+        api.getNodes(),
+        (result) => {
+          setState((prev) => ({
+            ...prev,
+            nodes: result.nodes ?? [],
+            lastUpdated: new Date()
+          }))
+        },
+        failed
+      ),
+      applyIndependently(
+        api.getStats(),
+        (stats) => {
+          setState((prev) => ({ ...prev, stats, lastUpdated: new Date() }))
+        },
+        failed
+      )
     ]
     try {
       await Promise.allSettled(requests)
@@ -147,13 +166,7 @@ export default function Monitoring(): React.JSX.Element {
   const alternateRoutes = state.generator?.health?.alternate_routes ?? []
   const lastFailover = state.generator?.health?.last_failover
   const healthByProvider = useMemo(
-    () =>
-      new Map(
-        providerHealth.map((health) => [
-          `${health.peer_id}:${health.rpc_uid}`,
-          health
-        ])
-      ),
+    () => new Map(providerHealth.map((health) => [`${health.peer_id}:${health.rpc_uid}`, health])),
     [providerHealth]
   )
 
@@ -187,6 +200,10 @@ export default function Monitoring(): React.JSX.Element {
     const providerCount = Math.max(modelNodes.length, 1)
     const providers = modelNodes.map((node, index) => {
       const angle = -Math.PI / 2 + (index / providerCount) * Math.PI * 2
+      const health = healthByProvider.get(`${node.peer_id}:${node.rpc_uid ?? ''}`)
+      const rpcReachable = health
+        ? health.state === 'healthy' || health.state === 'degraded'
+        : node.running && node.rpc_running
       const radiusX = 250
       const radiusY = 125
       return {
@@ -196,7 +213,7 @@ export default function Monitoring(): React.JSX.Element {
         x: 420 + Math.cos(angle) * radiusX,
         y: 190 + Math.sin(angle) * radiusY,
         kind: 'provider' as const,
-        online: node.running && node.rpc_running
+        online: rpcReachable
       }
     })
 
@@ -221,7 +238,7 @@ export default function Monitoring(): React.JSX.Element {
       },
       ...providers
     ]
-  }, [coverage.covered, modelNodes, selectedModel, state.generator])
+  }, [coverage.covered, healthByProvider, modelNodes, selectedModel, state.generator])
 
   const providerNodes = mapNodes.filter((node) => node.kind === 'provider')
 
@@ -316,9 +333,7 @@ export default function Monitoring(): React.JSX.Element {
             <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
               Generation Performance
             </h2>
-            <span className="font-mono text-[9px] text-text-dim">
-              Latest completed generation
-            </span>
+            <span className="font-mono text-[9px] text-text-dim">Latest completed generation</span>
           </div>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
             {[
@@ -542,7 +557,14 @@ export default function Monitoring(): React.JSX.Element {
                     key={`${candidate.transport}-${index}`}
                     className="mt-2 font-mono text-[10px] text-text-secondary"
                   >
-                    {index + 1}. {candidate.route.map((node) => `${node.layer_start}-${node.layer_end} @ ${shortPeer(node.peer_id)}`).join(' → ')} · {candidate.transport}
+                    {index + 1}.{' '}
+                    {candidate.route
+                      .map(
+                        (node) =>
+                          `${node.layer_start}-${node.layer_end} @ ${shortPeer(node.peer_id)}`
+                      )
+                      .join(' → ')}{' '}
+                    · {candidate.transport}
                   </p>
                 ))}
                 {lastFailover && (
@@ -595,7 +617,7 @@ export default function Monitoring(): React.JSX.Element {
                           : 'border-red/20 bg-red/5 text-red'
                       }`}
                     >
-                      {node.running && node.rpc_running ? 'ONLINE' : 'OFFLINE'}
+                      {node.running && node.rpc_running ? 'DHT ADVERTISED' : 'DHT STALE'}
                     </span>
                   </div>
                   <div className="mt-4 flex flex-wrap gap-1.5">
@@ -619,7 +641,9 @@ export default function Monitoring(): React.JSX.Element {
                       </span>
                     )}
                     {(() => {
-                      const role = healthByProvider.get(`${node.peer_id}:${node.rpc_uid ?? ''}`)?.route_role
+                      const role = healthByProvider.get(
+                        `${node.peer_id}:${node.rpc_uid ?? ''}`
+                      )?.route_role
                       if (!role) return null
                       const roleClass =
                         role === 'active'
@@ -628,7 +652,9 @@ export default function Monitoring(): React.JSX.Element {
                             ? 'border-amber/30 bg-amber/10 text-amber'
                             : 'border-border text-text-dim'
                       return (
-                        <span className={`rounded border px-2 py-0.5 font-mono text-[10px] uppercase ${roleClass}`}>
+                        <span
+                          className={`rounded border px-2 py-0.5 font-mono text-[10px] uppercase ${roleClass}`}
+                        >
                           {role}
                         </span>
                       )
@@ -693,13 +719,25 @@ export default function Monitoring(): React.JSX.Element {
                               ? 'border-amber/30 bg-amber/10 text-amber'
                               : 'border-red/20 bg-red/5 text-red'
                       return (
-                        <span
-                          className={`rounded border px-2 py-0.5 font-mono text-[10px] uppercase ${stateClass}`}
-                          title={health.reason ?? undefined}
-                        >
-                          RPC {health.state}
-                          {health.latency_ms !== null ? ` / ${health.latency_ms.toFixed(0)}ms` : ''}
-                        </span>
+                        <>
+                          <span
+                            className={`rounded border px-2 py-0.5 font-mono text-[10px] uppercase ${stateClass}`}
+                            title={health.reason ?? undefined}
+                          >
+                            RPC {health.state}
+                            {health.latency_ms !== null
+                              ? ` / ${health.latency_ms.toFixed(0)}ms`
+                              : ''}
+                          </span>
+                          {health.state !== 'healthy' && health.reason && (
+                            <span
+                              className="basis-full truncate font-mono text-[9px] text-text-dim"
+                              title={health.reason}
+                            >
+                              {health.reason}
+                            </span>
+                          )}
+                        </>
                       )
                     })()}
                   </div>

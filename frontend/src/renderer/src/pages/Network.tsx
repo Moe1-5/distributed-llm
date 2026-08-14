@@ -64,6 +64,7 @@ interface StartResult {
   error?: string
   message?: string
   plan?: ServingPlan
+  requires_generator_stop?: boolean
 }
 
 async function waitForLifecycleJob(
@@ -178,6 +179,7 @@ export default function Network(): React.JSX.Element {
   const [genReady, setGenReady] = useState(false)
   const servingPlanPromiseRef = useRef<Promise<ServingPlan | null> | null>(null)
   const inferencePlanPromiseRef = useRef<Promise<void> | null>(null)
+  const generatorStatusPromiseRef = useRef<Promise<void> | null>(null)
 
   // Status badges
   const [backendOk, setBackendOk] = useState(false)
@@ -189,6 +191,34 @@ export default function Network(): React.JSX.Element {
 
   const log = useCallback((message: string, type: ActivityEntry['type'] = 'info') => {
     setActivity((prev) => [...prev.slice(-99), makeEntry(message, type)])
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const refreshGeneratorStatus = async (): Promise<void> => {
+      if (generatorStatusPromiseRef.current) return generatorStatusPromiseRef.current
+      const request = api
+        .getGeneratorStatus()
+        .then((status) => {
+          if (active) setGenReady(status.ready)
+        })
+        .catch(() => {
+          if (active) setGenReady(false)
+        })
+        .finally(() => {
+          if (generatorStatusPromiseRef.current === request) {
+            generatorStatusPromiseRef.current = null
+          }
+        })
+      generatorStatusPromiseRef.current = request
+      return request
+    }
+    void refreshGeneratorStatus()
+    const interval = window.setInterval(() => void refreshGeneratorStatus(), 2_500)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+    }
   }, [])
 
   // ---------------------------------------------------------------------------
@@ -364,7 +394,7 @@ export default function Network(): React.JSX.Element {
   }, [])
 
   const refreshModelsAndImports = useCallback(async () => {
-    const [modelsRes, localRes] = await Promise.all([api.getModels(), api.getLocalModels()])
+    const [modelsRes, localRes] = await Promise.all([api.getModelCatalog(), api.getLocalModels()])
     setModels(modelsRes.models)
     setLocalImports(localRes.models)
   }, [])
@@ -714,6 +744,20 @@ export default function Network(): React.JSX.Element {
       let completed = await waitForLifecycleJob(submitted, observe)
       let res = startResultFromJob(completed)
 
+      if (res.status === 'error' && res.error === 'local_replica_confirmation_required') {
+        if (!window.confirm(res.message ?? 'Start a second identical local replica?')) {
+          log('Second local replica was not started.', 'info')
+          return
+        }
+        const confirmedJob = await api.startNodeAsync({
+          ...startParams,
+          confirm_local_replica: true
+        })
+        setNodeJobId(confirmedJob.job_id)
+        completed = await waitForLifecycleJob(confirmedJob, observe)
+        res = startResultFromJob(completed)
+      }
+
       if (
         res.status === 'error' &&
         res.plan &&
@@ -861,8 +905,13 @@ export default function Network(): React.JSX.Element {
           log(`Error: ${res.message ?? res.error}`, 'error')
         }
       } else {
-        log('Generator ready — go to Inference page', 'success')
-        setGenReady(true)
+        const status = await api.getGeneratorStatus()
+        setGenReady(status.ready)
+        if (status.ready) {
+          log('Generator route and tensor canary are ready — go to Inference page', 'success')
+        } else {
+          log(status.reasons.join('; ') || 'Generator route is not ready.', 'error')
+        }
       }
     } catch (err) {
       log(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')

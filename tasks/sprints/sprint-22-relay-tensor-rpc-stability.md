@@ -80,3 +80,9 @@ This sprint owns the immediate inference blocker. It must distinguish worker exe
 - What changed: successful and failed generator attempts now log request ID, hop, peer, RPC UID, attempt budget, range, tensor shape, byte count, and duration. Legacy workers log the matching RPC UID, range, shape, bytes, duration, and exception state around execution.
 - Why: ordinary non-receipt inference cannot carry application metadata without changing the established expert tensor schema, but the shared RPC UID and non-secret tensor metadata provide a deterministic join across generator and worker logs.
 - Verification: the full backend suite passes with 250 tests and 54 subtests. A physical relay generation remains the only transport acceptance gate.
+
+### 2026-08-14 - Align relay health checks with observed metadata latency
+
+- What changed: raised the default expert metadata health-probe deadline from three to fifteen seconds, extended the DHT staleness floor to thirty seconds to preserve the typed configuration invariant, documented the relay-latency rationale, made Monitoring use the fast model catalog instead of a full route scan on every refresh, and separated DHT advertisement labels from RPC health with visible failure reasons.
+- Why: two relayed layer providers were shown as DHT-online but RPC-offline, while the generator rejected the complete route and Monitoring reported request timeouts. The verified relay path can take several seconds for expert metadata setup even when reservation succeeds quickly.
+- Status: local implementation is ready for backend/frontend verification; physical relayed metadata and tensor forwarding remain open acceptance gates.

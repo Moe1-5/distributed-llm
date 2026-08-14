@@ -186,7 +186,7 @@ The `/models` and `/generator/status` responses include route reasons, coverage,
 
 ## Provider Present but RPC Health Degraded
 
-Monitoring presents DHT presence, transport verification, and expert RPC health separately. A provider can still have a current advertisement while its metadata expert is timing out or unreachable. Under defaults, one failed probe keeps a previously healthy route available, two consecutive failures mark it degraded, four mark it offline, and two successful probes are required for recovery.
+Monitoring presents DHT presence, transport verification, and expert RPC health separately. A provider can still have a current advertisement while its metadata expert is timing out or unreachable. Relayed metadata probes default to fifteen seconds because the verified VPS path can spend several seconds establishing the circuit; override `DISTRIBLLM_HEALTH_PROBE_TIMEOUT` only when the measured path justifies it. Under defaults, one failed probe keeps a previously healthy route available, two consecutive failures mark it degraded, four mark it offline, and two successful probes are required for recovery.
 
 Inspect `/generator/status` health providers for the failure reason, last probe/success/failure timestamps, latency, role, and health revision. Tune `DISTRIBLLM_HEALTH_*` only after checking relay and worker logs; shortening intervals increases DHT/RPC control traffic. Network's Stop Generator action unloads the monitor and client DHT, while Chat's stop action only cancels the active inference request.
 
