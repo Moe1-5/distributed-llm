@@ -150,7 +150,7 @@
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
 | `backend/client/coverage.py` | Pure adjacent-range route planning, provider segmentation, snapshot revision, and serving recommendation logic. |
 | `backend/client/rpc_policy.py` | Validated remote-expert attempt policy, failure classification, and safe receipt fallback rules. |
-| `backend/incentives/` | Ed25519 application identities, canonical BLAKE3 receipt protocol, runtime submission queue, and SQLite settlement service. |
+| `backend/incentives/` | Ed25519 identities, canonical BLAKE3 receipts, SQLite settlement, hashed developer API keys, credit reservations, and signed inference capabilities. |
 | `backend/node/`          | Serving node, layer loading, direct/relay transport, Hivemind RPC, and GPU monitoring. |
 | `backend/node/reachability.py` | Petals-derived independent direct-reachability probe used before relay fallback. |
 | `backend/node/relay_compat.py` | Hivemind 1.1.12 compatibility shim that selects configured trusted relays as static AutoRelay candidates. |
@@ -177,6 +177,7 @@
 | `backend/tests/test_tinyllama_performance_probe.py` | TinyLlama probe bounds, metric sanitization, and acceptance-contract regressions. |
 | `backend/tests/test_lifecycle_jobs.py` | Long-running startup job progress, deduplication, cancellation, failure, and prompt-response regressions. |
 | `backend/tests/test_runtime_state_validation.py` | Generator state, tensor canary, local replica limits, route suspension, and dependent-node deletion regressions. |
+| `backend/tests/test_api_access.py` | Hashed API-key eligibility, revocation, shared atomic credit reservations, shadow accounting, and signed capability regressions. |
 
 ---
 

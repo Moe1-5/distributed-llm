@@ -1,5 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { api, type IncentivesStatus } from '../api/client'
+import {
+  api,
+  type DeveloperAccessStatus,
+  type IncentivesStatus
+} from '../api/client'
 
 function shortIdentity(value: string | null): string {
   if (!value) return 'Not initialized'
@@ -15,14 +19,22 @@ function connectivityTone(status: IncentivesStatus['settlement_connectivity']): 
 
 export default function Incentives(): React.JSX.Element {
   const [status, setStatus] = useState<IncentivesStatus | null>(null)
+  const [access, setAccess] = useState<DeveloperAccessStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [keyName, setKeyName] = useState('Local integration')
+  const [newApiKey, setNewApiKey] = useState<string | null>(null)
+  const [keyAction, setKeyAction] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const refresh = useCallback(async () => {
     try {
-      const next = await api.getIncentives()
+      const [next, developerAccess] = await Promise.all([
+        api.getIncentives(),
+        api.getDeveloperAccess()
+      ])
       setStatus(next)
+      setAccess(developerAccess)
       setError(null)
       setLastUpdated(new Date())
     } catch (reason) {
@@ -40,6 +52,37 @@ export default function Incentives(): React.JSX.Element {
   }, [refresh])
 
   const mode = status?.mode ?? 'off'
+
+  const createApiKey = useCallback(async () => {
+    if (keyAction) return
+    setKeyAction(true)
+    try {
+      const created = await api.createDeveloperApiKey(keyName)
+      setNewApiKey(created.api_key)
+      setError(null)
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'API key creation failed')
+    } finally {
+      setKeyAction(false)
+    }
+  }, [keyAction, keyName, refresh])
+
+  const revokeApiKey = useCallback(
+    async (keyId: string) => {
+      if (keyAction || !window.confirm('Revoke this developer API key?')) return
+      setKeyAction(true)
+      try {
+        await api.revokeDeveloperApiKey(keyId)
+        await refresh()
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : 'API key revocation failed')
+      } finally {
+        setKeyAction(false)
+      }
+    },
+    [keyAction, refresh]
+  )
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">
@@ -170,6 +213,105 @@ export default function Incentives(): React.JSX.Element {
               {status.last_error}
             </p>
           )}
+        </section>
+
+        <section className="border-t border-border pt-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
+                Developer API
+              </h2>
+              <p className="mt-1 text-[12px] text-text-secondary">
+                Free Electron chat remains available without an API key.
+              </p>
+            </div>
+            <span className="rounded border border-border-bright px-2 py-1 font-mono text-[10px] text-text-primary uppercase">
+              {access?.mode ?? 'off'}
+            </span>
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 font-mono text-[10px] text-text-secondary">
+            <span>Available: {access?.available_credits ?? 0}</span>
+            <span>Reserved: {access?.reserved_credits ?? 0}</span>
+            <span>Spent locally: {access?.spent_credits ?? 0}</span>
+          </div>
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <input
+              value={keyName}
+              onChange={(event) => setKeyName(event.target.value)}
+              maxLength={80}
+              aria-label="API key name"
+              className="h-10 min-w-0 rounded-lg border border-border-bright bg-bg-surface px-3 font-mono text-[12px] text-text-primary outline-none focus:border-cyan/40"
+            />
+            <button
+              type="button"
+              onClick={() => void createApiKey()}
+              disabled={
+                keyAction ||
+                !access?.developer_api_enabled ||
+                !access?.eligible_for_api_key ||
+                !keyName.trim()
+              }
+              className="h-10 rounded-lg border border-cyan/30 bg-cyan-dim px-4 font-mono text-[10px] font-semibold text-cyan disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              CREATE KEY
+            </button>
+          </div>
+
+          {!access?.eligible_for_api_key && (
+            <p className="mt-3 font-mono text-[10px] text-amber">
+              A positive verified useful-work credit balance is required.
+            </p>
+          )}
+
+          {newApiKey && (
+            <div className="mt-4 rounded-lg border border-amber/30 bg-amber/5 p-4">
+              <p className="font-mono text-[10px] font-semibold text-amber uppercase">
+                API key shown once
+              </p>
+              <p className="mt-2 break-all font-mono text-[11px] text-text-primary">
+                {newApiKey}
+              </p>
+              <button
+                type="button"
+                onClick={() => setNewApiKey(null)}
+                className="mt-3 h-8 rounded border border-border-bright px-3 font-mono text-[10px] text-text-secondary"
+              >
+                DISMISS
+              </button>
+            </div>
+          )}
+
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {(access?.keys ?? []).map((key) => (
+              <div key={key.key_id} className="rounded-lg border border-border bg-bg-elevated p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-[13px] font-medium text-text-primary">{key.name}</p>
+                    <p className="mt-1 font-mono text-[10px] text-text-dim">
+                      {key.key_prefix}...
+                    </p>
+                  </div>
+                  <span
+                    className={`font-mono text-[9px] font-semibold uppercase ${key.revoked_at ? 'text-red' : 'text-green'}`}
+                  >
+                    {key.revoked_at ? 'revoked' : 'active'}
+                  </span>
+                </div>
+                {!key.revoked_at && (
+                  <button
+                    type="button"
+                    onClick={() => void revokeApiKey(key.key_id)}
+                    disabled={keyAction}
+                    className="mt-4 h-8 rounded border border-red/30 px-3 font-mono text-[10px] text-red disabled:opacity-40"
+                  >
+                    REVOKE
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
         </section>
       </div>
     </div>

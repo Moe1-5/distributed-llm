@@ -8,8 +8,8 @@
 **Stage:** [ ] Scaffolding [x] MVP prototype [ ] Feature-complete [ ] Production
 
 ## Active Sprint
-**Sprint:** Sprint 25 runtime state validation is in progress on `feature/runtime-state-validation`; Sprint 26 credit-gated API access is queued behind it.
-**Goal:** Make route and generator readiness authoritative before adding contributor-only developer API access.
+**Sprint:** Sprint 25 runtime validation is implemented on `feature/runtime-state-validation`; Sprint 26 local credit-gated API access is implemented on `feature/credit-gated-api-access`.
+**Goal:** Validate both implementations through the physical relay before enabling credit or enforced API modes.
 
 ## Tech Stack
 React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Transformers/PyTorch, uv for backend dependencies, npm for frontend scripts.
@@ -37,3 +37,5 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 20 enforces tensor/metadata limits, bounded admission, cooperative deadlines, safe counters, and receipt accounting after successful output.
 - Sprint 21 selects revisioned healthy complete routes and has a real two-expert local failover pass; physical relay failure injection remains open.
 - Sprint 24 now binds device reports to executable SHA-256 and clean source commit; one final post-commit rebuild plus physical relay/failover/direct acceptance remain open.
+- Sprint 25 now gates generator readiness on RPC health and a tensor canary, reconciles dependent node deletion, caps local replicas, and serves deadline-bound cached monitoring snapshots.
+- Sprint 26 now keeps Electron chat free while verified credits unlock hashed local API keys, shared atomic reservations, signed capabilities, and OpenAI-compatible chat completions; hosted global spending remains future work.

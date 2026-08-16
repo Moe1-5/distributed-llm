@@ -214,6 +214,32 @@ export interface IncentivesStatus {
   withdrawals_enabled: false
 }
 
+export interface DeveloperApiKey {
+  key_id: string
+  name: string
+  key_prefix: string
+  created_at: number
+  revoked_at: number | null
+}
+
+export interface DeveloperAccessStatus {
+  mode: 'off' | 'shadow' | 'enforced'
+  application_public_key: string
+  verified_credits: number
+  spent_credits: number
+  reserved_credits: number
+  available_credits: number
+  eligible_for_api_key: boolean
+  free_electron_chat: true
+  developer_api_enabled: boolean
+  keys: DeveloperApiKey[]
+  pricing: {
+    version: number
+    price_scale: number
+    model_compute_weights: Record<string, number>
+  }
+}
+
 export interface GeneratorStatus {
   ready: boolean
   state: GeneratorState
@@ -675,6 +701,13 @@ export const api = {
   getNodes: () => get<{ nodes: NodeInfo[]; error?: string; warning?: string }>('/nodes'),
   getLocalNodes: () => get<{ nodes: NodeInfo[] }>('/nodes/local'),
   getIncentives: () => get<IncentivesStatus>('/incentives/accounting'),
+  getDeveloperAccess: () => get<DeveloperAccessStatus>('/developer/access'),
+  createDeveloperApiKey: (name: string) =>
+    post<DeveloperApiKey & { api_key: string }>('/developer/api-keys', { name }),
+  revokeDeveloperApiKey: (keyId: string) =>
+    del<{ status: string; key_id: string }>(
+      `/developer/api-keys/${encodeURIComponent(keyId)}`
+    ),
 
   // Models — validated list from server, used for dropdown
   getModels: () =>

@@ -17,12 +17,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import hivemind
 import torch
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from huggingface_hub import HfApi
 from huggingface_hub.errors import (
     GatedRepoError,
@@ -43,6 +45,7 @@ from client.sequential import RemoteSequential, shutdown_remote_expert_p2p
 from client.coverage import build_serving_plan, evaluate_candidate
 from client.generation import DistributedGenerator
 from incentives.runtime import get_useful_work_runtime
+from incentives.access import AccessError, get_api_access_manager
 from api.local_models import (
     LocalModelDeletionError,
     LocalModelValidationError,
@@ -846,42 +849,112 @@ class ChatRequest(BaseModel):
     @field_validator("max_new_tokens")
     @classmethod
     def max_tokens_valid(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None:
-            if not (1 <= v <= 2048):
-                raise ValueError("max_new_tokens must be between 1 and 2048")
+        if v is not None and not (1 <= v <= 2048):
+            raise ValueError("max_new_tokens must be between 1 and 2048")
         return v
 
     @field_validator("temperature")
     @classmethod
     def temperature_valid(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None:
-            if not (0.0 < v <= 2.0):
-                raise ValueError("temperature must be between 0 and 2")
+        if v is not None and not (0.0 < v <= 2.0):
+            raise ValueError("temperature must be between 0 and 2")
         return v
+
     @field_validator("top_p")
     @classmethod
     def top_p_valid(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None:
-            if not (0.0 < v <= 1.0):
-                raise ValueError("top_p must be between 0 and 1")
+        if v is not None and not (0.0 < v <= 1.0):
+            raise ValueError("top_p must be between 0 and 1")
         return v
 
     @field_validator("top_k")
     @classmethod
     def top_k_valid(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None:
-            if not (0 <= v <= 50000):
-                raise ValueError("top_k must be between 0 and 50000")
+        if v is not None and not (0 <= v <= 50000):
+            raise ValueError("top_k must be between 0 and 50000")
         return v
 
     @field_validator("repetition_penalty")
     @classmethod
     def repetition_penalty_valid(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None:
-            if not (0.1 <= v <= 5.0):
-                raise ValueError("repetition_penalty must be between 0.1 and 5")
+        if v is not None and not (0.1 <= v <= 5.0):
+            raise ValueError("repetition_penalty must be between 0.1 and 5")
         return v
 
+
+class ApiKeyCreateRequest(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def name_valid(cls, value: str) -> str:
+        value = value.strip()
+        if not value or len(value) > 80:
+            raise ValueError("name must contain 1 to 80 characters")
+        return value
+
+
+class OpenAIChatMessage(BaseModel):
+    role: str
+    content: str
+
+    @field_validator("role")
+    @classmethod
+    def role_valid(cls, value: str) -> str:
+        if value not in {"system", "user", "assistant"}:
+            raise ValueError("role must be system, user, or assistant")
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def content_valid(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content must not be empty")
+        return value
+
+
+class OpenAIChatCompletionRequest(BaseModel):
+    model: str
+    messages: list[OpenAIChatMessage]
+    max_tokens: int = 64
+    temperature: float = 0.7
+    top_p: float = 0.9
+    stream: bool = False
+
+    @field_validator("model")
+    @classmethod
+    def api_model_supported(cls, value: str) -> str:
+        if value not in SUPPORTED_MODELS:
+            raise ValueError(f"Unsupported model '{value}'")
+        return value
+
+    @field_validator("messages")
+    @classmethod
+    def messages_present(cls, value: list[OpenAIChatMessage]) -> list[OpenAIChatMessage]:
+        if not value:
+            raise ValueError("messages must not be empty")
+        return value
+
+    @field_validator("max_tokens")
+    @classmethod
+    def max_tokens_valid(cls, value: int) -> int:
+        if not 1 <= value <= 2048:
+            raise ValueError("max_tokens must be between 1 and 2048")
+        return value
+
+    @field_validator("temperature")
+    @classmethod
+    def temperature_valid(cls, value: float) -> float:
+        if not 0.0 < value <= 2.0:
+            raise ValueError("temperature must be greater than 0 and at most 2")
+        return value
+
+    @field_validator("top_p")
+    @classmethod
+    def top_p_valid(cls, value: float) -> float:
+        if not 0.0 < value <= 1.0:
+            raise ValueError("top_p must be greater than 0 and at most 1")
+        return value
 
 class NextTokenParityRequest(BaseModel):
     prompt: str
@@ -1491,6 +1564,111 @@ async def get_incentive_accounting() -> dict:
         "local_contribution": local_contributions[0] if local_contributions else None,
         "local_contributions": local_contributions,
     }
+
+
+def _raise_access_error(exc: AccessError) -> None:
+    status_code = 400
+    if exc.code == "invalid_api_key":
+        status_code = 401
+    elif exc.code == "insufficient_credits":
+        status_code = 402
+    elif exc.code in {"developer_api_disabled", "verified_credits_required"}:
+        status_code = 403
+    elif exc.code in {"duplicate_request", "capability_replayed"}:
+        status_code = 409
+    raise HTTPException(
+        status_code=status_code,
+        detail={"error": exc.code, "message": exc.message},
+    ) from exc
+
+
+async def _verified_credit_snapshot() -> dict:
+    runtime = get_useful_work_runtime()
+    if runtime.config.settlement_url and runtime.enabled:
+        await asyncio.to_thread(runtime.refresh_account)
+    return runtime.snapshot()
+
+
+def _require_local_management_origin(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if origin is None or origin in {"null", "file://"}:
+        return
+    parsed = urlparse(origin)
+    if parsed.scheme in {"http", "https"} and parsed.hostname in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "local_management_only",
+            "message": "Developer key management is restricted to the local desktop app.",
+        },
+    )
+
+
+@app.get("/developer/access")
+async def get_developer_access(request: Request) -> dict:
+    _require_local_management_origin(request)
+    manager = get_api_access_manager()
+    credits = await _verified_credit_snapshot()
+    keys = manager.store.list_keys(manager.identity.public_key)
+    usage = manager.store.owner_usage_summary(manager.identity.public_key)
+    verified_credits = int(credits.get("verified_credits", 0))
+    return {
+        "mode": manager.config.mode,
+        "application_public_key": manager.identity.public_key,
+        "verified_credits": verified_credits,
+        "spent_credits": usage["spent_units"],
+        "reserved_credits": usage["reserved_units"],
+        "available_credits": max(
+            0,
+            verified_credits - usage["spent_units"] - usage["reserved_units"],
+        ),
+        "eligible_for_api_key": verified_credits > 0,
+        "free_electron_chat": True,
+        "developer_api_enabled": manager.config.mode != "off",
+        "keys": keys,
+        "pricing": {
+            "version": 1,
+            "price_scale": manager.config.price_scale,
+            "model_compute_weights": {
+                model_id: max(1, int(model["hidden_size"]) // 768)
+                for model_id, model in SUPPORTED_MODELS.items()
+            },
+        },
+    }
+
+
+@app.post("/developer/api-keys")
+async def create_developer_api_key(req: ApiKeyCreateRequest, request: Request) -> dict:
+    _require_local_management_origin(request)
+    manager = get_api_access_manager()
+    if manager.config.mode == "off":
+        _raise_access_error(
+            AccessError("developer_api_disabled", "Developer API access is disabled.")
+        )
+    credits = await _verified_credit_snapshot()
+    try:
+        return manager.store.create_key(
+            manager.identity.public_key,
+            req.name,
+            verified_credits=int(credits.get("verified_credits", 0)),
+        )
+    except AccessError as exc:
+        _raise_access_error(exc)
+
+
+@app.delete("/developer/api-keys/{key_id}")
+async def revoke_developer_api_key(key_id: str, request: Request) -> dict:
+    _require_local_management_origin(request)
+    manager = get_api_access_manager()
+    revoked = manager.store.revoke_key(manager.identity.public_key, key_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return {"status": "revoked", "key_id": key_id}
 
 
 # ---------------------------------------------------------------------------
@@ -2566,6 +2744,240 @@ async def analyze_generator_traces(model_name: Optional[str] = None) -> dict:
     return _analyze_generation_traces(model_name=model_name)
 
 
+def _bearer_token(authorization: Optional[str]) -> str:
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise AccessError("invalid_api_key", "Authorization must use a Bearer API key.")
+    token = authorization[7:].strip()
+    if not token:
+        raise AccessError("invalid_api_key", "Bearer API key is empty.")
+    return token
+
+
+def _openai_prompt(
+    active_generator: DistributedGenerator,
+    messages: list[OpenAIChatMessage],
+) -> str:
+    documents = [message.model_dump() for message in messages]
+    tokenizer = getattr(active_generator, "tokenizer", None)
+    template = getattr(tokenizer, "apply_chat_template", None)
+    if callable(template):
+        try:
+            return str(
+                template(
+                    documents,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Tokenizer chat template failed; using role labels: %s", exc)
+    return "\n".join(
+        [*(f"{message.role}: {message.content}" for message in messages), "assistant:"]
+    )
+
+
+def _prompt_position_count(active_generator: DistributedGenerator, prompt: str) -> int:
+    tokenizer = getattr(active_generator, "tokenizer", None)
+    encoder = getattr(tokenizer, "encode", None)
+    if callable(encoder):
+        encoded = encoder(prompt, add_special_tokens=True)
+        return max(1, len(encoded))
+    return max(1, len(prompt.split()))
+
+
+def _authorize_free_chat(
+    active_generator: DistributedGenerator,
+    *,
+    prompt: str,
+    max_new_tokens: Optional[int],
+) -> None:
+    manager = get_api_access_manager()
+    request_id = f"electron-{uuid4()}"
+    positions = _prompt_position_count(active_generator, prompt) + int(max_new_tokens or 64)
+    capability = manager.issue_capability(
+        request_id=request_id,
+        key_id="electron-free-chat",
+        model_name=active_generator.model_name,
+        max_positions=positions,
+    )
+    manager.verify_and_consume_capability(
+        capability,
+        request_id=request_id,
+        model_name=active_generator.model_name,
+        positions=positions,
+    )
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(
+    req: OpenAIChatCompletionRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_request_id: Optional[str] = Header(default=None),
+):
+    active_generator = await _require_generator_ready()
+    if active_generator.model_name != req.model:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "model_not_loaded",
+                "message": (
+                    f"Generator has {active_generator.model_name}; start {req.model} first."
+                ),
+            },
+        )
+    manager = get_api_access_manager()
+    reservation: Optional[dict] = None
+    try:
+        key = manager.store.authenticate(_bearer_token(authorization))
+        credits = await _verified_credit_snapshot()
+        prompt = _openai_prompt(active_generator, req.messages)
+        prompt_positions = _prompt_position_count(active_generator, prompt)
+        max_positions = prompt_positions + req.max_tokens
+        reservation = manager.store.reserve(
+            key_id=key["key_id"],
+            model_name=req.model,
+            estimated_positions=max_positions,
+            verified_credits=int(credits.get("verified_credits", 0)),
+            mode=manager.config.mode,
+            price_scale=manager.config.price_scale,
+            request_id=x_request_id,
+        )
+        capability = manager.issue_capability(
+            request_id=reservation["request_id"],
+            key_id=key["key_id"],
+            model_name=req.model,
+            max_positions=max_positions,
+        )
+        manager.verify_and_consume_capability(
+            capability,
+            request_id=reservation["request_id"],
+            model_name=req.model,
+            positions=max_positions,
+        )
+    except AccessError as exc:
+        if reservation is not None:
+            manager.store.release(reservation["request_id"])
+        _raise_access_error(exc)
+
+    completion_id = f"chatcmpl-{reservation['request_id']}"
+    created_at = int(time.time())
+
+    if req.stream:
+        async def event_stream():
+            settled = False
+            try:
+                async for chunk in active_generator.generate_stream(
+                    prompt=prompt,
+                    max_new_tokens=req.max_tokens,
+                    temperature=req.temperature,
+                    top_p=req.top_p,
+                ):
+                    if "token" in chunk:
+                        event = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_at,
+                            "model": req.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": chunk["token"]},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                    elif "error" in chunk:
+                        manager.store.release(reservation["request_id"])
+                        settled = True
+                        yield f"data: {json.dumps({'error': chunk['error']})}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+                    elif chunk.get("done"):
+                        metrics = chunk.get("metrics") or {}
+                        if metrics.get("stopped"):
+                            manager.store.release(reservation["request_id"])
+                        else:
+                            manager.store.complete(
+                                reservation["request_id"],
+                                actual_positions=(
+                                    prompt_positions + int(metrics.get("generated_tokens", 0))
+                                ),
+                                price_scale=manager.config.price_scale,
+                            )
+                        settled = True
+                        event = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_at,
+                            "model": req.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop",
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                        yield "data: [DONE]\n\n"
+            finally:
+                if not settled:
+                    active_generator.request_stop()
+                    manager.store.release(reservation["request_id"])
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    response_text = ""
+    metrics: dict = {}
+    try:
+        async for chunk in active_generator.generate_stream(
+            prompt=prompt,
+            max_new_tokens=req.max_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+        ):
+            if "token" in chunk:
+                response_text += str(chunk["token"])
+            elif "error" in chunk:
+                raise RuntimeError(str(chunk["error"]))
+            elif chunk.get("done"):
+                metrics = dict(chunk.get("metrics") or {})
+        if metrics.get("stopped"):
+            raise RuntimeError("Generation was cancelled before completion.")
+        generated_tokens = int(metrics.get("generated_tokens", 0))
+        usage = manager.store.complete(
+            reservation["request_id"],
+            actual_positions=prompt_positions + generated_tokens,
+            price_scale=manager.config.price_scale,
+        )
+    except Exception as exc:
+        manager.store.release(reservation["request_id"])
+        logger.error("Developer API generation failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created_at,
+        "model": req.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": response_text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_positions,
+            "completion_tokens": generated_tokens,
+            "total_tokens": prompt_positions + generated_tokens,
+            "credit_units": usage["charged_units"],
+            "projected_credit_units": usage["projected_units"],
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
@@ -2573,6 +2985,14 @@ async def analyze_generator_traces(model_name: Optional[str] = None) -> dict:
 @app.post("/chat")
 async def chat(req: ChatRequest) -> dict:
     active_generator = await _require_generator_ready()
+    try:
+        _authorize_free_chat(
+            active_generator,
+            prompt=req.message,
+            max_new_tokens=req.max_new_tokens,
+        )
+    except AccessError as exc:
+        _raise_access_error(exc)
 
     full_response         = ""
     node_trace: list[str] = []
@@ -2664,6 +3084,17 @@ async def stream(websocket: WebSocket) -> None:
 
             generator_status = await get_generator_status()
             if generator_status["ready"] and generator is not None:
+                try:
+                    _authorize_free_chat(
+                        generator,
+                        prompt=message,
+                        max_new_tokens=max_new_tokens,
+                    )
+                except AccessError as exc:
+                    await websocket.send_json(
+                        {"error": exc.code, "message": exc.message}
+                    )
+                    continue
                 async for chunk in generator.generate_stream(
                     prompt=message,
                     max_new_tokens=max_new_tokens,

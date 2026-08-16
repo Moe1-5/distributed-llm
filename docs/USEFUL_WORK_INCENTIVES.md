@@ -36,6 +36,35 @@ Public endpoints are:
 - `GET /v1/accounts/{public_key}/entries`
 - `GET /v1/policy`
 
+## Developer API Access
+
+Electron chat remains free and uses the local `/chat` and `/stream` endpoints without an API key. Developer integrations use the separate OpenAI-compatible `POST /v1/chat/completions` endpoint. A positive verified useful-work balance is required to create a key. Keys use high-entropy `dllm_` tokens, are returned once, are stored only as BLAKE3 hashes, and can be revoked from the Incentives view.
+
+Access policy is independent from receipt rollout:
+
+- `off` disables the developer endpoint while preserving Electron chat.
+- `shadow` requires a valid key and records projected model-weighted usage without spending credits.
+- `enforced` atomically reserves the maximum request cost, charges completed positions, and releases failed, cancelled, or unused reservations.
+
+Pricing version one uses shared credits across every local key owned by the same application identity:
+
+`position_count * model_compute_weight * api_price_scale`
+
+The local API signs a short-lived Ed25519 inference capability for each accepted request and consumes its nonce before generation. Forged, expired, replayed, wrong-model, or oversized capabilities fail before execution. The bearer key terminates at the local API and is never sent to a serving worker.
+
+For example, after creating a key in the Incentives view and starting a ready generator:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer dllm_REPLACE_WITH_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"facebook/opt-125m","messages":[{"role":"user","content":"Hello"}],"max_tokens":16}'
+```
+
+The managed backend now binds to `127.0.0.1` by default so local key-management endpoints are not exposed to the LAN accidentally. Key-management requests also reject non-local browser origins. An explicit non-loopback bind requires a separately reviewed authentication and TLS deployment.
+
+The local spend ledger is phase one. A later hosted project gateway must perform globally atomic reservations across devices using the same API contract; local enforced mode must not be treated as a global multi-device payment system.
+
 ## VPS Rollout
 
 1. Install with `sudo deploy/vps/install-settlement-service.sh /opt/distribllm`.
