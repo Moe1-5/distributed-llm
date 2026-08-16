@@ -241,6 +241,12 @@ export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`
 }
 
+export function buildWslBashArgs(distroName: string, script: string): string[] {
+  const encodedScript = Buffer.from(script, 'utf8').toString('base64')
+  const decodeCommand = `printf '%s' ${shellQuote(encodedScript)} | base64 --decode | bash`
+  return ['--distribution', distroName, '--', 'bash', '-lc', decodeCommand]
+}
+
 export function validateBackendLauncherConfig(config: BackendLauncherConfig): string[] {
   const errors: string[] = []
   if (typeof config.distroName !== 'string' || !DISTRO_PATTERN.test(config.distroName)) {
@@ -316,6 +322,14 @@ function launcherEnvironment(config: BackendLauncherConfig): Record<string, stri
   }
 }
 
+const WSL_RUNTIME_DIR_SCRIPT = [
+  ': "${HOME:?HOME is required}"',
+  'export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"',
+  'export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"',
+  'export UV_CACHE_DIR="${UV_CACHE_DIR:-$XDG_CACHE_HOME/uv}"',
+  'mkdir -p "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$UV_CACHE_DIR"'
+]
+
 export function buildBackendLaunchScript(config: BackendLauncherConfig): string {
   const environment = Object.entries(launcherEnvironment(config))
     .map(([key, value]) => `${key}=${shellQuote(value)}`)
@@ -324,7 +338,8 @@ export function buildBackendLaunchScript(config: BackendLauncherConfig): string 
 
   return [
     'set -eu',
-    'state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/distribllm"',
+    ...WSL_RUNTIME_DIR_SCRIPT,
+    'state_dir="$XDG_STATE_HOME/distribllm"',
     'mkdir -p "$state_dir"',
     'pid_file="$state_dir/backend.pid"',
     `cd -- ${backendPath}`,
@@ -342,6 +357,7 @@ export function buildBackendLaunchScript(config: BackendLauncherConfig): string 
 export function buildDependencySyncScript(config: BackendLauncherConfig): string {
   return [
     'set -eu',
+    ...WSL_RUNTIME_DIR_SCRIPT,
     'command -v uv >/dev/null 2>&1 || { echo "uv is not installed" >&2; exit 127; }',
     `cd -- ${shellQuote(config.backendPath)}`,
     'test -f pyproject.toml || { echo "pyproject.toml is missing" >&2; exit 2; }',
@@ -352,7 +368,8 @@ export function buildDependencySyncScript(config: BackendLauncherConfig): string
 export function buildBackendStopScript(): string {
   return [
     'set -eu',
-    'pid_file="${XDG_STATE_HOME:-$HOME/.local/state}/distribllm/backend.pid"',
+    ...WSL_RUNTIME_DIR_SCRIPT,
+    'pid_file="$XDG_STATE_HOME/distribllm/backend.pid"',
     'test -f "$pid_file" || exit 0',
     'backend_pid="$(cat "$pid_file")"',
     'case "$backend_pid" in (*[!0-9]*|"") rm -f "$pid_file"; exit 1;; esac',
@@ -373,6 +390,12 @@ function diagnosticFromOutput(output: string): { code: string; message: string }
   }
   if (normalized.includes('uv is not installed') || normalized.includes('uv: command not found')) {
     return { code: 'uv_missing', message: 'uv is not installed in the selected WSL distro.' }
+  }
+  if (
+    normalized.includes('mkdir: cannot create directory') &&
+    normalized.includes('no such file or directory')
+  ) {
+    return { code: 'runtime_directory_invalid', message: 'The WSL runtime directory configuration is invalid.' }
   }
   if (normalized.includes('pyproject.toml is missing') || normalized.includes('no such file')) {
     return { code: 'backend_path_invalid', message: 'Backend files were not found at the configured path.' }
@@ -533,14 +556,10 @@ export class WslBackendLauncher extends EventEmitter {
       this.evidence.dependencySyncRequested = true
       this.update('installing_backend', 'Synchronizing backend dependencies.')
       try {
-        await this.runtime.run('wsl.exe', [
-          '--distribution',
-          this.config.distroName,
-          '--',
-          'bash',
-          '-lc',
-          buildDependencySyncScript(this.config)
-        ])
+        await this.runtime.run(
+          'wsl.exe',
+          buildWslBashArgs(this.config.distroName, buildDependencySyncScript(this.config))
+        )
         this.evidence.dependencySyncCompleted = true
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
@@ -560,14 +579,10 @@ export class WslBackendLauncher extends EventEmitter {
 
     this.stderr = ''
     this.update('starting_backend', 'Starting the managed backend.')
-    this.child = this.runtime.spawn('wsl.exe', [
-      '--distribution',
-      this.config.distroName,
-      '--',
-      'bash',
-      '-lc',
-      buildBackendLaunchScript(this.config)
-    ])
+    this.child = this.runtime.spawn(
+      'wsl.exe',
+      buildWslBashArgs(this.config.distroName, buildBackendLaunchScript(this.config))
+    )
     this.child.stderr?.on('data', (chunk) => {
       this.stderr = `${this.stderr}${String(chunk)}`.slice(-8000)
     })
@@ -613,14 +628,10 @@ export class WslBackendLauncher extends EventEmitter {
 
     this.update('stopping', 'Stopping the managed backend.')
     try {
-      await this.runtime.run('wsl.exe', [
-        '--distribution',
-        this.config.distroName,
-        '--',
-        'bash',
-        '-lc',
-        buildBackendStopScript()
-      ])
+      await this.runtime.run(
+        'wsl.exe',
+        buildWslBashArgs(this.config.distroName, buildBackendStopScript())
+      )
     } catch (error) {
       this.child?.kill('SIGTERM')
       const detail = error instanceof Error ? error.message : String(error)

@@ -101,3 +101,15 @@ This preserves the current working backend environment while giving testers a Wi
 - What changed: added sanitized launcher transition and lifecycle evidence, a versioned report contract, Electron save-dialog IPC, a Settings export action, configuration-change invalidation, acceptance-report regressions, and a clean-Windows capture runbook.
 - Why: clean-machine testing needs reviewable evidence that the packaged Windows app itself checked WSL 2, synchronized the isolated environment, reached backend health, and stopped cleanly without exposing backend paths, raw logs, relay addresses, tokens, identities, or receipts.
 - Status: seventeen launcher tests, frontend node and renderer type checks, lint with zero errors, the production Electron build, portable Windows cross-build, and package audit pass. The rebuilt portable artifact is 87,652,120 bytes with SHA-256 `2f88a3169110820edb3f4af57394aabd045fd5307b25e7a1c5a4f7b280dd5328`; its ASAR has 34 entries and zero forbidden entries. A physical clean-Windows report and two-device packaged inference remain open, so Sprint 15 is not closed.
+
+### 2026-08-14 - Guard WSL runtime directories during managed launch
+
+- What changed: made the Electron WSL launcher initialize safe `XDG_CACHE_HOME`, `XDG_STATE_HOME`, and `UV_CACHE_DIR` defaults before dependency sync, backend start, and backend stop scripts; added launcher regressions for the sync/start/stop scripts.
+- Why: a Windows packaged run proved the configured backend path existed, but dependency sync still failed with `mkdir: cannot create directory '': No such file or directory`, indicating an empty WSL runtime/cache directory environment rather than missing backend files.
+- Status: launcher tests pass with 19 tests, and the Electron main-process TypeScript check passes. The existing opened executable still needs either the manual workaround or a rebuilt package to include this fix.
+
+### 2026-08-14 - Preserve managed scripts across the Windows-to-WSL boundary
+
+- What changed: encoded managed sync, start, and stop scripts before passing them through `wsl.exe`, decoded them inside WSL, prevented Node's echoed command text from overriding real stderr diagnostics, recognized smart-quoted runtime-directory failures, and added a final-argument round-trip regression.
+- Why: the rebuilt Windows package showed the multiline Bash argument flattened at the process boundary. It then reported `uv` missing because the diagnostic parser matched wording embedded in the echoed command instead of the repeated empty-directory errors in stderr.
+- Status: all 20 launcher tests, Electron node and renderer type checks, and the production build pass. The rebuilt portable package audit reports 36 ASAR entries and zero forbidden entries. `DistribLLM-1.0.0-portable.exe` is 87,655,591 bytes with SHA-256 `cbff4e06e697833456cfb66126e115ca45b6ec3761e766ffbeec1862970c1f80`; physical Windows startup must now be retried with this artifact.

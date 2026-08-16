@@ -59,7 +59,7 @@ function runFile(file: string, args: string[]): Promise<{ stdout: string; stderr
   return new Promise((resolve, reject) => {
     execFile(file, args, { windowsHide: true, encoding: 'utf8' }, (error, stdout, stderr) => {
       if (error) {
-        reject(new Error(`${error.message}\n${stderr}`.trim()))
+        reject(new Error(stderr.trim() || error.message))
         return
       }
       resolve({ stdout, stderr })

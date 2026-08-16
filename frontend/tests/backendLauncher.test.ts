@@ -12,6 +12,9 @@ import {
   WslBackendLauncher,
   buildWindowsAcceptanceReport,
   buildBackendLaunchScript,
+  buildDependencySyncScript,
+  buildBackendStopScript,
+  buildWslBashArgs,
   parseWslDistroInfo,
   parseWslDistros,
   validateBackendLauncherConfig,
@@ -64,6 +67,13 @@ function validConfig(overrides: Partial<BackendLauncherConfig> = {}): BackendLau
     trustedRelays: ['/ip4/203.0.113.10/tcp/7001/p2p/QmRelay'],
     ...overrides
   }
+}
+
+function decodeWslScript(args: string[]): string {
+  const command = args.at(-1) ?? ''
+  const encoded = command.match(/printf '%s' '([A-Za-z0-9+/=]+)' \| base64 --decode \| bash/)?.[1]
+  assert.ok(encoded, 'expected an encoded WSL script command')
+  return Buffer.from(encoded, 'base64').toString('utf8')
 }
 
 function fakeRuntime(
@@ -189,10 +199,34 @@ test('quotes backend paths and passes relay configuration through env', () => {
     validConfig({ backendPath: "/home/test/distrib'llm/backend", relayWaitTimeoutSeconds: 120 })
   )
 
+  assert.match(script, /export XDG_CACHE_HOME="\$\{XDG_CACHE_HOME:-\$HOME\/\.cache\}"/)
+  assert.match(script, /export UV_CACHE_DIR="\$\{UV_CACHE_DIR:-\$XDG_CACHE_HOME\/uv\}"/)
+  assert.match(script, /mkdir -p "\$XDG_CACHE_HOME" "\$XDG_STATE_HOME" "\$UV_CACHE_DIR"/)
   assert.match(script, /cd -- '\/home\/test\/distrib'"'"'llm\/backend'/)
   assert.match(script, /DISTRIBLLM_NETWORK_MODE='auto'/)
   assert.match(script, /DISTRIBLLM_RELAY_WAIT_TIMEOUT='120'/)
   assert.match(script, /backend\.pid/)
+})
+
+test('sync and stop scripts guard WSL runtime directories before using uv or pid files', () => {
+  const syncScript = buildDependencySyncScript(validConfig())
+  const stopScript = buildBackendStopScript()
+
+  assert.match(syncScript, /export XDG_CACHE_HOME="\$\{XDG_CACHE_HOME:-\$HOME\/\.cache\}"/)
+  assert.match(syncScript, /export UV_CACHE_DIR="\$\{UV_CACHE_DIR:-\$XDG_CACHE_HOME\/uv\}"/)
+  assert.match(syncScript, /mkdir -p "\$XDG_CACHE_HOME" "\$XDG_STATE_HOME" "\$UV_CACHE_DIR"/)
+  assert.match(syncScript, /uv sync --python 3\.12/)
+  assert.match(stopScript, /export XDG_STATE_HOME="\$\{XDG_STATE_HOME:-\$HOME\/\.local\/state\}"/)
+  assert.match(stopScript, /pid_file="\$XDG_STATE_HOME\/distribllm\/backend\.pid"/)
+})
+
+test('transports multiline WSL scripts without relying on Windows preserving newlines', () => {
+  const script = 'set -eu\nexport EXAMPLE="one two"\nprintf "%s\\n" "$EXAMPLE"'
+  const args = buildWslBashArgs('Ubuntu', script)
+
+  assert.deepEqual(args.slice(0, 5), ['--distribution', 'Ubuntu', '--', 'bash', '-lc'])
+  assert.equal(decodeWslScript(args), script)
+  assert.doesNotMatch(args.at(-1) ?? '', /set -eu|export EXAMPLE/)
 })
 
 test('reports missing WSL without attempting a launch', async () => {
@@ -258,7 +292,7 @@ test('reaches ready after WSL checks, process launch, and health success', async
   assert.deepEqual(states, ['checking', 'starting_backend', 'ready'])
   const launch = runtime.calls.find(([, args]) => args.includes('bash') && args.includes('-lc'))
   assert.ok(launch)
-  assert.match(launch[1].at(-1) ?? '', /uv run --python 3\.12 python main\.py/)
+  assert.match(decodeWslScript(launch[1]), /uv run --python 3\.12 python main\.py/)
 })
 
 test('rejects an occupied backend port before starting a managed process', async () => {
@@ -281,7 +315,11 @@ test('stops the WSL PID and releases the launcher child', async () => {
 
   assert.equal(status.state, 'idle')
   assert.equal(runtime.child.killedWith, 'SIGTERM')
-  assert.ok(runtime.calls.some(([, args]) => (args.at(-1) ?? '').includes('kill -TERM')))
+  assert.ok(
+    runtime.calls.some(
+      ([, args]) => args.includes('-lc') && decodeWslScript(args).includes('kill -TERM')
+    )
+  )
 })
 
 test('does not restart after managed shutdown fails', async () => {
@@ -292,7 +330,9 @@ test('does not restart after managed shutdown fails', async () => {
       if (args.includes('--list')) {
         return { stdout: '  NAME      STATE           VERSION\n* Ubuntu    Running         2\n', stderr: '' }
       }
-      if ((args.at(-1) ?? '').includes('kill -TERM')) throw new Error('WSL stopped responding')
+      if (args.includes('-lc') && decodeWslScript(args).includes('kill -TERM')) {
+        throw new Error('WSL stopped responding')
+      }
       return { stdout: '', stderr: '' }
     }
   })
