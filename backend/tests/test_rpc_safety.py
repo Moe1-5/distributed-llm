@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import multiprocessing as mp
 import tempfile
 import struct
@@ -27,7 +28,12 @@ from node.rpc_safety import (
     RPCSafetyController,
     RPCSafetyError,
 )
-from node.rpc_server import _HandlerModule, _ReceiptHandlerModule, _install_rejecting_pools
+from node.rpc_server import (
+    _HandlerModule,
+    _ReceiptHandlerModule,
+    _install_rejecting_pools,
+    _new_rpc_task_future,
+)
 from incentives.identity import load_application_identity
 from incentives.protocol import ProtocolError, encode_metadata_tensor
 from incentives.receipts import create_inference_request
@@ -166,6 +172,25 @@ class RPCSafetyValidationTests(unittest.TestCase):
 
 
 class RPCSafetyAdmissionTests(unittest.TestCase):
+    def test_rpc_task_future_requires_an_active_event_loop(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "event_loop_unavailable"):
+            _new_rpc_task_future("test-pool")
+
+    def test_rpc_task_future_repairs_an_unbound_hivemind_future(self) -> None:
+        class UnboundFuture:
+            _loop = None
+            _aio_event = None
+
+        async def create_future():
+            running_loop = asyncio.get_running_loop()
+            with patch("node.rpc_server.MPFuture", UnboundFuture):
+                future = _new_rpc_task_future("test-pool")
+            return future, running_loop
+
+        future, running_loop = asyncio.run(create_future())
+        self.assertIs(future._loop, running_loop)
+        self.assertIsNotNone(future._aio_event)
+
     def test_hivemind_task_pool_rejects_full_queue_without_blocking(self) -> None:
         controller = RPCSafetyController(config(), hidden_size=8)
         descriptor = BatchTensorDescriptor(8)
@@ -179,8 +204,14 @@ class RPCSafetyAdmissionTests(unittest.TestCase):
             pool_size=1,
         )
         _install_rejecting_pools(backend, controller)
-        first = backend.forward_pool.submit_task(torch.zeros((1, 8)))
-        second = backend.forward_pool.submit_task(torch.zeros((1, 8)))
+
+        async def submit_tasks():
+            return (
+                backend.forward_pool.submit_task(torch.zeros((1, 8))),
+                backend.forward_pool.submit_task(torch.zeros((1, 8))),
+            )
+
+        first, second = asyncio.run(submit_tasks())
         try:
             with self.assertRaisesRegex(RPCOverloadedError, "queue capacity"):
                 second.result(timeout=1)

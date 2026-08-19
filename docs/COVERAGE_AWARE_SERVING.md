@@ -44,7 +44,7 @@ When a revision is provided, the backend rediscovers active providers immediatel
 
 When a custom range covers no missing layers, does not complete a route, and route gaps remain, the backend returns HTTP 409 with `redundancy_confirmation_required`. Intentional replicas are accepted only after a second request sets `confirm_redundancy` to true.
 
-Local ranges that partially overlap another local process remain rejected because one backend should not load intersecting slices of the same model accidentally. Exact local replicas retain the existing supported behavior.
+Local ranges that partially overlap another local process remain rejected because one backend should not load intersecting slices of the same model accidentally. Exact local replicas retain the existing supported behavior. Every additional identical local replica requires explicit confirmation because it duplicates local model memory, including when an existing replica is turned off but retains its loaded layers. There is no arbitrary replica-count cap after confirmation; actual CPU, RAM, GPU, VRAM, and RPC-safety limits remain authoritative.
 
 ## Desktop Workflow
 

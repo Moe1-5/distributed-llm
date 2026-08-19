@@ -7,6 +7,7 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
 const WS_URL = import.meta.env.VITE_WS_BASE_URL ?? BASE_URL.replace(/^http/, 'ws')
 const REQUEST_TIMEOUT_MS = 8_000
 const FAST_REQUEST_TIMEOUT_MS = 1_500
+const STATUS_REQUEST_TIMEOUT_MS = 5_000
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,6 +28,15 @@ export interface NodeInfo {
   connection_mode?: 'checking' | 'direct' | 'relay'
   direct_reachability?: boolean | null
   transport_verified?: boolean
+  announcement?: {
+    thread_alive: boolean
+    last_attempt_at: number | null
+    last_success_at: number | null
+    success_age_seconds: number | null
+    last_error: string | null
+    consecutive_failures: number
+    fresh: boolean
+  }
   loading?: {
     strategy: string
     architecture: string
@@ -200,10 +210,18 @@ export interface IncentivesStatus {
   application_public_key: string | null
   p2p_peer_id: string | null
   settlement_url_configured: boolean
-  settlement_connectivity: 'disabled' | 'unconfigured' | 'idle' | 'connected' | 'error'
+  settlement_connectivity:
+    | 'disabled'
+    | 'unconfigured'
+    | 'idle'
+    | 'connected'
+    | 'retrying'
+    | 'error'
   pending_submissions: number
   accepted_submissions: number
   rejected_submissions: number
+  submission_retry_attempts: number
+  submission_max_attempts: number
   last_error: string | null
   verified_credits: number
   ledger_entries: number
@@ -299,6 +317,14 @@ export interface ProviderHealthStatus {
   health_revision: string
   detection_window_seconds?: number
   active_probes?: number
+  active_probe_details?: Array<{
+    peer_id: string
+    rpc_uid: string
+    age_seconds: number
+    thread_alive: boolean
+    timeout_recorded: boolean
+    offline_recorded: boolean
+  }>
   last_discovery_error?: string | null
   reasons: string[]
   warnings?: string[]
@@ -696,7 +722,7 @@ async function del<T>(path: string): Promise<T> {
 
 export const api = {
   // Status
-  getStatus: () => get<NetworkStatus>('/status', FAST_REQUEST_TIMEOUT_MS),
+  getStatus: () => get<NetworkStatus>('/status', STATUS_REQUEST_TIMEOUT_MS),
   getStats: () => get<Stats>('/stats', FAST_REQUEST_TIMEOUT_MS),
   getNodes: () => get<{ nodes: NodeInfo[]; error?: string; warning?: string }>('/nodes'),
   getLocalNodes: () => get<{ nodes: NodeInfo[] }>('/nodes/local'),

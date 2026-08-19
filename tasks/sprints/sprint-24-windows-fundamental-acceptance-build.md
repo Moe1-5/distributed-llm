@@ -94,3 +94,9 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 - Verification: the package audit reports 36 ASAR entries and zero forbidden entries. Direct ASAR inspection confirms the exact runtime commit, clean-source flag, and report schema version two are embedded.
 - Artifact: 87,653,718 bytes with SHA-256 `0c1d84e6566e9ff43a8cd057feb7aa2fb1ceb8d2c77301f7c27caaabd0e38dbe`.
 - Status: this is the sole current executable for physical acceptance. Both devices must export passing schema-two reports with this hash before Sprint 24 can close.
+
+### 2026-08-16 - Document live deployment and packaging commands
+
+- What changed: added `docs/DEPLOYMENT_AND_LIVE_TESTING.md` and routed it through the root and docs indexes.
+- Why: executable rebuilds, WSL backend updates, VPS bootstrap launch, relay probes, and future backend-bundled packaging needed one operator-facing checklist instead of scattered chat instructions.
+- Status: documentation is ready; a new executable should be rebuilt only for latest Electron/UI/launcher behavior or final acceptance, while backend-only fixes still require updating and restarting the external WSL backend checkout.

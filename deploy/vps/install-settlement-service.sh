@@ -12,23 +12,43 @@ if [[ ! -f "$repo_root/backend/pyproject.toml" ]] || [[ ! -d "$repo_root/.git" ]
   echo "Repository checkout is invalid: $repo_root" >&2
   exit 66
 fi
+if [[ "$repo_root" == *$'\n'* ]] || [[ "$repo_root" == *'@'* ]]; then
+  echo "Repository path contains unsupported characters." >&2
+  exit 64
+fi
 
 uv_bin="${UV_BIN:-$(command -v uv || true)}"
 if [[ -z "$uv_bin" ]]; then
   echo "uv is required before installing the service." >&2
   exit 69
 fi
+if [[ ! -x "$uv_bin" ]]; then
+  echo "uv is not executable: $uv_bin" >&2
+  exit 69
+fi
 
 id -u distribllm >/dev/null 2>&1 || \
   useradd --system --home-dir /var/lib/distribllm --shell /usr/sbin/nologin distribllm
 install -d -m 0750 -o distribllm -g distribllm /var/lib/distribllm
+install -d -m 0750 -o distribllm -g distribllm /var/lib/distribllm/.cache
+install -d -m 0750 -o distribllm -g distribllm /var/lib/distribllm/uv-cache
+install -d -m 0750 -o distribllm -g distribllm /var/lib/distribllm/uv-python
 install -d -m 0750 -o root -g distribllm /etc/distribllm
+install -d -m 0755 -o root -g root /usr/local/libexec/distribllm
+install -m 0755 -o root -g root "$uv_bin" /usr/local/libexec/distribllm/uv
 if [[ ! -f /etc/distribllm/settlement.env ]]; then
   install -m 0640 -o root -g distribllm \
     "$repo_root/deploy/vps/settlement.env.example" /etc/distribllm/settlement.env
 fi
 
-"$uv_bin" sync --frozen --python 3.12 --project "$repo_root/backend"
+runuser -u distribllm -- env \
+  HOME=/var/lib/distribllm \
+  XDG_CACHE_HOME=/var/lib/distribllm/.cache \
+  UV_CACHE_DIR=/var/lib/distribllm/uv-cache \
+  UV_PYTHON_INSTALL_DIR=/var/lib/distribllm/uv-python \
+  UV_PROJECT_ENVIRONMENT=/var/lib/distribllm/settlement-venv \
+  /usr/local/libexec/distribllm/uv \
+  sync --frozen --python 3.12 --project "$repo_root/backend"
 chmod 0755 "$repo_root/deploy/vps/run-settlement.sh"
 
 unit_tmp="$(mktemp)"

@@ -1,6 +1,7 @@
 {
   "name": "frontend",
   "version": "1.0.0",
+  "packageManager": "bun@1.3.10",
   "description": "DistribLLM Windows desktop client with a managed WSL backend",
   "main": "./out/main/index.js",
   "author": "DistribLLM Project",

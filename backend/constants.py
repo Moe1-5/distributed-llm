@@ -310,5 +310,16 @@ DEFAULT_GEN_CONFIG: dict = {
 }
 
 DHT_PREFIX        = "distribllm"
-DHT_EXPIRY_TIME   = 60
-ANNOUNCE_INTERVAL = 30
+DHT_EXPIRY_TIME   = float(os.getenv("DISTRIBLLM_DHT_EXPIRY_SECONDS", "90"))
+ANNOUNCE_INTERVAL = float(os.getenv("DISTRIBLLM_ANNOUNCE_INTERVAL_SECONDS", "20"))
+DHT_OPERATION_TIMEOUT = float(os.getenv("DISTRIBLLM_DHT_OPERATION_TIMEOUT", "10"))
+
+if min(DHT_EXPIRY_TIME, ANNOUNCE_INTERVAL, DHT_OPERATION_TIMEOUT) <= 0:
+    raise ValueError(
+        "DHT expiry, announce interval, and operation timeout must be positive"
+    )
+if DHT_EXPIRY_TIME <= ANNOUNCE_INTERVAL + DHT_OPERATION_TIMEOUT:
+    raise ValueError(
+        "DISTRIBLLM_DHT_EXPIRY_SECONDS must exceed the announce interval plus "
+        "the DHT operation timeout"
+    )

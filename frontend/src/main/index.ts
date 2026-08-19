@@ -82,7 +82,7 @@ function createBackendRuntime(): BackendLauncherRuntime {
       }) as LauncherChild,
     health: async (url) => {
       try {
-        const response = await fetch(url, { signal: AbortSignal.timeout(1500) })
+        const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
         return response.ok
       } catch {
         return false

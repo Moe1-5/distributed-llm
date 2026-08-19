@@ -16,6 +16,7 @@ import type {
   HuggingFaceConnection,
   HuggingFaceDeviceFlow,
   HuggingFaceDownloadJob,
+  GeneratorStatus,
   LifecycleJob,
   LocalModelImport,
   ModelInfo,
@@ -177,6 +178,8 @@ export default function Network(): React.JSX.Element {
   const [genProgress, setGenProgress] = useState('starting')
   const [genJobId, setGenJobId] = useState<string | null>(null)
   const [genReady, setGenReady] = useState(false)
+  const [generatorStatus, setGeneratorStatus] = useState<GeneratorStatus | null>(null)
+  const lastGeneratorDiagnosticRef = useRef<string | null>(null)
   const servingPlanPromiseRef = useRef<Promise<ServingPlan | null> | null>(null)
   const inferencePlanPromiseRef = useRef<Promise<void> | null>(null)
   const generatorStatusPromiseRef = useRef<Promise<void> | null>(null)
@@ -200,10 +203,48 @@ export default function Network(): React.JSX.Element {
       const request = api
         .getGeneratorStatus()
         .then((status) => {
-          if (active) setGenReady(status.ready)
+          if (active) {
+            const diagnostic = JSON.stringify({
+              state: status.state,
+              ready: status.ready,
+              routeReady: status.route_ready,
+              healthRevision: status.health?.health_revision ?? null,
+              reasons: status.reasons
+            })
+            if (
+              lastGeneratorDiagnosticRef.current !== null &&
+              lastGeneratorDiagnosticRef.current !== diagnostic
+            ) {
+              const health = status.health
+              const context = [
+                `state=${status.state}`,
+                `route=${status.route_ready ? 'ready' : 'unavailable'}`,
+                health?.health_revision ? `health=${health.health_revision}` : null,
+                health?.active_probes !== undefined
+                  ? `active_probes=${health.active_probes}`
+                  : null,
+                health?.last_discovery_error
+                  ? `discovery_error=${health.last_discovery_error}`
+                  : null,
+                status.reasons.length ? `reason=${status.reasons.join('; ')}` : null
+              ]
+                .filter(Boolean)
+                .join(' | ')
+              log(
+                `Generator runtime changed: ${context}`,
+                status.ready ? 'success' : status.state === 'suspended' ? 'error' : 'info'
+              )
+            }
+            lastGeneratorDiagnosticRef.current = diagnostic
+            setGenReady(status.ready)
+            setGeneratorStatus(status)
+          }
         })
         .catch(() => {
-          if (active) setGenReady(false)
+          if (active) {
+            setGenReady(false)
+            setGeneratorStatus(null)
+          }
         })
         .finally(() => {
           if (generatorStatusPromiseRef.current === request) {
@@ -219,7 +260,7 @@ export default function Network(): React.JSX.Element {
       active = false
       window.clearInterval(interval)
     }
-  }, [])
+  }, [log])
 
   // ---------------------------------------------------------------------------
   // Load models + status on mount
@@ -745,8 +786,8 @@ export default function Network(): React.JSX.Element {
       let res = startResultFromJob(completed)
 
       if (res.status === 'error' && res.error === 'local_replica_confirmation_required') {
-        if (!window.confirm(res.message ?? 'Start a second identical local replica?')) {
-          log('Second local replica was not started.', 'info')
+        if (!window.confirm(res.message ?? 'Start an additional identical local replica?')) {
+          log('Additional local replica was not started.', 'info')
           return
         }
         const confirmedJob = await api.startNodeAsync({
@@ -907,6 +948,7 @@ export default function Network(): React.JSX.Element {
       } else {
         const status = await api.getGeneratorStatus()
         setGenReady(status.ready)
+        setGeneratorStatus(status)
         if (status.ready) {
           log('Generator route and tensor canary are ready — go to Inference page', 'success')
         } else {
@@ -934,7 +976,7 @@ export default function Network(): React.JSX.Element {
   }, [genJobId, log])
 
   const handleStopGenerator = useCallback(async () => {
-    if (!genReady || genLoading) return
+    if (!generatorStatus?.components_loaded || genLoading) return
 
     log('Stopping generator...')
     setGenLoading(true)
@@ -947,12 +989,13 @@ export default function Network(): React.JSX.Element {
         log(`Generator status: ${res.status}`, 'info')
       }
       setGenReady(false)
+      setGeneratorStatus(null)
     } catch (err) {
       log(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error')
     } finally {
       setGenLoading(false)
     }
-  }, [genLoading, genReady, log])
+  }, [genLoading, generatorStatus?.components_loaded, log])
 
   // ---------------------------------------------------------------------------
   // Shared input styles
@@ -1428,7 +1471,7 @@ export default function Network(): React.JSX.Element {
                       setInferModel(e.target.value)
                       setInferencePlan(null)
                     }}
-                    disabled={genLoading || genReady}
+                    disabled={genLoading || Boolean(generatorStatus?.components_loaded)}
                     className={inputCls}
                   >
                     {models.map((m) => (
@@ -1514,6 +1557,33 @@ export default function Network(): React.JSX.Element {
                     `}
                   >
                     {genLoading ? 'STOPPING...' : 'STOP GENERATOR'}
+                  </button>
+                </div>
+              ) : generatorStatus?.components_loaded ? (
+                <div className="flex flex-col gap-3 rounded-lg border border-amber/30 bg-amber/10 px-4 py-3">
+                  <div>
+                    <p className="font-mono text-[12px] text-amber">
+                      Generator {generatorStatus.state}
+                    </p>
+                    <p className="mt-1 text-[11px] leading-relaxed text-text-secondary">
+                      {generatorStatus.reasons.join('; ') || 'The current route is not usable.'}
+                    </p>
+                    {generatorStatus.health && (
+                      <p className="mt-2 font-mono text-[10px] leading-relaxed text-text-dim">
+                        Health {generatorStatus.health.health_revision}
+                        {' · '}active probes {generatorStatus.health.active_probes ?? 0}
+                        {generatorStatus.health.last_discovery_error
+                          ? ` · discovery ${generatorStatus.health.last_discovery_error}`
+                          : ''}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => void handleStopGenerator()}
+                    disabled={genLoading}
+                    className="w-full rounded-lg border border-red/30 bg-red/10 py-2.5 font-mono text-[11px] font-semibold text-red hover:bg-red/20 disabled:opacity-50"
+                  >
+                    {genLoading ? 'UNLOADING...' : 'UNLOAD GENERATOR'}
                   </button>
                 </div>
               ) : (

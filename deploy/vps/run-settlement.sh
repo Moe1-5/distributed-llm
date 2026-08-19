@@ -33,12 +33,13 @@ if [[ ! "$DISTRIBLLM_RECEIPT_TIMESTAMP_WINDOW" =~ ^[0-9]+$ ]] ||
   echo "Receipt timestamp window must be an integer of at least 30 seconds" >&2
   exit 64
 fi
-if [[ ! -x .venv/bin/uvicorn ]]; then
+settlement_venv=/var/lib/distribllm/settlement-venv
+if [[ ! -x "$settlement_venv/bin/uvicorn" ]]; then
   echo "Locked backend environment is missing; run the service installer first" >&2
   exit 69
 fi
 
-exec .venv/bin/uvicorn incentives.settlement:create_default_settlement_app \
+exec "$settlement_venv/bin/uvicorn" incentives.settlement:create_default_settlement_app \
   --factory \
   --host "$DISTRIBLLM_SETTLEMENT_HOST" \
   --port "$DISTRIBLLM_SETTLEMENT_PORT" \

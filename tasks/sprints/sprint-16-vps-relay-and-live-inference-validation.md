@@ -142,3 +142,27 @@ The participant now selects the configured trusted relay statically and requests
 - What changed: made VPS restart validation emit machine-readable JSON only after relay flags and identity-file continuity pass; added relay-probe timestamps and SHA-256 binding to that exact VPS report; added a private cross-sprint manifest that checks two packaged Windows lifecycles, VPS restart, relay reservation, relay inference, direct inference, application/runtime versions, participant labels, routes, and shadow incentives as one compatible set.
 - Why: independent passing files could previously be mixed across app versions, VPS restarts, or participant runs, and the VPS validator emitted its JSON before its final shell checks. Final acceptance needs one internally consistent evidence set without treating automation as proof of separate physical machines or reviewer approval.
 - Status: the full backend suite passes 184 tests plus 22 subtests; Python compilation, deployment-script syntax, rendered systemd unit validation, CLI loading, and diff checks also pass. Live VPS restart, bound external probe, two-device relay/direct inference, visual monitoring review, physical-device attestation, and explicit sprint closure approval remain open; no live acceptance checkbox changed.
+
+### 2026-08-13 - Document manual VPS bootstrap launch
+
+- What changed: expanded the VPS relay operations runbook with the exact foreground bootstrap command, flag-by-flag explanation, expected startup evidence, participant multiaddress, and pre-launch port/process checks; updated the root and docs indexes for the expanded runbook scope.
+- Why: Sprint 14 and Sprint 16 live testing needs an operator-safe command reference for starting the relay-capable bootstrap without relying on chat history.
+- Status: documentation is updated. No runtime behavior changed, and the two-device relay/direct inference gates remain open.
+
+### 2026-08-16 - Document bootstrap identity permission recovery
+
+- What changed: expanded the VPS relay operations runbook with the one-time `/var/lib/distribllm` ownership setup needed when launching the relay manually as the SSH user, plus guidance to prefer the installer for the managed service path.
+- Why: the manual foreground command failed on the VPS with `PermissionError: [Errno 13] Permission denied: '/var/lib/distribllm/bootstrap.id'` before Hivemind could create or load the stable relay identity.
+- Status: documentation now covers the observed permission failure. The operator still needs to start either the foreground process or the managed service and then rerun relay and two-device acceptance checks.
+
+### 2026-08-16 - Clarify VPS versus Windows shell context
+
+- What changed: added an explicit warning to the VPS relay operations runbook that bootstrap and identity-permission commands must run inside the VPS SSH shell, not local Windows PowerShell; added a matching active lesson for future remote-command guidance.
+- Why: after the SSH connection aborted, the recovery commands were pasted into Windows PowerShell, where `sudo`, `chmod`, `$USER:$USER`, and Linux paths do not apply to the VPS.
+- Status: docs now identify the expected VPS prompt before the command. Runtime behavior did not change, and live bootstrap restart plus two-device relay acceptance remain open.
+
+### 2026-08-16 - Document bootstrap port-in-use recovery
+
+- What changed: expanded the VPS relay operations runbook with an explicit `bind: address already in use` recovery path, including how to inspect port `7001`, distinguish the managed service from an unmanaged foreground process, validate an already-running service, and stop only the intended process before relaunching.
+- Why: the manual bootstrap now loads the stable identity successfully, but Hivemind failed to bind because another process already occupied port `7001`.
+- Status: documentation now covers the observed port ownership failure. The next operator step is to identify the process that owns port `7001`, then either use the existing managed service or stop it before running the foreground command.

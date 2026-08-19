@@ -4,14 +4,14 @@ Electron, Vite, React 19, and TypeScript desktop interface for local node contro
 
 ## Requirements
 
-- Node.js/npm compatible with the lockfile
+- Bun 1.3.10, as declared by `package.json` and the tracked `bun.lock`
 - DistribLLM FastAPI backend, normally at `http://127.0.0.1:8000`
 
 ## Install and Run
 
 ```bash
-npm install
-npm run dev
+bun install --frozen-lockfile
+bun run dev
 ```
 
 The renderer defaults to local backend URLs. Override before starting Vite when needed:
@@ -26,19 +26,19 @@ Restart the frontend after changing Vite environment values.
 ## Validation
 
 ```bash
-npm run typecheck
-npm run test:launcher
+bun run typecheck
+bun run test:launcher
 npx eslint . --no-cache --quiet
 ```
 
 ## Build
 
 ```bash
-npm run build:win
-npm run audit:win-package
-npm run build:win:installer # Windows build host, or Linux with Wine
-npm run build:mac
-npm run build:linux
+bun run build:win
+bun run audit:win-package
+bun run build:win:installer # Windows build host, or Linux with Wine
+bun run build:mac
+bun run build:linux
 ```
 
 `build:win` produces the unsigned portable Windows artifact under `dist`. The Windows package starts and monitors the backend through the managed WSL launcher configured in Settings.

@@ -24,6 +24,7 @@
 | Petals comparison                         | `docs/PETALS_COMPARISON.md`               |
 | Network reachability and relay review      | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` |
 | Windows managed WSL packaging and acceptance capture | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` |
+| Deployment, VPS services, and live testing | `docs/DEPLOYMENT_AND_LIVE_TESTING.md` |
 | Useful-work incentives and settlement | `docs/USEFUL_WORK_INCENTIVES.md`       |
 | Two-device and final acceptance evidence | `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` |
 | Local split acceptance                   | `docs/LOCAL_SPLIT_ACCEPTANCE.md` |
@@ -126,6 +127,8 @@
 | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Review proposal for Petals-style direct reachability, automatic relay fallback, VPS infrastructure, security, and production validation. |
 | `docs/COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, serving recommendations, stale-plan validation, and serving/inference workflow. |
 | `docs/VPS_RELAY_OPERATIONS.md` | Manual foreground launch, persistent VPS relay installation, machine-readable restart validation, external probe binding, recovery, and rollback runbook. |
+| `docs/DEPLOYMENT_AND_LIVE_TESTING.md` | EXE rebuild rules, local WSL backend updates, VPS bootstrap and shadow settlement deployment, relay probes, two-device checks, and future backend-bundled packaging. |
+| `docs/SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md` | Full codebase and runtime-state audit, ranked technical findings, settlement connection-refused repair, unfinished work, and final desktop release sequence. |
 | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, launcher contract, sanitized acceptance report, and clean-Windows runbook. |
 | `docs/USEFUL_WORK_INCENTIVES.md` | Signed useful-work receipt protocol, SQLite settlement policy, rollout modes, VPS deployment, and remaining acceptance gates. |
 | `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized relay/direct capture commands, cross-sprint artifact assembly, route and ownership validation, shadow receipts, and manual gates. |

@@ -242,6 +242,18 @@ class ProviderHealthRegistry:
                 record.state = "degraded"
                 record.recovery_required = True
 
+    def record_probe_stalled(self, key: ProviderKey, *, now: float, reason: str) -> None:
+        with self._lock:
+            record = self._records.get(key)
+            if record is None:
+                return
+            record.last_probe_at = now
+            record.last_failure_at = now
+            record.reason = reason
+            record.state = "offline"
+            record.recovery_required = True
+            record.consecutive_successes = 0
+
     def schedule_next(self, key: ProviderKey, *, now: float, jitter: float) -> None:
         with self._lock:
             record = self._records.get(key)
@@ -313,7 +325,10 @@ class ProviderHealthRegistry:
 class _ActiveProbe:
     thread: threading.Thread
     started_at: float
-    timeout_failures_recorded: int = 0
+    peer_id: str
+    rpc_uid: str
+    timeout_recorded: bool = False
+    offline_recorded: bool = False
 
 
 class ProviderHealthMonitor:
@@ -443,7 +458,12 @@ class ProviderHealthMonitor:
         with self._active_lock:
             if key in self._active or len(self._active) >= self.config.max_concurrency:
                 return
-            self._active[key] = _ActiveProbe(thread=thread, started_at=started_at)
+            self._active[key] = _ActiveProbe(
+                thread=thread,
+                started_at=started_at,
+                peer_id=key.peer_id,
+                rpc_uid=key.rpc_uid,
+            )
         thread.start()
 
     def _record_probe_timeouts(self, now: float) -> None:
@@ -451,15 +471,22 @@ class ProviderHealthMonitor:
         with self._active_lock:
             active = list(self._active.items())
         for key, task in active:
-            elapsed_windows = int((now - task.started_at) // timeout)
-            while task.timeout_failures_recorded < elapsed_windows:
-                task.timeout_failures_recorded += 1
+            if not task.timeout_recorded and now - task.started_at >= timeout:
+                task.timeout_recorded = True
                 self.registry.record_failure(
                     key,
                     now=now,
+                    reason=f"RPC metadata probe exceeded {timeout:g} seconds.",
+                )
+            offline_after = timeout * self.config.offline_threshold
+            if not task.offline_recorded and now - task.started_at >= offline_after:
+                task.offline_recorded = True
+                self.registry.record_probe_stalled(
+                    key,
+                    now=now,
                     reason=(
-                        "RPC metadata probe exceeded "
-                        f"{timeout:g} seconds (window {task.timeout_failures_recorded})."
+                        "RPC metadata probe remained stuck for "
+                        f"{offline_after:g} seconds."
                     ),
                 )
 
@@ -468,12 +495,25 @@ class ProviderHealthMonitor:
             return [dict(node) for node in self._latest_nodes]
 
     def snapshot(self) -> dict:
+        now = self._clock()
         with self._active_lock:
             active_count = len(self._active)
+            active_probes = [
+                {
+                    "peer_id": task.peer_id,
+                    "rpc_uid": task.rpc_uid,
+                    "age_seconds": max(0.0, now - task.started_at),
+                    "thread_alive": task.thread.is_alive(),
+                    "timeout_recorded": task.timeout_recorded,
+                    "offline_recorded": task.offline_recorded,
+                }
+                for task in self._active.values()
+            ]
         return {
             **self.registry.snapshot(),
             "monitor_running": self.running,
             "active_probes": active_count,
+            "active_probe_details": active_probes,
             "last_discovery_error": self._last_discovery_error,
             "detection_window_seconds": self.config.detection_window_seconds,
         }

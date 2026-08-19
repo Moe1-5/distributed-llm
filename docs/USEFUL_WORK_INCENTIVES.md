@@ -23,6 +23,19 @@ The worker verifies the signature, tensor commitment, selected-route membership,
 
 The FastAPI service stores SQLite in WAL mode with append-only policy versions, identities, signed presence bindings, receipt pairs, and ledger entries. It rejects duplicate request IDs, receipt hashes, worker nonces, invalid signatures, stale timestamps, self-dealing identities, altered counters, incomplete routes, workers outside the route, unsupported revisions, and out-of-bounds ranges.
 
+Participant submission is fail-open for inference and uses a bounded in-memory
+queue. Connection failures, timeouts, HTTP 408, HTTP 425, HTTP 429, and HTTP 5xx
+responses are retried with bounded exponential backoff. Each receipt POST sends
+a BLAKE3 idempotency key. Settlement accepts a repeated request only when the
+request ID, receipt hash, nonce, and canonical signed payload exactly match an
+already committed row; it returns the existing result without adding another
+ledger entry. Altered collisions and duplicate requests without the
+idempotency contract remain replay errors.
+
+The retry queue is not durable. A participant backend restart discards pending
+submissions, and a long outage can make receipts exceed the settlement timestamp
+window. A local SQLite outbox with restart recovery remains future work.
+
 Reward policy version one uses:
 
 `position_count * served_layer_count * model_compute_weight * reward_scale`
@@ -77,6 +90,13 @@ The local spend ledger is phase one. A later hosted project gateway must perform
 The service records an explicit database schema version and refuses unknown or incompatible pre-release schemas. Back up an incompatible database and point `DISTRIBLLM_SETTLEMENT_DB` at a new path until an approved migration exists; never delete ledger state as an automatic recovery step. Database, WAL, and shared-memory files are restricted to the service account.
 
 Check service health with `systemctl status distribllm-settlement`, policy with `curl http://127.0.0.1:7101/v1/policy`, and logs with `journalctl -u distribllm-settlement -n 200 --no-pager`.
+
+When settlement remains bound to VPS loopback, each participant must create an
+SSH local forward from the same WSL distro that runs its backend. In that WSL
+namespace, `http://127.0.0.1:7101` reaches the VPS only while the forward is
+alive. A silent foreground `ssh -N` process is the expected running state. See
+the deployment and live-testing guide and the connection-refused entry in the
+debugging guide for the exact checks.
 
 ## Remaining Acceptance
 

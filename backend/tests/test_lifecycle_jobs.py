@@ -87,6 +87,23 @@ class LifecycleJobStoreTests(unittest.TestCase):
         self.assertEqual(completed["error"], "relay unavailable")
         self.assertEqual(completed["result"]["error"], "relay unavailable")
 
+    def test_suspended_generator_is_not_reported_as_ready(self) -> None:
+        store = LifecycleJobStore()
+        submitted = store.submit(
+            "generator_start",
+            "generator:suspended",
+            lambda progress, cancelled: {
+                "status": "suspended",
+                "message": "Provider advertisement expired.",
+            },
+        )
+
+        completed = wait_for_terminal(store, submitted["job_id"])
+
+        self.assertEqual(completed["status"], "failed")
+        self.assertEqual(completed["stage"], "failed")
+        self.assertEqual(completed["error"], "Provider advertisement expired.")
+
 
 class LifecycleEndpointTests(unittest.TestCase):
     def test_generator_start_async_returns_before_slow_start_finishes(self) -> None:

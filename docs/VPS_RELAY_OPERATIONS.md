@@ -1,9 +1,104 @@
 # VPS Relay Operations
 
 **Status:** Service implementation complete; live VPS restart validation pending
-**Last updated:** 2026-08-13
+**Last updated:** 2026-08-16
 
 This runbook manages the project-owned Hivemind DHT bootstrap and circuit relay as a persistent `systemd` service. The service does not run the Electron application, expose the participant FastAPI API, or serve model layers.
+
+## Manual Foreground Launch
+
+Use this foreground command when validating the relay manually before, during, or instead of the managed `systemd` service. Run it from the backend directory of the deployed repository checkout on the VPS:
+
+These are Linux commands for the VPS SSH session. Do not run them from local Windows PowerShell. Your prompt should look like `mohammed@deli-backend-prod:...$`, not `PS C:\...>`.
+
+```bash
+cd ~/fyp/distributed-llm/backend
+HIVEMIND_LOGLEVEL=DEBUG \
+GOLOG_LOG_LEVEL=relay=debug \
+uv run --python 3.12 python bootstrap.py \
+  --host 0.0.0.0 \
+  --port 7001 \
+  --identity_path /var/lib/distribllm/bootstrap.id \
+  --announce-maddr /ip4/178.156.212.0/tcp/7001
+```
+
+For a root-owned production checkout, replace the first line with the deployed path, for example:
+
+```bash
+cd /opt/distribllm/backend
+```
+
+Keep this process running for the whole participant test. If this terminal closes, participant nodes may lose discovery and relay reservation support.
+
+### Identity Permissions For Manual Launch
+
+The identity path is under `/var/lib/distribllm`, so a normal shell user cannot create it unless the directory and file are prepared first. If the foreground command fails with `PermissionError: [Errno 13] Permission denied: '/var/lib/distribllm/bootstrap.id'`, choose one of these operator-safe paths:
+
+Run these commands inside the VPS SSH session only:
+
+For a quick manual test as the current SSH user, create or transfer ownership of only the bootstrap identity directory:
+
+```bash
+sudo mkdir -p /var/lib/distribllm
+sudo chown "$USER:$USER" /var/lib/distribllm
+chmod 700 /var/lib/distribllm
+```
+
+Then rerun the foreground command. Hivemind will create `/var/lib/distribllm/bootstrap.id` on first successful start. After it exists, lock down the identity file:
+
+```bash
+chmod 600 /var/lib/distribllm/bootstrap.id
+```
+
+For the managed production service, prefer the installer instead of changing ownership manually:
+
+```bash
+sudo /opt/distribllm/deploy/vps/install-bootstrap-service.sh /opt/distribllm
+sudo systemctl restart distribllm-bootstrap.service
+```
+
+Do not use `sudo uv run ... python bootstrap.py` as the default manual workflow. It can create a root-owned virtual environment, cache, or identity state inside the checkout and make later non-root operations harder to reason about.
+
+### What The Command Does
+
+- `HIVEMIND_LOGLEVEL=DEBUG` enables detailed Python-side Hivemind logs.
+- `GOLOG_LOG_LEVEL=relay=debug` enables focused relay logs from the bundled libp2p daemon.
+- `uv run --python 3.12` runs the backend with Python 3.12 and the project dependency lock instead of whichever Python happens to be active in the shell.
+- `python bootstrap.py` starts the DistribLLM bootstrap infrastructure process.
+- `--host 0.0.0.0` listens on all VPS network interfaces.
+- `--port 7001` binds the public TCP port used by participant machines.
+- `--identity_path /var/lib/distribllm/bootstrap.id` loads the stable private p2p identity. Preserve this file; changing it changes the peer ID and invalidates saved participant addresses.
+- `--announce-maddr /ip4/178.156.212.0/tcp/7001` tells remote participants the public address they should dial. This must use the VPS public IP and the same port that is open in the provider firewall and host firewall.
+
+### Expected Startup Evidence
+
+A healthy foreground launch prints these important facts:
+
+```text
+Relay transport/service: enabled
+Forced reachability: public
+Peer ID: QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2
+Bootstrap addresses (share these with your nodes):
+  /ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2
+```
+
+The exact public participant configuration must include the complete multiaddress, including `/p2p/<peer-id>`, as both the bootstrap peer and trusted relay:
+
+```text
+/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2
+```
+
+### Common Launch Checks
+
+Before launching, confirm that port `7001` is open and not already owned by another bootstrap process:
+
+```bash
+sudo ufw allow 7001/tcp
+sudo ss -ltnp 'sport = :7001'
+pgrep -af 'bootstrap.py|p2pd'
+```
+
+Run exactly one active bootstrap with the stable identity. If another copy is already running, stop that copy through its current process manager before starting a replacement.
 
 ## Deployment Contract
 
@@ -121,6 +216,31 @@ sudo systemctl daemon-reload
 sudo systemctl restart distribllm-bootstrap.service
 sudo /opt/distribllm/deploy/vps/validate-bootstrap-service.sh
 ```
+
+### Port 7001 Is Already In Use
+
+If the foreground command fails with `bind: address already in use`, the identity is loading but another process already owns the public relay port. First inspect the owner from the VPS SSH shell:
+
+```bash
+sudo ss -ltnp 'sport = :7001'
+pgrep -af 'bootstrap.py|p2pd'
+sudo systemctl status distribllm-bootstrap.service --no-pager
+```
+
+If `distribllm-bootstrap.service` is active and listening on port `7001`, do not start a second foreground bootstrap. Use the service and validate it:
+
+```bash
+sudo /opt/distribllm/deploy/vps/validate-bootstrap-service.sh
+```
+
+If you intentionally want the manual foreground process instead, stop the service first:
+
+```bash
+sudo systemctl stop distribllm-bootstrap.service
+sudo ss -ltnp 'sport = :7001'
+```
+
+If `ss` or `pgrep` shows an older unmanaged manual process, stop that exact PID with normal `kill <pid>`, confirm the port is free, then rerun the foreground command. Avoid `kill -9` unless a normal termination fails and the stale process is clearly identified.
 
 ### Peer ID Changes
 

@@ -165,7 +165,7 @@ class ProviderHealthMonitorTests(unittest.TestCase):
         self.assertTrue(monitor.stop())
         self.assertFalse(monitor.running)
 
-    def test_hung_probe_consumes_one_bounded_slot_and_accumulates_timeout_windows(self) -> None:
+    def test_hung_probe_consumes_one_bounded_slot_and_records_one_timeout(self) -> None:
         clock = FakeClock()
         nodes = [provider("peer-a"), provider("peer-b")]
         release = threading.Event()
@@ -194,9 +194,22 @@ class ProviderHealthMonitorTests(unittest.TestCase):
 
         peer_a = registry.get(ProviderKey.from_node(nodes[0]))
         self.assertEqual(calls, ["peer-a"])
-        self.assertEqual(monitor.snapshot()["active_probes"], 1)
-        self.assertEqual(peer_a["state"], "degraded")
-        self.assertEqual(peer_a["consecutive_failures"], 2)
+        snapshot = monitor.snapshot()
+        self.assertEqual(snapshot["active_probes"], 1)
+        self.assertEqual(snapshot["active_probe_details"][0]["peer_id"], "peer-a")
+        self.assertEqual(snapshot["active_probe_details"][0]["rpc_uid"], "rpc.peer-a")
+        self.assertTrue(snapshot["active_probe_details"][0]["thread_alive"])
+        self.assertTrue(snapshot["active_probe_details"][0]["timeout_recorded"])
+        self.assertEqual(peer_a["state"], "checking")
+        self.assertEqual(peer_a["consecutive_failures"], 1)
+        self.assertIn("exceeded 3 seconds", peer_a["reason"])
+
+        clock.advance(6.0)
+        monitor.run_cycle()
+        peer_a = registry.get(ProviderKey.from_node(nodes[0]))
+        self.assertEqual(peer_a["state"], "offline")
+        self.assertEqual(peer_a["consecutive_failures"], 1)
+        self.assertIn("remained stuck for 12 seconds", peer_a["reason"])
 
         release.set()
         self.assertTrue(monitor.wait_for_idle())
@@ -322,7 +335,7 @@ class HealthReadinessIntegrationTests(unittest.TestCase):
         self.assertEqual(errors[0]["kind"], "protocol_incompatible")
         self.assertIn("missing fields", errors[0]["reason"])
 
-    def test_production_probe_cancels_timed_out_expert_lookup(self) -> None:
+    def test_production_probe_uses_synchronous_lookup_without_an_event_loop(self) -> None:
         class DHT:
             pass
 
@@ -341,11 +354,35 @@ class HealthReadinessIntegrationTests(unittest.TestCase):
         sequential = RemoteSequential(
             DHT(), "test-prefix", 4, "test/model", health_config=config
         )
-        lookup = Future()
-        with patch("client.sequential.get_experts", return_value=lookup):
-            with self.assertRaises(TimeoutError):
+        expert = SimpleNamespace(
+            uid="rpc.peer-a",
+            stub=SimpleNamespace(rpc_info=lambda _request: None),
+        )
+        rpc_info = Future()
+        rpc_info.set_result(SimpleNamespace())
+        errors: list[BaseException] = []
+
+        def run_probe() -> None:
+            try:
                 sequential._probe_provider(provider("peer-a"))
-        self.assertTrue(lookup.cancelled())
+            except BaseException as exc:
+                errors.append(exc)
+
+        with (
+            patch("client.sequential.get_experts", return_value=[expert]) as lookup,
+            patch.object(
+                sys.modules["client.sequential"].RemoteExpertWorker,
+                "run_coroutine",
+                return_value=rpc_info,
+            ),
+        ):
+            probe_thread = threading.Thread(target=run_probe)
+            probe_thread.start()
+            probe_thread.join(timeout=1)
+
+        self.assertFalse(probe_thread.is_alive())
+        self.assertEqual(errors, [])
+        lookup.assert_called_once_with(sequential.dht, ["rpc.peer-a"])
 
     def test_production_probe_cancels_timed_out_rpc_info(self) -> None:
         class DHT:
@@ -366,15 +403,13 @@ class HealthReadinessIntegrationTests(unittest.TestCase):
         sequential = RemoteSequential(
             DHT(), "test-prefix", 4, "test/model", health_config=config
         )
-        lookup = Future()
         expert = SimpleNamespace(
             uid="rpc.peer-a",
             stub=SimpleNamespace(rpc_info=lambda _request: None),
         )
-        lookup.set_result([expert])
         rpc_info = Future()
         with (
-            patch("client.sequential.get_experts", return_value=lookup),
+            patch("client.sequential.get_experts", return_value=[expert]),
             patch.object(
                 sys.modules["client.sequential"].RemoteExpertWorker,
                 "run_coroutine",

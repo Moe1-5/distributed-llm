@@ -2,6 +2,66 @@
 
 Start with the first meaningful exception. Later Transformers/Hivemind wrapper messages often obscure the root cause.
 
+## Incentives Settlement Is Unreachable
+
+Symptoms:
+
+```text
+Settlement: ERROR
+Settlement is unreachable: <urlopen error [Errno 111] Connection refused>
+0 accepted, 58 rejected
+```
+
+This does not mean the VPS ledger process failed if VPS-local policy checks
+succeed. With `DISTRIBLLM_SETTLEMENT_URL=http://127.0.0.1:7101`, loopback is
+resolved in the participant WSL network namespace. The VPS settlement service
+also binds to loopback, so the participant needs an SSH local forward between
+those two loopback addresses.
+
+Check the persistent service from the VPS SSH shell:
+
+```bash
+sudo systemctl is-active distribllm-settlement.service
+sudo ss -ltnp 'sport = :7101'
+curl -fsS http://127.0.0.1:7101/v1/policy
+```
+
+Then run the forward in a separate terminal inside the participant WSL distro,
+not in Windows PowerShell and not on the VPS:
+
+```bash
+ssh -N \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:7101:127.0.0.1:7101 \
+  mohammed@178.156.212.0
+```
+
+Verify the SSH host-key fingerprint from a trusted VPS console before accepting
+it. After login, a successful `ssh -N` process remains silent and occupies the
+terminal. From a second terminal in the same participant WSL distro, verify:
+
+```bash
+curl -fsS http://127.0.0.1:7101/v1/policy
+```
+
+The VPS systemd service is persistent. The participant SSH tunnel is not; it
+must be restarted after that SSH process or WSL session ends.
+
+The original submission runtime treated every connection refusal as a permanent
+rejection, removed the signed payload from memory, and never retried. Those
+already discarded submissions cannot be recovered. The hardened runtime reports
+temporary failures as `RETRYING`, retains them in a bounded queue, and retries
+with a stable idempotency key. The matching VPS endpoint returns the prior result
+only for an exact duplicate and cannot create a second credit entry. Update both
+the participant backend and VPS settlement source before relying on this repair.
+
+Pending retries are still memory-only. Keep the backend running while they drain,
+and treat a durable local receipt outbox as remaining work. For a final public
+deployment, replace the manual tunnel with an authenticated, rate-limited HTTPS
+reverse proxy; never expose the unauthenticated plain HTTP listener directly.
+
 ## Backend or WebSocket Unreachable
 
 Symptoms:
@@ -20,6 +80,12 @@ Checks:
 4. Restart Electron/Vite after changing frontend environment variables.
 
 The stream client waits for real WebSocket lifecycle events and inference remains gated by generator/route readiness.
+
+The desktop launcher and renderer allow five seconds for the composite `/status`
+endpoint. That endpoint includes local node, generator-health, GPU, token, and
+local-model state, so a 1.5-second deadline could report a false timeout while a
+loaded backend was briefly busy. A five-second timeout is still bounded; repeated
+failures after that point require backend log and runtime-snapshot inspection.
 
 ## Bootstrap Peer Unreachable
 

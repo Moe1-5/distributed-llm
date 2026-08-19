@@ -1958,23 +1958,17 @@ async def start_node(req: NodeStartRequest) -> dict:
         }
 
     replicas = _matching_local_replicas(req)
-    if len(replicas) >= 2:
-        return {
-            "status": "error",
-            "error": "local_replica_limit_reached",
-            "message": (
-                "At most two identical local replicas are allowed for one layer range. "
-                "Use another device or serve a different range."
-            ),
-        }
-    if len(replicas) == 1 and not req.confirm_local_replica:
+    if replicas and not req.confirm_local_replica:
+        replica_label = "replica" if len(replicas) == 1 else "replicas"
         raise HTTPException(
             status_code=409,
             detail={
                 "error": "local_replica_confirmation_required",
                 "message": (
-                    f"One local replica already serves layers {req.layer_start}-"
-                    f"{req.layer_end}. Confirm the advanced replica to continue."
+                    f"{len(replicas)} loaded local {replica_label} already use "
+                    f"{req.model_name} layers {req.layer_start}-{req.layer_end}. "
+                    "Turned-off replicas still retain their model layers in memory. "
+                    "Confirm this additional exact replica to continue."
                 ),
             },
         )

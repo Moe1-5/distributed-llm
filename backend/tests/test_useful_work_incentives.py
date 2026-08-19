@@ -1,16 +1,19 @@
+import asyncio
 import concurrent.futures
+import json
 import sqlite3
 import stat
 import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 
+import httpx
 import torch
 import torch.nn as nn
 import hivemind
-from fastapi.testclient import TestClient
 from hivemind.moe import get_experts
 from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
 
@@ -44,6 +47,18 @@ from incentives.config import IncentivesConfig
 from incentives.runtime import UsefulWorkRuntime
 from client.sequential import RemoteSequential
 from node.rpc_server import RPCServer, _ReceiptHandlerModule
+
+
+def request_asgi(app, method: str, path: str, **kwargs):
+    async def request():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.request(method, path, **kwargs)
+
+    return asyncio.run(request())
 
 
 class ReceiptFixture:
@@ -627,15 +642,31 @@ class SettlementTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture = ReceiptFixture(root)
-            off_client = TestClient(create_settlement_app(root / "off.sqlite3", "off"))
-            shadow_client = TestClient(
-                create_settlement_app(root / "shadow.sqlite3", "shadow")
-            )
+            off_app = create_settlement_app(root / "off.sqlite3", "off")
+            shadow_app = create_settlement_app(root / "shadow.sqlite3", "shadow")
 
-            self.assertEqual(off_client.post("/v1/receipts", json=fixture.submission).status_code, 503)
-            accepted = shadow_client.post("/v1/receipts", json=fixture.submission)
-            replay = shadow_client.post("/v1/receipts", json=fixture.submission)
-            policy = shadow_client.get("/v1/policy").json()
+            self.assertEqual(
+                request_asgi(
+                    off_app,
+                    "POST",
+                    "/v1/receipts",
+                    json=fixture.submission,
+                ).status_code,
+                503,
+            )
+            accepted = request_asgi(
+                shadow_app,
+                "POST",
+                "/v1/receipts",
+                json=fixture.submission,
+            )
+            replay = request_asgi(
+                shadow_app,
+                "POST",
+                "/v1/receipts",
+                json=fixture.submission,
+            )
+            policy = request_asgi(shadow_app, "GET", "/v1/policy").json()
 
             self.assertEqual(accepted.status_code, 200)
             self.assertEqual(replay.status_code, 409)
@@ -688,6 +719,99 @@ class SettlementTests(unittest.TestCase):
             self.assertEqual(snapshot["accepted_submissions"], 1)
             self.assertEqual(snapshot["verified_credits"], 7)
             self.assertNotIn("private_key", snapshot)
+
+    def test_runtime_retries_transient_settlement_failure_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            identity = load_application_identity(Path(directory) / "runtime-retry.json")
+            attempts = 0
+            observed_idempotency_keys: list[str] = []
+
+            class Response:
+                def __init__(self, body: dict) -> None:
+                    self.body = body
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return None
+
+                def read(self) -> bytes:
+                    return json.dumps(self.body).encode()
+
+            def opener(request, timeout):
+                nonlocal attempts
+                if request.full_url.endswith("/v1/receipts"):
+                    attempts += 1
+                    observed_idempotency_keys.append(
+                        request.headers.get("Idempotency-key", "")
+                    )
+                    if attempts == 1:
+                        raise urllib.error.URLError(
+                            ConnectionRefusedError(111, "refused")
+                        )
+                    return Response({"status": "shadow_accepted"})
+                return Response(
+                    {
+                        "verified_credits": 0,
+                        "ledger_entries": 0,
+                        "accepted_receipts": 1,
+                        "useful_positions_served": 3,
+                    }
+                )
+
+            runtime = UsefulWorkRuntime(
+                IncentivesConfig("shadow", "http://127.0.0.1:7101", "main"),
+                identity,
+                opener,
+                sleeper=lambda _: None,
+                max_submission_attempts=3,
+            )
+
+            self.assertTrue(runtime.submit({"receipt": "document"}))
+            runtime._queue.join()
+            snapshot = runtime.snapshot()
+
+            self.assertEqual(attempts, 2)
+            self.assertEqual(len(set(observed_idempotency_keys)), 1)
+            self.assertTrue(observed_idempotency_keys[0])
+            self.assertEqual(snapshot["accepted_submissions"], 1)
+            self.assertEqual(snapshot["rejected_submissions"], 0)
+            self.assertEqual(snapshot["submission_retry_attempts"], 1)
+            self.assertEqual(snapshot["settlement_connectivity"], "connected")
+
+    def test_settlement_idempotency_key_accepts_only_exact_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = ReceiptFixture(root)
+            app = create_settlement_app(root / "idempotent.sqlite3", "credit")
+            key = hash_document(fixture.submission)
+
+            first = request_asgi(
+                app,
+                "POST",
+                "/v1/receipts",
+                json=fixture.submission,
+                headers={"Idempotency-Key": key},
+            )
+            duplicate = request_asgi(
+                app,
+                "POST",
+                "/v1/receipts",
+                json=fixture.submission,
+                headers={"Idempotency-Key": key},
+            )
+            account = request_asgi(
+                app,
+                "GET",
+                f"/v1/accounts/{fixture.worker.public_key}",
+            ).json()
+
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(duplicate.status_code, 200)
+            self.assertEqual(duplicate.json()["status"], "already_credited")
+            self.assertTrue(duplicate.json()["idempotent_replay"])
+            self.assertEqual(account["ledger_entries"], 1)
 
 
 if __name__ == "__main__":

@@ -165,6 +165,25 @@ function NodeCard({
             RPC ACTIVE
           </span>
         )}
+        {node.announcement && (
+          <span
+            className={`rounded border px-1.5 py-0.5 font-mono text-[9px] ${
+              node.announcement.fresh && node.announcement.thread_alive
+                ? 'border-green/20 bg-green/5 text-green'
+                : 'border-red/20 bg-red/5 text-red'
+            }`}
+            title={
+              node.announcement.last_error ??
+              (node.announcement.success_age_seconds === null
+                ? 'No successful DHT heartbeat recorded'
+                : `Last DHT heartbeat ${node.announcement.success_age_seconds.toFixed(1)} seconds ago`)
+            }
+          >
+            {node.announcement.fresh && node.announcement.thread_alive
+              ? 'DHT HEARTBEAT'
+              : 'DHT STALE'}
+          </span>
+        )}
         {node.connection_mode && (
           <span
             className={`rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase ${

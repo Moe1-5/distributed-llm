@@ -13,6 +13,7 @@ from uuid import uuid4
 ProgressCallback = Callable[[str, str], None]
 JobTarget = Callable[[ProgressCallback, threading.Event], dict[str, Any]]
 TERMINAL_STATES = {"ready", "failed", "cancelled"}
+READY_RESULT_STATES = {"ready", "already_ready", "started", "already_running"}
 
 
 @dataclass
@@ -138,10 +139,14 @@ class LifecycleJobStore:
                     job.status = "cancelled"
                     job.stage = "cancelled"
                     job.detail = "The operation was cancelled and cleaned up."
-                elif result_status == "error":
+                elif result_status == "error" or result_status not in READY_RESULT_STATES:
                     job.status = "failed"
                     job.stage = "failed"
-                    job.error = str(result.get("message") or result.get("error") or "Start failed")
+                    job.error = str(
+                        result.get("message")
+                        or result.get("error")
+                        or f"Runtime did not become ready: {result_status or 'unknown'}"
+                    )
                     job.detail = job.error
                 else:
                     job.status = "ready"

@@ -13,7 +13,7 @@ function shortIdentity(value: string | null): string {
 function connectivityTone(status: IncentivesStatus['settlement_connectivity']): string {
   if (status === 'connected') return 'text-green'
   if (status === 'error') return 'text-red'
-  if (status === 'unconfigured') return 'text-amber'
+  if (status === 'unconfigured' || status === 'retrying') return 'text-amber'
   return 'text-text-secondary'
 }
 
@@ -174,7 +174,7 @@ export default function Incentives(): React.JSX.Element {
               </dt>
               <dd className="mt-1 font-mono text-[12px] text-text-primary">
                 {status?.accepted_submissions ?? 0} accepted, {status?.rejected_submissions ?? 0}{' '}
-                rejected
+                rejected, {status?.submission_retry_attempts ?? 0} retries
               </dd>
             </div>
           </dl>
@@ -209,7 +209,13 @@ export default function Incentives(): React.JSX.Element {
             </div>
           </div>
           {status?.last_error && (
-            <p className="mt-3 rounded-lg border border-red/20 bg-red/5 px-4 py-3 font-mono text-[11px] text-red">
+            <p
+              className={`mt-3 rounded-lg px-4 py-3 font-mono text-[11px] ${
+                status.settlement_connectivity === 'retrying'
+                  ? 'border border-amber/20 bg-amber/5 text-amber'
+                  : 'border border-red/20 bg-red/5 text-red'
+              }`}
+            >
               {status.last_error}
             </p>
           )}

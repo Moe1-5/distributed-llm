@@ -13,7 +13,9 @@
 | Petals comparison | `PETALS_COMPARISON.md` | Similarities, differences, public-swarm positioning, and what to borrow from Petals |
 | Network reachability and relay review | `NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Sprint 14 transport defect, Petals-derived implementation, Windows/WSL direct setup, locked VPS deployment procedure, live relay diagnosis, rollout, and acceptance criteria |
 | Coverage-aware serving | `COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, replica behavior, serving-plan API, start revalidation, desktop workflow, and incentives boundary |
-| VPS relay operations | `VPS_RELAY_OPERATIONS.md` | Persistent systemd installation, machine-readable restart evidence, relay-probe binding, upgrade, rollback, recovery, backup, and monitoring procedure |
+| VPS relay operations | `VPS_RELAY_OPERATIONS.md` | Manual foreground launch, persistent systemd installation, machine-readable restart evidence, relay-probe binding, upgrade, rollback, recovery, backup, and monitoring procedure |
+| Deployment and live testing | `DEPLOYMENT_AND_LIVE_TESTING.md` | EXE rebuild rules, local WSL backend updates, VPS bootstrap and shadow settlement deployment, relay probes, two-device checks, and future backend-bundled packaging |
+| System analysis and finalization | `SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md` | Full source, runtime, security, deployment, validation, incentive-outage, and final desktop readiness audit |
 | Windows managed WSL packaging | `WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed distro strategy, launcher contract, sanitized acceptance report, and clean-Windows runbook |
 | Useful-work incentives | `USEFUL_WORK_INCENTIVES.md` | Signed receipt protocol, SQLite settlement rules, read-only credits, VPS rollout, and remaining two-device acceptance |
 | Two-device acceptance evidence | `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized relay/direct captures, Windows and VPS artifact assembly, complete-route validation, shadow receipts, standby non-payment, and manual gates |

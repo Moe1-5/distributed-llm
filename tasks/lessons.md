@@ -17,6 +17,21 @@
 
 ## Active
 
+### [2026-08-19] Leave user-owned physical validation to the requested handoff
+**Problem:** I began a real local split probe after the code-side regression test passed, while the user intended to perform runtime validation personally.
+**Rule:** When the user takes ownership of live or physical validation, stop runtime probes and limit the handoff to the implemented change, focused code checks already completed, and exact manual expectations.
+**Why:** Shared-memory model probes are costly and can overlap with the user's controlled two-device acceptance environment.
+
+### [2026-08-16] Diagnose runtime failures from correlated evidence before prescribing recovery
+**Problem:** I inferred that the generator might have started before the serving node and suggested restarting it without first reconciling the UI timestamps, coverage preview, node RPC state, and generator route-validation path.
+**Rule:** For distributed runtime failures, correlate timestamps and inspect each producer of displayed state before naming a cause or recommending a restart. Clearly separate confirmed facts, unresolved evidence, and the exact diagnostic needed to close the gap.
+**Why:** Coverage discovery, local RPC status, generator health probes, and lifecycle jobs can disagree; an unsupported recovery step wastes a physical acceptance run and can conceal a real implementation defect.
+
+### [2026-08-16] Label remote shell commands explicitly
+**Problem:** I gave VPS Linux commands after an SSH session had disconnected, and the user reasonably pasted them into local Windows PowerShell where `sudo`, `$USER:$USER`, `chmod`, and `/var/lib/...` are invalid or mean the wrong machine.
+**Rule:** For remote operations, every command block must state the required shell and expected prompt, such as VPS SSH shell versus local Windows PowerShell versus WSL Ubuntu, before the command.
+**Why:** Distributed testing uses three shells at once, and an unlabeled command can waste time, fail misleadingly, or modify the wrong environment.
+
 ### Relay reservation is not RPC health
 
 A successful `/p2p-circuit/` reservation proves that a peer can reserve transport through the VPS, but it does not prove that expert metadata or tensor RPC completes within the health deadline. Test reservation, metadata latency, and tensor forwarding as separate acceptance gates.

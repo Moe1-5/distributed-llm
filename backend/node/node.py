@@ -7,22 +7,24 @@ Startup sequence:
     2. Start the Hivemind DHT peer
     3. Load transformer layers via InferenceHandler
     4. Start the RPC server
-    5. Announce model and transport state, refreshing every 30s
+    5. Announce model and transport state on a bounded heartbeat
 """
 
 import time
 import threading
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Optional
 from uuid import uuid4
 
 import hivemind
 import torch
-# from hivemind.utils.networking import get_dht_time          # correct import for 1.1.12
+from hivemind.utils import get_dht_time
 from hivemind.utils.logging import get_logger
 
 from constants import (
     ANNOUNCE_INTERVAL,
     DHT_EXPIRY_TIME,
+    DHT_OPERATION_TIMEOUT,
     P2PNetworkConfig,
     get_p2p_network_config,
 )
@@ -86,7 +88,13 @@ class Node:
 
         self._running         = False
         self._announce_enabled = False
+        self._announce_stop = threading.Event()
         self._announce_thread: Optional[threading.Thread] = None
+        self._announce_lock = threading.Lock()
+        self._last_announce_attempt_at: Optional[float] = None
+        self._last_announce_success_at: Optional[float] = None
+        self._last_announce_error: Optional[str] = None
+        self._consecutive_announce_failures = 0
         self._last_peer_id: Optional[str] = None
         self._last_maddrs: list[str] = []
         self.connection_mode = "checking"
@@ -197,6 +205,7 @@ class Node:
         logger.info("Step 4/4: Announcing to DHT...")
         self._running = True
         self._announce_enabled = True
+        self._announce_stop.clear()
         self._announce()
         self._ensure_announce_thread()
 
@@ -313,8 +322,9 @@ class Node:
         logger.info("Node turning off serving while keeping loaded layers...")
         self._running = False
         self._announce_enabled = False
+        self._announce_stop.set()
         if self._announce_thread is not None:
-            self._announce_thread.join(timeout=0.2)
+            self._announce_thread.join(timeout=min(timeout, DHT_OPERATION_TIMEOUT + 0.5))
             self._announce_thread = None
         try:
             self._announce(running=False, rpc_running=False)
@@ -337,8 +347,9 @@ class Node:
         logger.info("Node stopping...")
         self._running = False
         self._announce_enabled = False
+        self._announce_stop.set()
         if self._announce_thread is not None:
-            self._announce_thread.join(timeout=0.2)
+            self._announce_thread.join(timeout=min(timeout, DHT_OPERATION_TIMEOUT + 0.5))
             self._announce_thread = None
         if self.rpc is not None:
             self.rpc.stop(timeout=timeout)
@@ -368,60 +379,153 @@ class Node:
             1. {prefix}.node_info.{peer_id}  — full metadata
             2. {prefix}.members              — list of all peer_ids
         """
-        if self.dht is None:
-            return
+        with self._announce_lock:
+            if self.dht is None:
+                return
+            self._last_announce_attempt_at = time.time()
+            try:
+                peer_id = self.get_peer_id()
+                if peer_id is None:
+                    raise RuntimeError("DHT peer ID is unavailable")
+                expiry = get_dht_time() + DHT_EXPIRY_TIME
 
-        peer_id = self.get_peer_id()
-        if peer_id is None:
-            return
-        expiry  = time.time() + DHT_EXPIRY_TIME   # fixed import
+                publication_refresher = getattr(
+                    self.rpc,
+                    "refresh_publication",
+                    None,
+                )
+                should_refresh_publication = bool(
+                    self._running
+                    and running is not False
+                    and rpc_running is not False
+                    and callable(publication_refresher)
+                )
+                publication_error: Optional[Exception] = None
+                if should_refresh_publication:
+                    try:
+                        publication_refresher(expiry)
+                    except Exception as exc:
+                        # Still refresh node metadata below so peers can see the
+                        # publication failure instead of retaining stale state.
+                        publication_error = exc
+                publication_getter = getattr(
+                    self.rpc,
+                    "get_publication_status",
+                    None,
+                )
+                rpc_publication = (
+                    publication_getter()
+                    if callable(publication_getter)
+                    else None
+                )
 
-        capability_getter = getattr(self.rpc, "get_receipt_capability", None)
-        receipt_capability = (
-            capability_getter(peer_id) if callable(capability_getter) else None
-        )
-        safety_getter = getattr(self.rpc, "get_safety_snapshot", None)
-        rpc_safety = safety_getter() if callable(safety_getter) else None
-        # Write full metadata
-        self.dht.store(
-            key=f"{self.dht_prefix}.node_info.{peer_id}",
-            value={
-                "peer_id":       peer_id,
-                "node_id":       self.node_id,
-                "model_name":    self.model_name,
-                "layer_start":   self.layer_start,
-                "layer_end":     self.layer_end,
-                "device":        self.device,
-                "running":       self.is_running() if running is None else running,
-                "maddrs":        self.get_visible_maddrs(),
-                "layers_loaded": self.handler.is_loaded() if self.handler else False,
-                "rpc_running":   (
-                    self.rpc.is_running() if self.rpc else False
-                ) if rpc_running is None else rpc_running,
-                "rpc_uid":       self.rpc.get_uid()       if self.rpc     else None,
-                "connection_mode": self.connection_mode,
-                "direct_reachability": self.direct_reachability,
-                "transport_verified": self.transport_verified,
-                "loading":       getattr(self.handler, "load_diagnostics", None),
-                "rpc_safety":    rpc_safety,
-                "timestamp":     time.time(),
-                **(receipt_capability or {}),
-            },
-            expiration_time=expiry,
-        )
+                capability_getter = getattr(self.rpc, "get_receipt_capability", None)
+                receipt_capability = (
+                    capability_getter(peer_id) if callable(capability_getter) else None
+                )
+                safety_getter = getattr(self.rpc, "get_safety_snapshot", None)
+                rpc_safety = safety_getter() if callable(safety_getter) else None
+                node_stored = self._dht_call(
+                    "node metadata store",
+                    self.dht.store,
+                    key=f"{self.dht_prefix}.node_info.{peer_id}",
+                    value={
+                        "peer_id": peer_id,
+                        "node_id": self.node_id,
+                        "model_name": self.model_name,
+                        "layer_start": self.layer_start,
+                        "layer_end": self.layer_end,
+                        "device": self.device,
+                        "running": (
+                            self._components_running()
+                            if running is None
+                            else running
+                        ),
+                        "maddrs": self.get_visible_maddrs(),
+                        "layers_loaded": (
+                            self.handler.is_loaded() if self.handler else False
+                        ),
+                        "rpc_running": (
+                            self.rpc.is_running() if self.rpc else False
+                        ) if rpc_running is None else rpc_running,
+                        "rpc_uid": self.rpc.get_uid() if self.rpc else None,
+                        "connection_mode": self.connection_mode,
+                        "direct_reachability": self.direct_reachability,
+                        "transport_verified": self.transport_verified,
+                        "loading": getattr(self.handler, "load_diagnostics", None),
+                        "rpc_safety": rpc_safety,
+                        "rpc_publication": rpc_publication,
+                        "timestamp": time.time(),
+                        **(receipt_capability or {}),
+                    },
+                    expiration_time=expiry,
+                )
+                if node_stored is False:
+                    raise RuntimeError("DHT rejected the node metadata refresh")
 
-        # Update members index
-        members_key = f"{self.dht_prefix}.members"
+                members_key = f"{self.dht_prefix}.members"
+                result = self._dht_call(
+                    "members lookup",
+                    self.dht.get,
+                    members_key,
+                    latest=True,
+                )
+                existing = result.value if (result and isinstance(result.value, list)) else []
+                members = list(dict.fromkeys([*existing, peer_id]))
+                members_stored = self._dht_call(
+                    "members refresh",
+                    self.dht.store,
+                    key=members_key,
+                    value=members,
+                    expiration_time=expiry,
+                )
+                if members_stored is False:
+                    raise RuntimeError("DHT rejected the members index refresh")
+
+                self._last_announce_success_at = time.time()
+                self._last_announce_error = None
+                self._consecutive_announce_failures = 0
+                logger.debug(
+                    "Announced to DHT | layers=%s-%s rpc_publication_fresh=%s "
+                    "hivemind_publisher_alive=%s",
+                    self.layer_start,
+                    self.layer_end,
+                    (
+                        rpc_publication.get("fresh")
+                        if isinstance(rpc_publication, dict)
+                        else None
+                    ),
+                    (
+                        rpc_publication.get("hivemind_publisher_alive")
+                        if isinstance(rpc_publication, dict)
+                        else None
+                    ),
+                )
+                if publication_error is not None:
+                    raise RuntimeError(
+                        "RPC expert publication refresh failed: "
+                        f"{publication_error}"
+                    ) from publication_error
+            except Exception as exc:
+                self._last_announce_error = str(exc)
+                self._consecutive_announce_failures += 1
+                raise
+
+    @staticmethod
+    def _dht_call(name: str, method, *args, **kwargs):
         try:
-            result   = self.dht.get(members_key, latest=True)
-            existing = result.value if (result and isinstance(result.value, list)) else []
-            if peer_id not in existing:
-                existing.append(peer_id)
-            self.dht.store(key=members_key, value=existing, expiration_time=expiry)
-        except Exception as e:
-            logger.warning(f"Failed to update members index: {e}")
-
-        logger.debug(f"Announced to DHT: layers {self.layer_start}-{self.layer_end}")
+            future = method(*args, return_future=True, **kwargs)
+        except TypeError as exc:
+            if "return_future" not in str(exc):
+                raise
+            return method(*args, **kwargs)
+        try:
+            return future.result(timeout=DHT_OPERATION_TIMEOUT)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                f"DHT {name} exceeded {DHT_OPERATION_TIMEOUT:g} seconds"
+            ) from exc
 
     def _ensure_announce_thread(self) -> None:
         if (
@@ -440,25 +544,65 @@ class Node:
         self._announce_thread.start()
 
     def _announce_loop(self) -> None:
-        while self._announce_enabled:
-            time.sleep(ANNOUNCE_INTERVAL)
-            if self._announce_enabled:
-                try:
-                    self._announce()
-                except Exception as e:
-                    logger.warning(f"Re-announce failed: {e}")
+        while self._announce_enabled and not self._announce_stop.wait(
+            ANNOUNCE_INTERVAL
+        ):
+            try:
+                self._announce()
+            except Exception as e:
+                logger.warning("Re-announce failed: %s", e)
 
     # ------------------------------------------------------------------
     # Status
     # ------------------------------------------------------------------
 
-    def is_running(self) -> bool:
-        return (
+    def _components_running(self) -> bool:
+        components_running = (
             self._running
             and self.dht     is not None
             and self.handler is not None and self.handler.is_loaded()
             and self.rpc     is not None and self.rpc.is_running()
         )
+        if not components_running:
+            return False
+        publication_getter = getattr(
+            self.rpc,
+            "get_publication_status",
+            None,
+        )
+        if not callable(publication_getter):
+            return True
+        return bool(publication_getter().get("fresh"))
+
+    def is_running(self) -> bool:
+        announcement = self.get_announcement_status()
+        return bool(
+            self._components_running()
+            and announcement["thread_alive"]
+            and announcement["fresh"]
+        )
+
+    def get_announcement_status(self) -> dict:
+        success_age = (
+            max(0.0, time.time() - self._last_announce_success_at)
+            if self._last_announce_success_at is not None
+            else None
+        )
+        return {
+            "thread_alive": bool(
+                self._announce_thread is not None and self._announce_thread.is_alive()
+            ),
+            "last_attempt_at": self._last_announce_attempt_at,
+            "last_success_at": self._last_announce_success_at,
+            "success_age_seconds": success_age,
+            "last_error": self._last_announce_error,
+            "consecutive_failures": self._consecutive_announce_failures,
+            "fresh": bool(
+                self._last_announce_success_at is not None
+                and success_age is not None
+                and success_age < DHT_EXPIRY_TIME
+            ),
+        }
 
     def get_info(self) -> dict:
         peer_id = self.get_peer_id()
@@ -470,6 +614,16 @@ class Node:
         )
         safety_getter = getattr(self.rpc, "get_safety_snapshot", None)
         rpc_safety = safety_getter() if callable(safety_getter) else None
+        publication_getter = getattr(
+            self.rpc,
+            "get_publication_status",
+            None,
+        )
+        rpc_publication = (
+            publication_getter()
+            if callable(publication_getter)
+            else None
+        )
         return {
             "peer_id":       peer_id,
             "node_id":       self.node_id,
@@ -487,6 +641,8 @@ class Node:
             "transport_verified": self.transport_verified,
             "loading":       getattr(self.handler, "load_diagnostics", None),
             "rpc_safety":    rpc_safety,
+            "rpc_publication": rpc_publication,
+            "announcement":  self.get_announcement_status(),
             "accounting":    self.get_accounting_snapshot(),
             **(receipt_capability or {}),
         }

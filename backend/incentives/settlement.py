@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from constants import SUPPORTED_MODELS
@@ -427,9 +427,21 @@ class SettlementStore:
             raise RuntimeError("Settlement policy is not initialized")
         return json.loads(row["policy_json"])
 
-    def append(self, verified: VerifiedReceipt, mode: SettlementMode, now: int) -> dict[str, Any]:
+    def append(
+        self,
+        verified: VerifiedReceipt,
+        mode: SettlementMode,
+        now: int,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         worker_presence = verified.submission["worker_presence"]
         generator_presence = verified.submission["generator_presence"]
+        submission_json = json.dumps(
+            verified.submission,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         try:
             with self.connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -496,11 +508,7 @@ class SettlementStore:
                         verified.position_count,
                         verified.reward_units,
                         mode,
-                        json.dumps(
-                            verified.submission,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
+                        submission_json,
                         now,
                     ),
                 )
@@ -519,6 +527,40 @@ class SettlementStore:
                     )
                 connection.commit()
         except sqlite3.IntegrityError as exc:
+            if idempotency_key == hash_document(verified.submission):
+                with self.connection() as connection:
+                    existing = connection.execute(
+                        "SELECT request_id, receipt_hash, worker_nonce, reward_units, "
+                        "settlement_mode, submission_json FROM receipt_pairs "
+                        "WHERE request_id = ? OR receipt_hash = ? OR worker_nonce = ?",
+                        (
+                            verified.request_id,
+                            verified.receipt_hash,
+                            verified.worker_nonce,
+                        ),
+                    ).fetchall()
+                if len(existing) == 1:
+                    row = existing[0]
+                    exact_match = (
+                        row["request_id"] == verified.request_id
+                        and row["receipt_hash"] == verified.receipt_hash
+                        and row["worker_nonce"] == verified.worker_nonce
+                        and row["submission_json"] == submission_json
+                    )
+                    if exact_match:
+                        prior_mode = str(row["settlement_mode"])
+                        return {
+                            "status": (
+                                "already_credited"
+                                if prior_mode == "credit"
+                                else "already_shadow_accepted"
+                            ),
+                            "request_id": verified.request_id,
+                            "receipt_hash": verified.receipt_hash,
+                            "reward_units": int(row["reward_units"]),
+                            "balance_changed": False,
+                            "idempotent_replay": True,
+                        }
             raise ProtocolError("Receipt replay or identity collision rejected") from exc
         return {
             "status": "credited" if mode == "credit" else "shadow_accepted",
@@ -584,7 +626,10 @@ def create_settlement_app(
     app.state.timestamp_window_seconds = timestamp_window_seconds
 
     @app.post("/v1/receipts")
-    async def submit_receipt(submission: ReceiptSubmission) -> dict[str, Any]:
+    async def submit_receipt(
+        submission: ReceiptSubmission,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
         if app.state.mode == "off":
             raise HTTPException(status_code=503, detail="Settlement is disabled")
         try:
@@ -593,7 +638,12 @@ def create_settlement_app(
                 store.active_policy(),
                 window_seconds=app.state.timestamp_window_seconds,
             )
-            return store.append(verified, app.state.mode, int(time.time()))
+            return store.append(
+                verified,
+                app.state.mode,
+                int(time.time()),
+                idempotency_key=idempotency_key,
+            )
         except ProtocolError as exc:
             status_code = 409 if "replay" in str(exc).lower() else 422
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc

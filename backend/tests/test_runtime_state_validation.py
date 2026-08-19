@@ -137,7 +137,7 @@ class RuntimeApiValidationTests(unittest.TestCase):
             "local_replica_confirmation_required",
         )
 
-    def test_third_exact_local_replica_is_rejected(self) -> None:
+    def test_third_exact_local_replica_requires_confirmation_without_hard_cap(self) -> None:
         self.api_server.local_nodes["node-a"] = self._node("node-a")
         self.api_server.local_nodes["node-b"] = self._node("node-b")
         request = self.api_server.NodeStartRequest(
@@ -145,12 +145,17 @@ class RuntimeApiValidationTests(unittest.TestCase):
             layer_start=0,
             layer_end=6,
             device="cpu",
-            confirm_local_replica=True,
         )
 
-        result = asyncio.run(self.api_server.start_node(request))
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(self.api_server.start_node(request))
 
-        self.assertEqual(result["error"], "local_replica_limit_reached")
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(
+            raised.exception.detail["error"],
+            "local_replica_confirmation_required",
+        )
+        self.assertIn("2 loaded local replicas", raised.exception.detail["message"])
 
     def test_loaded_generator_with_unhealthy_route_is_suspended(self) -> None:
         sequential = SimpleNamespace(

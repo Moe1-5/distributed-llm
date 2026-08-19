@@ -326,29 +326,67 @@ class RemoteSequential:
         return eligible
 
     def _probe_provider(self, node: dict) -> None:
+        peer_id = str(node.get("peer_id", "unknown"))
+        rpc_uid = str(node.get("rpc_uid", ""))
         deadline = time.monotonic() + self.health_config.probe_timeout_seconds
-        lookup = get_experts(
-            self.dht,
-            [str(node["rpc_uid"])],
-            return_future=True,
+        started_at = time.perf_counter()
+        stage = "expert_lookup"
+        logger.debug(
+            "Provider health probe started | peer=%s rpc_uid=%s timeout_seconds=%.1f",
+            peer_id[:8],
+            rpc_uid,
+            self.health_config.probe_timeout_seconds,
         )
         try:
-            experts = lookup.result(timeout=max(0.0, deadline - time.monotonic()))
-        except Exception:
-            lookup.cancel()
-            raise
-        expert = experts[0] if experts else None
-        if expert is None:
-            raise RuntimeError(f"Expert {node['rpc_uid']} was not found")
-        rpc_info = RemoteExpertWorker.run_coroutine(
-            expert.stub.rpc_info(runtime_pb2.ExpertUID(uid=expert.uid)),
-            return_future=True,
-        )
-        try:
-            rpc_info.result(timeout=max(0.0, deadline - time.monotonic()))
-        except Exception:
-            rpc_info.cancel()
-            raise
+            # Hivemind 1.1.12 creates the return_future MPFuture in this
+            # background probe thread, where Python 3.12 has no event loop.
+            # Keep discovery synchronous as in the proven Sprint 14 route path;
+            # the health monitor already bounds concurrent and stalled probes.
+            experts = get_experts(self.dht, [rpc_uid])
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Expert lookup exceeded {self.health_config.probe_timeout_seconds:g} seconds"
+                )
+            expert = experts[0] if experts else None
+            if expert is None:
+                raise RuntimeError(f"Expert {rpc_uid} was not found")
+
+            stage = "metadata_rpc"
+            rpc_info = RemoteExpertWorker.run_coroutine(
+                expert.stub.rpc_info(runtime_pb2.ExpertUID(uid=expert.uid)),
+                return_future=True,
+            )
+            try:
+                rpc_info.result(timeout=max(0.0, deadline - time.monotonic()))
+            except Exception:
+                rpc_info.cancel()
+                raise
+            logger.debug(
+                "Provider health probe completed | peer=%s rpc_uid=%s elapsed_ms=%.1f",
+                peer_id[:8],
+                rpc_uid,
+                (time.perf_counter() - started_at) * 1000,
+            )
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - started_at) * 1000
+            logger.warning(
+                "Provider health probe failed | peer=%s rpc_uid=%s stage=%s "
+                "elapsed_ms=%.1f error_type=%s error=%s",
+                peer_id[:8],
+                rpc_uid,
+                stage,
+                elapsed_ms,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            message = (
+                f"Provider probe {stage} failed for {peer_id[:8]} "
+                f"({rpc_uid}): {type(exc).__name__}: {exc}"
+            )
+            if isinstance(exc, TimeoutError):
+                raise TimeoutError(message) from exc
+            raise RuntimeError(message) from exc
 
     def get_health_readiness(self) -> dict:
         monitor = self.health_monitor
@@ -390,6 +428,23 @@ class RemoteSequential:
                 f"{item['start']}-{item['end']}" for item in requirements
             ) or "a complete adjacent provider route"
             reasons.append(f"No healthy complete route; unavailable layers {formatted}.")
+            unhealthy_providers = [
+                provider
+                for provider in health["providers"]
+                if provider.get("state") not in {"healthy", "degraded"}
+            ]
+            for provider in unhealthy_providers[:4]:
+                reasons.append(
+                    "Provider "
+                    f"{str(provider.get('peer_id', 'unknown'))[:8]} is "
+                    f"{provider.get('state', 'checking')}: "
+                    f"{provider.get('reason') or 'RPC health is not current.'}"
+                )
+            if health.get("last_discovery_error"):
+                reasons.append(
+                    "Provider discovery failed: "
+                    f"{health['last_discovery_error']}"
+                )
 
         selected_health: list[dict] = []
         for node in selected:

@@ -13,9 +13,12 @@ UID format fix:
     sequential.py can look up the UID from the metadata.
 """
 
+import asyncio
+import os
 import threading
 import time
 import inspect
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from queue import Full
 from typing import Optional
 
@@ -23,6 +26,7 @@ import torch
 import torch.nn as nn
 import hivemind
 from hivemind.moe.server import ModuleBackend
+from hivemind.moe.server.dht_handler import declare_experts
 from hivemind.moe.server.task_pool import Task, TaskPool
 from hivemind.proto.runtime_pb2 import CompressionType
 from hivemind.utils.tensor_descr import BatchTensorDescriptor
@@ -38,6 +42,7 @@ from incentives.protocol import (
     encode_metadata_tensor,
 )
 from incentives.receipts import create_worker_receipt, verify_inference_request
+from constants import ANNOUNCE_INTERVAL, DHT_EXPIRY_TIME, DHT_OPERATION_TIMEOUT
 from node.handler import InferenceHandler
 from node.rpc_safety import (
     RPCOverloadedError,
@@ -59,7 +64,15 @@ class _RejectingTaskPool(TaskPool):
     safety_controller: RPCSafetyController
 
     def submit_task(self, *args: torch.Tensor):
-        task = Task(MPFuture(), args)
+        task = Task(_new_rpc_task_future(self.name), args)
+        logger.debug(
+            "RPC task admitted | pool=%s pid=%s thread=%s shape=%s bytes=%s",
+            self.name,
+            os.getpid(),
+            threading.current_thread().name,
+            tuple(args[0].shape) if args else None,
+            sum(arg.numel() * arg.element_size() for arg in args),
+        )
         if self.get_task_size(task) > self.max_batch_size:
             self.safety_controller.record_transport_rejection("batch")
             task.future.set_exception(
@@ -81,6 +94,42 @@ class _RejectingTaskPool(TaskPool):
         else:
             self.undispatched_task_timestamps.put(time.time())
         return task.future
+
+
+def _new_rpc_task_future(pool_name: str) -> MPFuture:
+    """Create an MPFuture that is always awaitable by the RPC handler loop."""
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError as exc:
+        logger.error(
+            "RPC task admission rejected | pool=%s pid=%s thread=%s "
+            "error=event_loop_unavailable",
+            pool_name,
+            os.getpid(),
+            threading.current_thread().name,
+        )
+        raise RuntimeError(
+            "rpc_transport:event_loop_unavailable: expert task was admitted "
+            "outside the Hivemind RPC event loop"
+        ) from exc
+
+    future = MPFuture()
+    bound_loop = getattr(future, "_loop", None)
+    aio_event = getattr(future, "_aio_event", None)
+    if bound_loop is not running_loop or aio_event is None:
+        # Hivemind 1.1.12 uses asyncio.get_event_loop() internally. On Python
+        # 3.12 that can leave MPFuture unbound even while an RPC loop is active.
+        future._loop = running_loop
+        future._aio_event = asyncio.Event()
+        logger.warning(
+            "Rebound Hivemind MPFuture to active RPC loop | pool=%s pid=%s "
+            "thread=%s previous_loop=%s",
+            pool_name,
+            os.getpid(),
+            threading.current_thread().name,
+            "missing" if bound_loop is None else "different",
+        )
+    return future
 
 
 def _install_rejecting_pools(
@@ -343,6 +392,11 @@ class RPCServer:
         self._uid:     Optional[str] = None
         self._receipt_uid: Optional[str] = None
         self._lock     = threading.Lock()
+        self._publication_lock = threading.Lock()
+        self._last_publication_attempt_at: Optional[float] = None
+        self._last_publication_success_at: Optional[float] = None
+        self._last_publication_error: Optional[str] = None
+        self._consecutive_publication_failures = 0
         self.safety_controller: Optional[RPCSafetyController] = None
 
     # ------------------------------------------------------------------
@@ -506,11 +560,19 @@ class RPCServer:
                     + self.safety_config.max_queued_forwards,
                 ),
                 device=torch.device(self.handler.device),
+                update_period=ANNOUNCE_INTERVAL,
+                expiration=DHT_EXPIRY_TIME,
             )
 
             self._server.run_in_background(await_ready=True)
             self._running = True
-            logger.info(f"RPC server running | uid={self._uid}")
+            logger.info(
+                "RPC server running | uid=%s publication_period=%ss "
+                "publication_expiry=%ss",
+                self._uid,
+                ANNOUNCE_INTERVAL,
+                DHT_EXPIRY_TIME,
+            )
 
     def stop(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS) -> None:
         with self._lock:
@@ -527,7 +589,99 @@ class RPCServer:
     # ------------------------------------------------------------------
 
     def is_running(self) -> bool:
-        return self._running
+        server = self._server
+        return bool(
+            self._running
+            and server is not None
+            and self._server_thread_alive(server)
+            and self._server_runtime_ready(server)
+        )
+
+    def refresh_publication(self, expiration_time: float) -> dict:
+        """Refresh every advertised expert UID using the supervised heartbeat."""
+        with self._publication_lock:
+            self._last_publication_attempt_at = time.time()
+            uids = self._publication_uids()
+            try:
+                if not self.is_running():
+                    raise RuntimeError("RPC runtime is not running")
+                if not uids:
+                    raise RuntimeError("RPC server has no expert UIDs to publish")
+
+                future = declare_experts(
+                    self.dht,
+                    uids,
+                    expiration_time=expiration_time,
+                    wait=False,
+                )
+                try:
+                    result = future.result(timeout=DHT_OPERATION_TIMEOUT)
+                except FutureTimeoutError as exc:
+                    future.cancel()
+                    raise TimeoutError(
+                        "RPC expert publication exceeded "
+                        f"{DHT_OPERATION_TIMEOUT:g} seconds"
+                    ) from exc
+
+                rejected = [uid for uid, stored in result.items() if not stored]
+                if rejected:
+                    logger.debug(
+                        "RPC expert publication already has newer records | uids=%s",
+                        rejected,
+                    )
+                self._last_publication_success_at = time.time()
+                self._last_publication_error = None
+                self._consecutive_publication_failures = 0
+                logger.debug(
+                    "RPC expert publication refreshed | uids=%s expiry=%s",
+                    uids,
+                    expiration_time,
+                )
+            except Exception as exc:
+                self._last_publication_error = f"{type(exc).__name__}: {exc}"
+                self._consecutive_publication_failures += 1
+                logger.warning(
+                    "RPC expert publication failed | uids=%s failures=%s error=%s",
+                    uids,
+                    self._consecutive_publication_failures,
+                    self._last_publication_error,
+                )
+                raise
+            return self.get_publication_status()
+
+    def get_publication_status(self) -> dict:
+        server = self._server
+        success_age = (
+            max(0.0, time.time() - self._last_publication_success_at)
+            if self._last_publication_success_at is not None
+            else None
+        )
+        server_alive = bool(
+            server is not None and self._server_thread_alive(server)
+        )
+        runtime_ready = bool(
+            server is not None and self._server_runtime_ready(server)
+        )
+        publisher = getattr(server, "dht_handler_thread", None)
+        publisher_alive = self._thread_alive(publisher)
+        return {
+            "uids": self._publication_uids(),
+            "server_alive": server_alive,
+            "runtime_ready": runtime_ready,
+            "hivemind_publisher_alive": publisher_alive,
+            "last_attempt_at": self._last_publication_attempt_at,
+            "last_success_at": self._last_publication_success_at,
+            "success_age_seconds": success_age,
+            "last_error": self._last_publication_error,
+            "consecutive_failures": self._consecutive_publication_failures,
+            "fresh": bool(
+                self._running
+                and server_alive
+                and runtime_ready
+                and success_age is not None
+                and success_age < DHT_EXPIRY_TIME
+            ),
+        }
 
     def get_uid(self) -> Optional[str]:
         return self._uid
@@ -551,6 +705,36 @@ class RPCServer:
             "application_presence": self.application_identity.presence(peer_id),
             "model_revision": self.incentives_config.model_revision,
         }
+
+    def _publication_uids(self) -> list[str]:
+        return [
+            uid
+            for uid in (self._uid, self._receipt_uid)
+            if uid is not None
+        ]
+
+    @staticmethod
+    def _thread_alive(thread) -> bool:
+        if thread is None:
+            return False
+        try:
+            return bool(thread.is_alive())
+        except Exception:
+            return False
+
+    @classmethod
+    def _server_thread_alive(cls, server) -> bool:
+        return cls._thread_alive(server)
+
+    @staticmethod
+    def _server_runtime_ready(server) -> bool:
+        ready = getattr(server, "ready", None)
+        if ready is None:
+            return False
+        try:
+            return bool(ready.is_set())
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Helpers
