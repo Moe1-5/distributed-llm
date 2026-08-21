@@ -1,7 +1,7 @@
 # Deployment and Live Testing Runbook
 
 **Status:** Active operator runbook
-**Last updated:** 2026-08-19
+**Last updated:** 2026-08-22
 
 This document is the practical checklist for rebuilding the Windows executable, running the VPS bootstrap relay, updating the local WSL backend, and preparing the later backend-bundled package.
 
@@ -89,17 +89,20 @@ Expected result:
 - package audit reports zero forbidden entries.
 - both physical devices use the same executable hash for acceptance.
 
-### Current Incentives-Recovery Test Artifact
+### Current Remote-Lease-Recovery Test Artifact
 
-The 2026-08-19 incentives-recovery build is:
+The 2026-08-22 remote-lease-recovery build is:
 
 - file: `frontend/dist/DistribLLM-1.0.0-portable.exe`
-- size: `87,658,394` bytes
-- SHA-256: `4bf954e4325f12e9e3227bd63d483c39d44c05e1cd1a8e8a1b06f6d1b02480e1`
+- source commit: `8daf6e21fa542bdfdbf87d36e459f916682466ea`
+- tracked source: clean
+- size: `87,656,445` bytes
+- SHA-256: `833ef6c17e757e75e16634890583172ed741eecb2ebdb35fcf43ae3c98dc8b58`
 - package audit: 36 ASAR entries and zero forbidden entries
 
-This is a live-test artifact from the current working tree. Produce a clean-source,
-committed rebuild before recording final examiner acceptance evidence.
+This executable supersedes the earlier incentives-recovery artifacts. Both physical
+devices must run this exact hash and the backend checkout at the embedded source
+commit before recording the remote lease soak and final acceptance evidence.
 
 ## Update The Local WSL Backend
 
