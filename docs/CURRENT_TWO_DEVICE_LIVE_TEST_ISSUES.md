@@ -1,15 +1,23 @@
 # Current Two-Device Live-Test Issues And Production Roadmap
 
 **Report updated:** 2026-08-22
-**Latest physical evidence:** 2026-08-21
+**Latest physical evidence:** 2026-08-22
 **Branch:** `fix/remote-dht-lease-recovery`
-**Reviewed source baseline:** `c00bfc26f2591b012a190b97d6d647b4070f9a51`
+**Physically tested source baseline:** `8daf6e21fa542bdfdbf87d36e459f916682466ea`
 **Topology:** Windows Electron clients, WSL 2 participant backends, a public VPS bootstrap/circuit relay, and a loopback-only VPS settlement service reached through per-device SSH tunnels
 **Incentive rollout:** `shadow`
 
 ## 1. Plain-Language Summary
 
-The latest test proved that the two devices can initially find each other and exchange a real tensor through the VPS relay. Device 1 created a generator, discovered Device 2's complete `facebook/opt-125m` worker, validated the `0-12` route, and completed a tensor canary. The system was genuinely ready at that point.
+The latest retest proved that the independent observer could retrieve Device 2's complete `facebook/opt-125m` worker and both expert UIDs, and that Device 1 could validate the `0-12` route and complete a tensor canary through the VPS relay. The generator genuinely reached ready.
+
+The first real prompts then failed with `ambiguous_transport` and `stream reset`. Device 2's persistent handler accounting nevertheless increased to seven served requests and 64 useful positions with zero handler failures. This means remote model work completed, but Device 1 did not receive a response with enough certainty to accept it. Automatic failover was correctly suppressed because replaying uncertain work could duplicate execution.
+
+Device 2 later reported one successful DHT/RPC network recovery. Its loaded handler and accounting survived, but its public P2P peer ID changed from `12D3KooWJrG3axje2Bg3mqhkSYKSnsztUtxz2Jx3nd6BKwfh5gwF` to `12D3KooWRuQFSqJLCL6GDwC9MhVB582FfZWKby2St4MUPHqSTZjG`. That is a confirmed recovery defect: the generator's selected route names the old peer, so a recovered worker cannot transparently return under a new identity.
+
+The second repair now stores one private libp2p key per local worker, reuses it for every DHT restart, refuses recovery if the peer ID changes, and records the pre-recovery trigger plus before/after peer IDs. A real local Hivemind restart reproduced the exact same peer ID from the saved key. Physical validation is still pending, and this repair must not be described as proof that the original relay stream reset itself is fixed.
+
+The preceding physical run had exposed a longer-term publication failure. It proved that the two devices could initially find each other and exchange a real tensor through the VPS relay. Device 1 created a generator, discovered Device 2's complete worker, validated the route, and completed a tensor canary.
 
 Approximately five minutes later, Device 1 could no longer find Device 2's Hivemind expert UID. Device 1 then stopped seeing Device 2's provider advertisement altogether and correctly suspended inference.
 
@@ -21,7 +29,7 @@ The health validation did not cause this failure. It detected the vanished route
 
 Source inspection identified a concrete false-success path: Hivemind client-mode workers can include their own local DHT storage or cache in a successful store, even though a generator cannot retrieve that local copy. The repair now requires remote-peer acknowledgement for worker records. This is the strongest code-level explanation for the evidence, but it remains a hypothesis until the rebuilt two-device system passes the long soak test.
 
-The first repair set was implemented on `2026-08-22` and is awaiting physical validation. It includes remote-only lease writes, per-peer membership leases, worker transport recovery, generator-start discovery, and coherent Monitoring labels. Passing unit tests does not change the latest physical acceptance result from failed to passed.
+The first repair set was implemented on `2026-08-22` and improved the next run enough to prove independent visibility and generator readiness. The peer-identity repair is now implemented but not yet physically tested. Passing local tests does not change the physical acceptance result from failed to passed.
 
 ## 2. Intended Runtime Flow
 
@@ -138,6 +146,15 @@ After Device 1 had lost the route, Device 2 still reported:
 
 This correlated evidence rules out a normal Device 2 shutdown. It establishes a divergence between Device 2's local publication result and Device 1's remote DHT view.
 
+### 3.5 The repair retest reached ready but real streams reset
+
+The independent observer initially returned `ok: true` for Device 2's member lease, provider metadata, `distribllm.0.12`, and `distribllm.999999.0.12`. Device 1 then reached generator ready and passed the tensor canary.
+
+Two user prompts failed at layers `0-12` with an ambiguous stream reset. Device 1 retained the failed route's old peer ID in `last_failover`, while Device 2 later exposed a different current peer ID and `network_recovery_count: 1`. Device 2's model handler was not reloaded: its accounting retained seven served requests, 64 positions, and zero failures. The evidence therefore establishes both of these facts without conflating them:
+
+1. a real forward response was lost after remote execution, and its exact relay/RPC cause remains open;
+2. subsequent network recovery rotated the worker identity and prevented the selected route from recovering under the same peer.
+
 ## 4. What The Current Screens Mean
 
 ### Device 1 Nodes: `0 online`
@@ -165,17 +182,18 @@ Device 2 has no local generator, so it has no generator-side provider health mon
 | ID | Severity | Issue | Effect | Status |
 |---|---|---|---|---|
 | LT-01 | Critical | Generator-only discovery/start circular dependency | The UI disabled generator start before the generator DHT existed | Fix implemented; physical validation pending |
-| LT-02 | Critical | Remote DHT and expert lease persistence failure | A valid route disappeared after approximately five minutes while the worker reported fresh local publication | Repair implemented; soak validation pending |
+| LT-02 | Critical | Remote DHT and expert lease persistence failure | A valid route disappeared after approximately five minutes while the worker reported fresh local publication | First repair improved visibility; second soak pending |
 | LT-03 | High | Local publication success was treated as remote availability | Device 2 could present a healthy worker while Device 1 could not retrieve it | Remote-store acknowledgement implemented; independent observer still open |
 | LT-04 | High | Shared members index retained expired peers | Discovery saw member IDs whose per-peer metadata was already gone | Per-peer v2 leases implemented with legacy fallback |
 | LT-05 | High | Monitoring combined incompatible snapshots | It could show `100%` raw coverage and `Missing: 0-12` simultaneously | UI calculation fixed; physical validation pending |
 | LT-06 | Medium | Worker-only health said `RPC HEALTH UNKNOWN` | Operators could mistake “not probed” for RPC failure | Relabeled as lease state plus `NOT PROBED` |
-| LT-07 | High | A complete user generation is not accepted yet | The tensor canary passed, but the route vanished before the prompt | Open acceptance gate |
+| LT-07 | Critical | A complete user generation is not accepted yet | Tensor canary passed and worker accounting advanced, but both real prompts ended with an ambiguous stream reset | Open transport acceptance gate |
 | LT-08 | High | Latest-run shadow receipt acceptance is not proven | No successful prompt means no final selected-work receipt | Open acceptance gate |
 | LT-09 | High | Settlement access uses manual participant SSH tunnels | Closing the tunnel makes local settlement unavailable | Test-only deployment limitation |
 | LT-10 | High | Portable EXE does not provision its backend | Every device still needs manual WSL, checkout, dependencies, configuration, and model setup | Packaging limitation |
 | LT-11 | Medium | Blank API database configuration can cause HTTP 500 | An empty path can resolve to a directory rather than a SQLite file | Workaround known; code/template fix open |
 | LT-12 | Medium | Runtime failure details are split across local and remote views | One machine alone cannot distinguish local success from global visibility | Instrumentation improvement required |
+| LT-13 | Critical | Worker transport recovery rotated its public peer ID | Loaded layers survived, but the generator's selected peer was replaced by a new identity | Persistent peer repair implemented; physical validation pending |
 
 ## 6. Confirmed Failure Boundary And Remaining Root-Cause Questions
 
@@ -275,7 +293,7 @@ Add supervised recovery when remote visibility fails repeatedly:
 
 This preserves expensive model loading while repairing networking.
 
-**State:** implemented. After two consecutive remote lease failures, subject to a cooldown, the worker recreates DHT and RPC transport handles while retaining loaded model layers. Recovery success and errors are exposed in announcement status.
+**State:** implemented and hardened after the latest retest. After two consecutive remote lease failures, subject to a cooldown, the worker recreates DHT and RPC transport handles while retaining loaded model layers. Each worker now uses a private persistent key under `DISTRIBLLM_P2P_IDENTITY_DIR`, recovery supplies the previous peer ID as an invariant, and startup shuts down and rejects any replacement identity. Announcement status exposes the recovery trigger, triggering failure count, before/after peer IDs, identity-preservation result, success, and error state without exposing the key path.
 
 ### 7.5 Align lease and health policy
 
@@ -393,9 +411,11 @@ One VPS is a single point of failure. Production needs:
 4. **Done in code:** remove the generator-only disabled-start circular dependency.
 5. **Done in code:** reconcile the confirmed Monitoring coverage and probe-label contradictions.
 6. **Done in code:** add a standalone independent remote read-back observer and eleven-window simulated lease regression.
-7. **Open:** run the observer for at least ten real lease windows through the VPS relay.
-8. **Open:** give the developer API database a safe concrete default.
-9. **Done in documentation:** preserve the latest physical evidence as a failed stability acceptance result.
+7. **Done in code:** persist each worker's private P2P identity and reject peer rotation during transport recovery.
+8. **Open:** run the observer for at least ten real lease windows through the VPS relay and verify every recovery reports matching before/after peer IDs.
+9. **Open:** diagnose the real-forward `stream reset` if it remains after the identity-preserving rebuild.
+10. **Open:** give the developer API database a safe concrete default.
+11. **Done in documentation:** preserve both physical failures as failed acceptance results.
 
 ### Phase 1 — prove sustained distributed inference
 
@@ -463,19 +483,19 @@ Users should not need Git, `uv`, manual `.env` editing, shell commands, or a pre
 | Device 1 generator reaches ready | Passed |
 | Provider remains remotely visible across sustained lease refreshes | **Failed** |
 | Generator remains ready for the soak interval | **Failed** |
-| User prompt completes through Device 2 | Not reached |
-| Device 2 useful-work receipt is accepted | Not reached |
-| Shadow mode leaves credits unchanged | Expected, but latest prompt path not reached |
+| User prompt completes through Device 2 | **Failed: ambiguous stream reset after remote execution** |
+| Device 2 useful-work receipt is accepted | Not accepted because the generator could not accept the uncertain response |
+| Shadow mode leaves credits unchanged | Passed by policy; successful receipt path remains unproven |
 | Provider failure suspends unsafe inference | Passed |
-| Provider automatically recovers without model reload | Not proven |
+| Provider automatically recovers without model reload | Partial: layers survived, but the tested build rotated peer identity |
 | Clean-machine packaged installation | Not implemented |
 | Participant operation without SSH tunnel | Not implemented |
 
 ## 11. Current Stopping Point
 
-The latest physical run should be retained as a failed stability acceptance result. Repeating the same generator startup is not the next useful action: startup already passed and the failure appeared only after the route had been healthy for several minutes.
+The latest physical run should be retained as a failed streamed-inference and recovery-identity acceptance result. Repeating the same tested build is not useful: route validation already passed, real forwards reset, and its recovery changed peer identity.
 
-The immediate implementation and focused unit regression work is complete. The next useful action is to commit one clean revision, build matching backend and Windows artifacts, and repeat the physical test. Keep Device 2's full worker and Device 1's generator alive for at least ten lease windows while `backend/lease_observer.py` repeatedly checks the member lease, provider record, and both expert UIDs from its own DHT identity. Only that result can close LT-02.
+The next useful action is to commit and package the identity-preserving recovery revision, then repeat the physical test with matching backend source on both devices. Keep Device 2's full worker and Device 1's generator alive for at least ten lease windows while `backend/lease_observer.py` checks the member lease, provider record, and both expert UIDs. Complete real prompts early and throughout the soak. Any recovery must keep the same Device 2 peer ID and report `last_network_recovery_identity_preserved: true`. A repeated stream reset remains a separate failure that requires fresh correlated Device 1, Device 2, and relay evidence.
 
 ## 12. Related Documentation
 

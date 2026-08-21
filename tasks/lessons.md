@@ -17,6 +17,11 @@
 
 ## Active
 
+### [2026-08-22] Separate route validation from sustained streamed execution
+**Problem:** I treated independent lease visibility, metadata health, and a successful tensor canary as sufficient proof that the physical relay path was ready, but the first real prompt later failed with an ambiguous stream reset while the worker recovered its network transport and changed peer identity.
+**Rule:** Report discovery, route validation, tensor canary, and sustained streamed generation as separate acceptance gates. Do not call the system working until at least one real prompt completes and recovery preserves the provider identity used by the selected route.
+**Why:** A short health probe can pass immediately before a relay stream fails, and rotating the provider peer ID during recovery invalidates an otherwise healthy selected route.
+
 ### [2026-08-19] Leave user-owned physical validation to the requested handoff
 **Problem:** I began a real local split probe after the code-side regression test passed, while the user intended to perform runtime validation personally.
 **Rule:** When the user takes ownership of live or physical validation, stop runtime probes and limit the handoff to the implemented change, focused code checks already completed, and exact manual expectations.

@@ -13,6 +13,8 @@ Startup sequence:
 import time
 import threading
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from pathlib import Path
+import re
 from typing import Optional
 from uuid import uuid4
 
@@ -28,6 +30,7 @@ from constants import (
     DHT_RECOVERY_COOLDOWN_SECONDS,
     DHT_RECOVERY_FAILURE_THRESHOLD,
     P2PNetworkConfig,
+    get_p2p_identity_dir,
     get_p2p_network_config,
 )
 from node.handler import InferenceHandler
@@ -53,6 +56,7 @@ class Node:
         node_id:       Optional[str] = None,
         rpc_uid_suffix: Optional[int] = None,
         p2p_config: Optional[P2PNetworkConfig] = None,
+        p2p_identity_dir: Optional[Path | str] = None,
     ):
         if not model_name.strip():
             raise ValueError("model_name must not be empty")
@@ -80,8 +84,21 @@ class Node:
         self.hf_token      = hf_token
         self.local_model_path = local_model_path
         self.node_id       = node_id or uuid4().hex[:12]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", self.node_id):
+            raise ValueError(
+                "node_id must contain only letters, numbers, dots, underscores, "
+                "or hyphens and must not exceed 128 characters"
+            )
         self.rpc_uid_suffix = rpc_uid_suffix
         self.p2p_config = p2p_config or get_p2p_network_config()
+        self.p2p_identity_dir = (
+            Path(p2p_identity_dir).expanduser()
+            if p2p_identity_dir is not None
+            else get_p2p_identity_dir()
+        )
+        self._p2p_identity_path = (
+            self.p2p_identity_dir / f"{self.node_id}.key"
+        )
 
         self.dht:     Optional[hivemind.DHT]     = None
         self.handler: Optional[InferenceHandler] = None
@@ -101,6 +118,11 @@ class Node:
         self._last_network_recovery_at: Optional[float] = None
         self._last_network_recovery_error: Optional[str] = None
         self._network_recovery_count = 0
+        self._last_network_recovery_trigger: Optional[str] = None
+        self._last_network_recovery_failure_count = 0
+        self._last_network_recovery_peer_id_before: Optional[str] = None
+        self._last_network_recovery_peer_id_after: Optional[str] = None
+        self._last_network_recovery_identity_preserved: Optional[bool] = None
         self._last_peer_id: Optional[str] = None
         self._last_maddrs: list[str] = []
         self.connection_mode = "checking"
@@ -111,7 +133,7 @@ class Node:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self) -> None:
+    def start(self, *, expected_peer_id: Optional[str] = None) -> None:
         logger.info(
             f"Node starting | model={self.model_name} "
             f"layers={self.layer_start}-{self.layer_end} device={self.device}"
@@ -120,6 +142,7 @@ class Node:
 
         # Step 1: DHT
         if self.dht is None:
+            required_peer_id = expected_peer_id or self._last_peer_id
             self.connection_mode = self._select_connection_mode()
             if self.connection_mode == "relay":
                 install_static_relay_compat()
@@ -129,6 +152,7 @@ class Node:
             )
             announce_maddrs = list(self.p2p_config.announce_maddrs) or None
             trusted_relays = list(self.p2p_config.trusted_relays) or None
+            identity_path = self._prepare_p2p_identity_path()
             self.dht = hivemind.DHT(
                 host_maddrs=self.p2p_config.host_maddrs,
                 announce_maddrs=announce_maddrs,
@@ -147,6 +171,7 @@ class Node:
                 force_reachability=(
                     "private" if self.connection_mode == "relay" else None
                 ),
+                identity_path=str(identity_path),
             )
             logger.info(
                 "DHT transport args | host_maddrs=%s announce_maddrs=%s "
@@ -168,7 +193,24 @@ class Node:
             logger.info("Step 1/4: Reusing existing DHT...")
         if self.dht.peer_id is None:
             raise RuntimeError("DHT started but peer_id is None")
-        self._last_peer_id = str(self.dht.peer_id)
+        peer_id = str(self.dht.peer_id)
+        required_peer_id = expected_peer_id or self._last_peer_id
+        if required_peer_id is not None and peer_id != required_peer_id:
+            mismatched_dht = self.dht
+            self.dht = None
+            _run_with_timeout(
+                "node-dht-identity-mismatch-shutdown",
+                mismatched_dht.shutdown,
+                DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            raise RuntimeError(
+                "Worker P2P identity changed while restarting transport: "
+                f"expected {required_peer_id}, got {peer_id}. Refusing to "
+                "publish a replacement peer for the loaded worker."
+            )
+        self._last_peer_id = peer_id
+        if self._p2p_identity_path.is_file():
+            self._p2p_identity_path.chmod(0o600)
         logger.info(f"DHT started. Peer ID: {self.dht.peer_id}")
         if self.connection_mode == "relay":
             self._wait_for_relay_address()
@@ -217,6 +259,22 @@ class Node:
         self._ensure_announce_thread()
 
         logger.info(f"Node fully started. Addresses: {self.get_visible_maddrs()}")
+
+    def _prepare_p2p_identity_path(self) -> Path:
+        """Create a private key directory and validate the worker key target."""
+        self.p2p_identity_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not self.p2p_identity_dir.is_dir():
+            raise RuntimeError(
+                "DISTRIBLLM_P2P_IDENTITY_DIR must point to a directory"
+            )
+        self.p2p_identity_dir.chmod(0o700)
+        if self._p2p_identity_path.exists():
+            if not self._p2p_identity_path.is_file():
+                raise RuntimeError(
+                    "The configured worker P2P identity target is not a file"
+                )
+            self._p2p_identity_path.chmod(0o600)
+        return self._p2p_identity_path
 
     def _select_connection_mode(self) -> str:
         configured_mode = self.p2p_config.mode
@@ -622,13 +680,21 @@ class Node:
         try:
             if not self._announce_enabled:
                 return
+            recovery_trigger = self._last_announce_error
+            failure_count = self._consecutive_announce_failures
+            previous_peer_id = self.get_peer_id()
             self._last_network_recovery_at = time.time()
             self._network_recovery_count += 1
             self._last_network_recovery_error = None
+            self._last_network_recovery_trigger = recovery_trigger
+            self._last_network_recovery_failure_count = failure_count
+            self._last_network_recovery_peer_id_before = previous_peer_id
+            self._last_network_recovery_peer_id_after = None
+            self._last_network_recovery_identity_preserved = None
             logger.warning(
                 "Recovering worker DHT/RPC transport after %s failed remote "
                 "lease refreshes; loaded layers will be preserved",
-                self._consecutive_announce_failures,
+                failure_count,
             )
             self._running = False
             if self.rpc is not None:
@@ -647,7 +713,13 @@ class Node:
             if not self._announce_enabled:
                 logger.info("Worker network recovery cancelled by lifecycle stop")
                 return
-            self.start()
+            self.start(expected_peer_id=previous_peer_id)
+            recovered_peer_id = self.get_peer_id()
+            self._last_network_recovery_peer_id_after = recovered_peer_id
+            self._last_network_recovery_identity_preserved = bool(
+                previous_peer_id is not None
+                and recovered_peer_id == previous_peer_id
+            )
             logger.info("Worker DHT/RPC transport recovery completed")
         except Exception as exc:
             self._last_network_recovery_error = f"{type(exc).__name__}: {exc}"
@@ -711,6 +783,22 @@ class Node:
             "network_recovery_count": self._network_recovery_count,
             "last_network_recovery_at": self._last_network_recovery_at,
             "last_network_recovery_error": self._last_network_recovery_error,
+            "persistent_peer_identity": True,
+            "last_network_recovery_trigger": (
+                self._last_network_recovery_trigger
+            ),
+            "last_network_recovery_failure_count": (
+                self._last_network_recovery_failure_count
+            ),
+            "last_network_recovery_peer_id_before": (
+                self._last_network_recovery_peer_id_before
+            ),
+            "last_network_recovery_peer_id_after": (
+                self._last_network_recovery_peer_id_after
+            ),
+            "last_network_recovery_identity_preserved": (
+                self._last_network_recovery_identity_preserved
+            ),
             "fresh": bool(
                 self._last_announce_success_at is not None
                 and success_age is not None

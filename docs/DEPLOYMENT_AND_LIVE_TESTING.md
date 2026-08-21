@@ -318,7 +318,10 @@ DISTRIBLLM_ANNOUNCE_INTERVAL_SECONDS=20
 DISTRIBLLM_DHT_OPERATION_TIMEOUT=10
 DISTRIBLLM_DHT_RECOVERY_FAILURE_THRESHOLD=2
 DISTRIBLLM_DHT_RECOVERY_COOLDOWN_SECONDS=60
+DISTRIBLLM_P2P_IDENTITY_DIR=
 ```
+
+Leave `DISTRIBLLM_P2P_IDENTITY_DIR` empty to use the private WSL-local default at `~/.distribllm/p2p-identities`. Every local worker receives a separate key file. Do not copy this directory between devices, do not put it in Git, and do not confuse it with `DISTRIBLLM_IDENTITY_PATH`, which is the application key used to sign useful-work receipts.
 
 Restart the managed backend after changing `.env`. Both serving workers and the generator must run in shadow mode for receipt-capable RPC and countersigned acceptance to be exercised.
 
@@ -376,8 +379,10 @@ Then run the independent observer in a separate Device 1 WSL terminal. With the 
 
 ```bash
 cd "$HOME/FYP/fyp-projects/backend"
+RELAY_ADDR="/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2"
 set -o pipefail
 uv run --python 3.12 python -m lease_observer \
+  --initial-peer "$RELAY_ADDR" \
   --expected-peer "PASTE_FULL_DEVICE_2_PEER_ID" \
   --require-receipt \
   --interval 10 \
@@ -386,6 +391,14 @@ uv run --python 3.12 python -m lease_observer \
 ```
 
 Every JSON line must contain `"ok": true`. The command exits nonzero if any observation loses the member lease, provider metadata, normal expert UID, receipt expert UID, or safe expiration horizon. Preserve the JSON Lines file with the runtime snapshots and artifact hashes.
+
+If Device 2 reports a network recovery, verify identity continuity from its local node status:
+
+```bash
+curl -fsS http://127.0.0.1:8000/nodes/local | python3 -m json.tool
+```
+
+The `announcement` object must show the same `last_network_recovery_peer_id_before` and `last_network_recovery_peer_id_after`, with `last_network_recovery_identity_preserved` equal to `true`. A changed peer ID, a false value, or a recovery error fails the run even if a new provider later appears.
 
 For a split OPT-125M route, the expected layer ranges are half-open:
 

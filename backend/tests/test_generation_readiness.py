@@ -43,6 +43,7 @@ from constants import (
     P2PNetworkConfig,
     SUPPORTED_MODELS,
     get_initial_peers,
+    get_p2p_identity_dir,
     get_p2p_network_config,
 )
 
@@ -58,6 +59,16 @@ class InitialPeersTests(unittest.TestCase):
     def test_empty_environment_value_uses_default_peers(self):
         with patch.dict(os.environ, {"DISTRIBLLM_INITIAL_PEERS": ""}):
             self.assertEqual(get_initial_peers(), DEFAULT_DISTRIBLLM_INITIAL_PEERS)
+
+    def test_reads_persistent_p2p_identity_directory_from_environment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            configured = Path(temp_dir) / "worker-identities"
+            with patch.dict(
+                os.environ,
+                {"DISTRIBLLM_P2P_IDENTITY_DIR": str(configured)},
+                clear=True,
+            ):
+                self.assertEqual(get_p2p_identity_dir(), configured)
 
     def test_reads_direct_p2p_configuration_from_environment(self):
         with patch.dict(
@@ -1985,6 +1996,8 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 self.stopped = True
 
         class FakeDHT:
+            peer_id = "peer-stable"
+
             def __init__(self) -> None:
                 self.stopped = False
 
@@ -2007,6 +2020,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         node._running = True
         node._announce_enabled = True
         node._consecutive_announce_failures = 2
+        node._last_announce_error = "remote member lease refresh timed out"
 
         with (
             patch("node.node.DHT_RECOVERY_FAILURE_THRESHOLD", 2),
@@ -2021,7 +2035,23 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertIsNone(node.rpc)
         self.assertIsNone(node.dht)
         self.assertEqual(node._network_recovery_count, 1)
-        restart.assert_called_once_with()
+        restart.assert_called_once_with(expected_peer_id="peer-stable")
+        status = node.get_announcement_status()
+        self.assertTrue(status["persistent_peer_identity"])
+        self.assertEqual(
+            status["last_network_recovery_trigger"],
+            "remote member lease refresh timed out",
+        )
+        self.assertEqual(status["last_network_recovery_failure_count"], 2)
+        self.assertEqual(
+            status["last_network_recovery_peer_id_before"],
+            "peer-stable",
+        )
+        self.assertEqual(
+            status["last_network_recovery_peer_id_after"],
+            "peer-stable",
+        )
+        self.assertTrue(status["last_network_recovery_identity_preserved"])
 
     def test_node_turn_off_stops_rpc_but_keeps_loaded_layers(self) -> None:
         class FakeRPC:
@@ -2177,12 +2207,15 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             def get_uid(self) -> str:
                 return "test-prefix.0.1"
 
+        identity_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(identity_temp.cleanup)
         node = Node(
             model_name="facebook/opt-125m",
             layer_start=0,
             layer_end=1,
             dht_prefix="test-prefix",
             device="cpu",
+            p2p_identity_dir=identity_temp.name,
         )
         fake_handler = FakeHandler()
         node.handler = fake_handler
@@ -2216,6 +2249,63 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertFalse(dht_kwargs["use_auto_relay"])
         self.assertFalse(dht_kwargs["client_mode"])
         self.assertIsNone(dht_kwargs["force_reachability"])
+        self.assertEqual(
+            dht_kwargs["identity_path"],
+            str(Path(identity_temp.name) / f"{node.node_id}.key"),
+        )
+
+    def test_node_start_rejects_changed_peer_identity(self) -> None:
+        import node.node as node_module
+
+        created: list[object] = []
+        dht_kwargs: dict[str, object] = {}
+
+        class FakeDHT:
+            peer_id = "replacement-peer"
+
+            def __init__(self, *args, **kwargs) -> None:
+                self.shutdown_called = False
+                dht_kwargs.update(kwargs)
+                created.append(self)
+
+            def shutdown(self) -> None:
+                self.shutdown_called = True
+
+        config = P2PNetworkConfig(
+            mode="direct",
+            port=0,
+            announce_maddrs=(),
+            trusted_relays=(),
+            auto_nat=True,
+            nat_port_map=True,
+            use_auto_relay=False,
+            relay_wait_timeout=0,
+        )
+        with tempfile.TemporaryDirectory() as identity_dir:
+            node = Node(
+                model_name="facebook/opt-125m",
+                layer_start=0,
+                layer_end=1,
+                dht_prefix="test-prefix",
+                device="cpu",
+                p2p_config=config,
+                p2p_identity_dir=identity_dir,
+            )
+            node._last_peer_id = "original-peer"
+            with patch.object(node_module.hivemind, "DHT", FakeDHT):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "expected original-peer, got replacement-peer",
+                ):
+                    node.start(expected_peer_id="original-peer")
+
+        self.assertIsNone(node.dht)
+        self.assertEqual(node.get_peer_id(), "original-peer")
+        self.assertTrue(created[0].shutdown_called)
+        self.assertEqual(
+            dht_kwargs["identity_path"],
+            str(Path(identity_dir) / f"{node.node_id}.key"),
+        )
 
     def test_node_auto_mode_falls_back_to_relay_and_announces_transport(self) -> None:
         import node.node as node_module
@@ -2290,6 +2380,8 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             use_auto_relay=True,
             relay_wait_timeout=0,
         )
+        identity_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(identity_temp.cleanup)
         node = Node(
             model_name="facebook/opt-125m",
             layer_start=0,
@@ -2300,6 +2392,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             ],
             device="cpu",
             p2p_config=config,
+            p2p_identity_dir=identity_temp.name,
         )
         node.handler = FakeHandler()
         node._ensure_announce_thread = lambda: None
@@ -2332,6 +2425,10 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(
             dht_kwargs["trusted_relays"],
             ["/ip4/203.0.113.10/tcp/7001/p2p/relay"],
+        )
+        self.assertEqual(
+            dht_kwargs["identity_path"],
+            str(Path(identity_temp.name) / f"{node.node_id}.key"),
         )
         announced = node.dht.values["test-prefix.node_info.worker"]
         self.assertEqual(announced["connection_mode"], "relay")

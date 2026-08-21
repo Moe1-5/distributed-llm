@@ -16,6 +16,7 @@ use_ipfs=False:
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Bootstrap peers
@@ -38,6 +39,14 @@ def get_initial_peers() -> list[str]:
 
 
 DISTRIBLLM_INITIAL_PEERS: list[str] = get_initial_peers()
+
+
+def get_p2p_identity_dir() -> Path:
+    """Return the private directory used for persistent worker peer keys."""
+    configured = os.environ.get("DISTRIBLLM_P2P_IDENTITY_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".distribllm" / "p2p-identities"
 
 
 def _get_bool_env(name: str, default: bool) -> bool:

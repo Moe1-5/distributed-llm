@@ -122,3 +122,11 @@
 - Verification: 155 focused backend tests from the repair session, Python compilation, Electron type checks, 20 launcher tests, two renderer-flow tests, the production build, and the Windows package audit pass. The packaged main process embeds source commit `8daf6e21fa542bdfdbf87d36e459f916682466ea` with the tracked-source dirty flag set to false.
 - Artifact: `DistribLLM-1.0.0-portable.exe` is 87,656,445 bytes with SHA-256 `833ef6c17e757e75e16634890583172ed741eecb2ebdb35fcf43ae3c98dc8b58`; the ASAR contains 36 entries and zero forbidden entries.
 - Remaining: install this exact executable and backend commit on both devices, run the independent observer for at least 1,000 seconds, complete real inference prompts, verify shadow receipt acceptance, and preserve the evidence before final approval.
+
+### 2026-08-22 - Preserve worker identity across network recovery
+
+- Physical finding: the independent observer and tensor canary passed, but real prompts ended in an ambiguous `stream reset`. Device 2 later recovered its DHT/RPC transport without unloading the handler, while its peer ID changed and invalidated Device 1's selected route.
+- What changed: every local worker now receives a private persistent libp2p key, DHT restarts reuse that key, recovery requires the previous peer ID, and a mismatched identity is shut down and rejected before RPC publication. Local node diagnostics retain the triggering lease error, failure count, before/after peer IDs, and identity-preservation result without exposing the key path.
+- Configuration: added `DISTRIBLLM_P2P_IDENTITY_DIR`; its empty/default value uses the WSL-local `~/.distribllm/p2p-identities` directory and remains separate from the useful-work application signing identity.
+- Verification: 157 generation-readiness, provider-health, coverage, and observer tests pass; five focused identity/recovery regressions pass; a real local Hivemind DHT restart reproduced the same peer ID from one saved key; Python compilation, Electron type checks, 20 launcher tests, two renderer-flow tests, and diff checks pass.
+- Status: the confirmed peer-rotation defect is repaired locally. The original real-forward stream reset is not claimed fixed and remains a separate physical transport gate. A clean committed build and two-device retest are next.
