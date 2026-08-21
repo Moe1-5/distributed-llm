@@ -26,7 +26,6 @@ import torch
 import torch.nn as nn
 import hivemind
 from hivemind.moe.server import ModuleBackend
-from hivemind.moe.server.dht_handler import declare_experts
 from hivemind.moe.server.task_pool import Task, TaskPool
 from hivemind.proto.runtime_pb2 import CompressionType
 from hivemind.utils.tensor_descr import BatchTensorDescriptor
@@ -395,8 +394,10 @@ class RPCServer:
         self._publication_lock = threading.Lock()
         self._last_publication_attempt_at: Optional[float] = None
         self._last_publication_success_at: Optional[float] = None
+        self._last_publication_expiration_time: Optional[float] = None
         self._last_publication_error: Optional[str] = None
         self._consecutive_publication_failures = 0
+        self.require_remote_publication = True
         self.safety_controller: Optional[RPCSafetyController] = None
 
     # ------------------------------------------------------------------
@@ -598,7 +599,14 @@ class RPCServer:
         )
 
     def refresh_publication(self, expiration_time: float) -> dict:
-        """Refresh every advertised expert UID using the supervised heartbeat."""
+        """Refresh exact expert leases on remote DHT peers.
+
+        Hivemind's built-in publisher may count a client-mode worker's local
+        cache as a successful store. A generator cannot read that cache after
+        the remote replicas expire. In a bootstrapped network these supervised
+        writes exclude the worker itself, so success means at least one remote
+        DHT peer accepted every exact UID used by DistribLLM routing.
+        """
         with self._publication_lock:
             self._last_publication_attempt_at = time.time()
             uids = self._publication_uids()
@@ -608,34 +616,50 @@ class RPCServer:
                 if not uids:
                     raise RuntimeError("RPC server has no expert UIDs to publish")
 
-                future = declare_experts(
-                    self.dht,
-                    uids,
-                    expiration_time=expiration_time,
-                    wait=False,
-                )
-                try:
-                    result = future.result(timeout=DHT_OPERATION_TIMEOUT)
-                except FutureTimeoutError as exc:
-                    future.cancel()
-                    raise TimeoutError(
-                        "RPC expert publication exceeded "
-                        f"{DHT_OPERATION_TIMEOUT:g} seconds"
-                    ) from exc
+                # Stay ahead of the Server's built-in publisher, which writes
+                # the same exact keys on its own heartbeat. The extra interval
+                # avoids a harmless newer local write causing the required
+                # remote-only write to be rejected.
+                remote_expiration = expiration_time + ANNOUNCE_INTERVAL
+                peer_id = str(self.dht.peer_id)
+                exclude_self = self.require_remote_publication
+                pending = {
+                    uid: self.dht.store(
+                        key=uid,
+                        value=peer_id,
+                        expiration_time=remote_expiration,
+                        exclude_self=exclude_self,
+                        return_future=True,
+                    )
+                    for uid in uids
+                }
+                result: dict[str, bool] = {}
+                for uid, future in pending.items():
+                    try:
+                        result[uid] = bool(
+                            future.result(timeout=DHT_OPERATION_TIMEOUT)
+                        )
+                    except FutureTimeoutError as exc:
+                        future.cancel()
+                        raise TimeoutError(
+                            f"RPC expert publication for {uid} exceeded "
+                            f"{DHT_OPERATION_TIMEOUT:g} seconds"
+                        ) from exc
 
                 rejected = [uid for uid, stored in result.items() if not stored]
                 if rejected:
-                    logger.debug(
-                        "RPC expert publication already has newer records | uids=%s",
-                        rejected,
+                    raise RuntimeError(
+                        "Remote DHT peers rejected or did not acknowledge expert "
+                        f"leases: {', '.join(rejected)}"
                     )
                 self._last_publication_success_at = time.time()
+                self._last_publication_expiration_time = remote_expiration
                 self._last_publication_error = None
                 self._consecutive_publication_failures = 0
                 logger.debug(
                     "RPC expert publication refreshed | uids=%s expiry=%s",
                     uids,
-                    expiration_time,
+                    remote_expiration,
                 )
             except Exception as exc:
                 self._last_publication_error = f"{type(exc).__name__}: {exc}"
@@ -671,6 +695,7 @@ class RPCServer:
             "hivemind_publisher_alive": publisher_alive,
             "last_attempt_at": self._last_publication_attempt_at,
             "last_success_at": self._last_publication_success_at,
+            "last_expiration_time": self._last_publication_expiration_time,
             "success_age_seconds": success_age,
             "last_error": self._last_publication_error,
             "consecutive_failures": self._consecutive_publication_failures,
@@ -681,6 +706,7 @@ class RPCServer:
                 and success_age is not None
                 and success_age < DHT_EXPIRY_TIME
             ),
+            "remote_store_required": self.require_remote_publication,
         }
 
     def get_uid(self) -> Optional[str]:

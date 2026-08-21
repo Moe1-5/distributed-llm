@@ -37,6 +37,20 @@ export interface NodeInfo {
     consecutive_failures: number
     fresh: boolean
   }
+  rpc_publication?: {
+    uids: string[]
+    server_alive: boolean
+    runtime_ready: boolean
+    hivemind_publisher_alive: boolean
+    last_attempt_at: number | null
+    last_success_at: number | null
+    last_expiration_time?: number | null
+    success_age_seconds: number | null
+    last_error: string | null
+    consecutive_failures: number
+    fresh: boolean
+    remote_store_required?: boolean
+  }
   loading?: {
     strategy: string
     architecture: string

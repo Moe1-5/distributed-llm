@@ -184,9 +184,17 @@ class CoverageApiConflictTests(unittest.TestCase):
             node(0, 12, "full"),
         ]
 
-        plan = asyncio.run(
-            self.api_server.get_model_serving_plan("facebook/opt-125m", 6)
-        )
+        async def load_refreshed_plan() -> dict:
+            key = ("facebook/opt-125m", 6)
+            with self.api_server._serving_plan_cache_lock:
+                self.api_server._serving_plan_cache.pop(key, None)
+            await self.api_server.get_model_serving_plan(*key)
+            refresh = self.api_server._serving_plan_refresh_tasks.get(key)
+            if refresh is not None:
+                await refresh
+            return await self.api_server.get_model_serving_plan(*key)
+
+        plan = asyncio.run(load_refreshed_plan())
 
         self.assertEqual(plan["route_kind"], "single_provider")
         self.assertEqual([item["peer_id"] for item in plan["selected_route"]], ["full"])

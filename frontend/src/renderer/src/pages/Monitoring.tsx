@@ -161,13 +161,18 @@ export default function Monitoring(): React.JSX.Element {
   const routeTrace = state.generator?.node_trace ?? []
   const generatorPerformance = state.generator?.performance
   const lastGeneration = generatorPerformance?.last_generation
-  const providerHealth = state.generator?.health?.providers ?? []
   const activeRoute = state.generator?.health?.active_route
   const alternateRoutes = state.generator?.health?.alternate_routes ?? []
   const lastFailover = state.generator?.health?.last_failover
   const healthByProvider = useMemo(
-    () => new Map(providerHealth.map((health) => [`${health.peer_id}:${health.rpc_uid}`, health])),
-    [providerHealth]
+    () =>
+      new Map(
+        (state.generator?.health?.providers ?? []).map((health) => [
+          `${health.peer_id}:${health.rpc_uid}`,
+          health
+        ])
+      ),
+    [state.generator?.health?.providers]
   )
 
   const coverage = useMemo(() => {
@@ -177,6 +182,7 @@ export default function Monitoring(): React.JSX.Element {
 
     const coveredLayers = new Set<number>()
     for (const node of modelNodes) {
+      if (!node.running || !node.layers_loaded || !node.rpc_running) continue
       for (let layer = node.layer_start; layer < node.layer_end; layer += 1) {
         if (layer >= 0 && layer < selectedModel.num_layers) coveredLayers.add(layer)
       }
@@ -234,11 +240,18 @@ export default function Monitoring(): React.JSX.Element {
         x: 420,
         y: 190,
         kind: 'model',
-        online: Boolean(selectedModel?.runnable)
+        online: Boolean(selectedModel && coverage.percent === 100)
       },
       ...providers
     ]
-  }, [coverage.covered, healthByProvider, modelNodes, selectedModel, state.generator])
+  }, [
+    coverage.covered,
+    coverage.percent,
+    healthByProvider,
+    modelNodes,
+    selectedModel,
+    state.generator
+  ])
 
   const providerNodes = mapNodes.filter((node) => node.kind === 'provider')
 
@@ -399,9 +412,9 @@ export default function Monitoring(): React.JSX.Element {
                   Network Map
                 </h2>
                 <p className="mt-1 text-sm text-text-secondary">
-                  {selectedModel?.runnable
+                  {coverage.percent === 100
                     ? 'Complete compatible coverage is available.'
-                    : (selectedModel?.route_reasons[0] ?? 'Waiting for compatible providers.')}
+                    : `Waiting for compatible providers; missing ${rangesFromMissing(coverage.missing)}.`}
                 </p>
               </div>
               <select
@@ -512,7 +525,7 @@ export default function Monitoring(): React.JSX.Element {
                 />
               </div>
               <p className="mt-4 font-mono text-[11px] text-text-secondary">
-                Missing: {rangesFromMissing(selectedModel?.missing_layers ?? coverage.missing)}
+                Missing: {rangesFromMissing(coverage.missing)}
               </p>
             </div>
 
@@ -612,12 +625,14 @@ export default function Monitoring(): React.JSX.Element {
                     </div>
                     <span
                       className={`rounded-full border px-2 py-0.5 font-mono text-[9px] ${
-                        node.running && node.rpc_running
+                        node.running && node.rpc_running && node.rpc_publication?.fresh !== false
                           ? 'border-green/20 bg-green/5 text-green'
                           : 'border-red/20 bg-red/5 text-red'
                       }`}
                     >
-                      {node.running && node.rpc_running ? 'DHT ADVERTISED' : 'DHT STALE'}
+                      {node.running && node.rpc_running && node.rpc_publication?.fresh !== false
+                        ? 'DHT ADVERTISED'
+                        : 'DHT STALE'}
                     </span>
                   </div>
                   <div className="mt-4 flex flex-wrap gap-1.5">
@@ -704,9 +719,17 @@ export default function Monitoring(): React.JSX.Element {
                     {(() => {
                       const health = healthByProvider.get(`${node.peer_id}:${node.rpc_uid ?? ''}`)
                       if (!health) {
+                        const leaseFresh = node.rpc_publication?.fresh
                         return (
-                          <span className="rounded border border-border px-2 py-0.5 font-mono text-[10px] text-text-dim">
-                            RPC HEALTH UNKNOWN
+                          <span
+                            className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
+                              leaseFresh
+                                ? 'border-cyan/20 bg-cyan-dim text-cyan'
+                                : 'border-border text-text-dim'
+                            }`}
+                            title="A generator has not actively probed this provider in the current backend."
+                          >
+                            {leaseFresh ? 'RPC LEASE FRESH · NOT PROBED' : 'RPC NOT PROBED'}
                           </span>
                         )
                       }

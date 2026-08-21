@@ -1411,6 +1411,33 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         self.assertEqual([node["peer_id"] for node in nodes], ["good-peer"])
 
+    def test_discover_nodes_prefers_independently_expiring_member_leases(self) -> None:
+        dht = MappingDHT(
+            {
+                "test-prefix.members.v2": {
+                    "current-peer": DummyDHTResult(
+                        {"peer_id": "current-peer", "timestamp": 100.0}
+                    ),
+                },
+                # Rolling-upgrade compatibility can still expose a stale
+                # aggregate member. With no node_info lease it is ignored.
+                "test-prefix.members": ["stale-peer"],
+                "test-prefix.node_info.current-peer": self.make_node(
+                    0, 8, "current-peer"
+                ),
+            }
+        )
+        sequential = RemoteSequential(
+            dht,
+            "test-prefix",
+            num_layers=8,
+            model_name="facebook/opt-125m",
+        )
+
+        nodes = sequential._discover_nodes()
+
+        self.assertEqual([node["peer_id"] for node in nodes], ["current-peer"])
+
     def test_discovered_node_running_defaults_to_loaded_rpc_state(self) -> None:
         dht = MappingDHT(
             {
@@ -1597,18 +1624,28 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             dht_handler_thread = Alive()
 
         class CompletedFuture:
+            def __init__(self, result: bool) -> None:
+                self.result_value = result
+
             def result(self, timeout: float) -> dict[str, bool]:
                 self.timeout = timeout
-                return {
-                    "test-prefix.0.1": True,
-                    "test-prefix.999999.0.1": False,
-                }
+                return self.result_value
 
             def cancel(self) -> None:
                 raise AssertionError("completed publication must not be cancelled")
 
+        class DHT:
+            peer_id = "peer"
+
+            def __init__(self) -> None:
+                self.stores: list[dict] = []
+
+            def store(self, **kwargs):
+                self.stores.append(kwargs)
+                return CompletedFuture(True)
+
         rpc = RPCServer.__new__(RPCServer)
-        rpc.dht = object()
+        rpc.dht = DHT()
         rpc._server = FakeServer()
         rpc._running = True
         rpc._uid = "test-prefix.0.1"
@@ -1616,21 +1653,24 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         rpc._publication_lock = __import__("threading").Lock()
         rpc._last_publication_attempt_at = None
         rpc._last_publication_success_at = None
+        rpc._last_publication_expiration_time = None
         rpc._last_publication_error = None
         rpc._consecutive_publication_failures = 0
+        rpc.require_remote_publication = True
 
-        future = CompletedFuture()
-        with patch(
-            "node.rpc_server.declare_experts",
-            return_value=future,
-        ) as declare:
-            status = rpc.refresh_publication(expiration_time=123.0)
+        status = rpc.refresh_publication(expiration_time=123.0)
 
-        declare.assert_called_once_with(
-            rpc.dht,
+        self.assertEqual(
+            [store["key"] for store in rpc.dht.stores],
             ["test-prefix.0.1", "test-prefix.999999.0.1"],
-            expiration_time=123.0,
-            wait=False,
+        )
+        self.assertTrue(all(store["exclude_self"] for store in rpc.dht.stores))
+        self.assertTrue(all(store["return_future"] for store in rpc.dht.stores))
+        self.assertTrue(
+            all(store["value"] == "peer" for store in rpc.dht.stores)
+        )
+        self.assertTrue(
+            all(store["expiration_time"] > 123.0 for store in rpc.dht.stores)
         )
         self.assertTrue(status["fresh"])
         self.assertTrue(status["server_alive"])
@@ -1638,6 +1678,54 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertTrue(status["hivemind_publisher_alive"])
         self.assertEqual(status["consecutive_failures"], 0)
         self.assertIsNone(status["last_error"])
+        self.assertTrue(status["remote_store_required"])
+
+    def test_rpc_publication_rejects_local_only_or_unacknowledged_lease(self) -> None:
+        class Ready:
+            def is_set(self) -> bool:
+                return True
+
+        class Alive:
+            def is_alive(self) -> bool:
+                return True
+
+        class FakeServer(Alive):
+            ready = Ready()
+            dht_handler_thread = Alive()
+
+        class CompletedFuture:
+            def result(self, timeout: float) -> bool:
+                return False
+
+            def cancel(self) -> None:
+                raise AssertionError("completed publication must not be cancelled")
+
+        class DHT:
+            peer_id = "peer"
+
+            def store(self, **kwargs):
+                return CompletedFuture()
+
+        rpc = RPCServer.__new__(RPCServer)
+        rpc.dht = DHT()
+        rpc._server = FakeServer()
+        rpc._running = True
+        rpc._uid = "test-prefix.0.1"
+        rpc._receipt_uid = None
+        rpc._publication_lock = __import__("threading").Lock()
+        rpc._last_publication_attempt_at = None
+        rpc._last_publication_success_at = None
+        rpc._last_publication_expiration_time = None
+        rpc._last_publication_error = None
+        rpc._consecutive_publication_failures = 0
+        rpc.require_remote_publication = True
+
+        with self.assertRaisesRegex(RuntimeError, "did not acknowledge"):
+            rpc.refresh_publication(expiration_time=123.0)
+
+        status = rpc.get_publication_status()
+        self.assertFalse(status["fresh"])
+        self.assertEqual(status["consecutive_failures"], 1)
 
     def test_node_stop_is_bounded_when_dht_shutdown_hangs(self) -> None:
         class FakeRPC:
@@ -1728,9 +1816,22 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 self.values: dict[str, object] = {}
                 self.expirations: dict[str, list[float]] = {}
 
-            def store(self, key: str, value: object, expiration_time: float) -> bool:
-                self.values[key] = value
+            def store(
+                self,
+                key: str,
+                value: object,
+                expiration_time: float,
+                subkey: str | None = None,
+                exclude_self: bool = False,
+            ) -> bool:
+                if subkey is None:
+                    self.values[key] = value
+                else:
+                    self.values.setdefault(key, {})[subkey] = value
                 self.expirations.setdefault(key, []).append(expiration_time)
+                self.expirations.setdefault(f"{key}:exclude_self", []).append(
+                    float(exclude_self)
+                )
                 return True
 
             def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
@@ -1745,6 +1846,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             layer_start=0,
             layer_end=1,
             dht_prefix="test-prefix",
+            initial_peers=["/ip4/127.0.0.1/tcp/7001/p2p/bootstrap"],
             device="cpu",
         )
         node.rpc = FakeRPC()
@@ -1759,11 +1861,23 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         members_expirations = node.dht.expirations["test-prefix.members"]
         self.assertEqual(len(members_expirations), 2)
         self.assertGreater(members_expirations[1], members_expirations[0])
+        member_lease_expirations = node.dht.expirations["test-prefix.members.v2"]
+        self.assertEqual(len(member_lease_expirations), 2)
+        self.assertTrue(
+            all(node.dht.expirations["test-prefix.members.v2:exclude_self"])
+        )
+        self.assertTrue(
+            all(node.dht.expirations["test-prefix.node_info.peer:exclude_self"])
+        )
         self.assertEqual(
             node.rpc.publication_expirations,
             [100.0 + DHT_EXPIRY_TIME, 120.0 + DHT_EXPIRY_TIME],
         )
         self.assertEqual(node.dht.values["test-prefix.members"], ["peer"])
+        self.assertEqual(
+            node.dht.values["test-prefix.members.v2"]["peer"]["peer_id"],
+            "peer",
+        )
         announced = node.dht.values["test-prefix.node_info.peer"]
         self.assertTrue(announced["rpc_publication"]["fresh"])
         self.assertTrue(node.get_announcement_status()["fresh"])
@@ -1776,6 +1890,138 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertTrue(node.is_running())
         node._last_announce_success_at = time.time() - DHT_EXPIRY_TIME - 1
         self.assertFalse(node.is_running())
+
+    def test_remote_member_and_metadata_leases_survive_repeated_expiry_windows(self) -> None:
+        class FakeRPC:
+            def is_running(self) -> bool:
+                return True
+
+            def get_uid(self) -> str:
+                return "test-prefix.0.1"
+
+            def refresh_publication(self, expiration_time: float) -> None:
+                return None
+
+            def get_publication_status(self) -> dict:
+                return {
+                    "fresh": True,
+                    "uids": ["test-prefix.0.1"],
+                    "remote_store_required": True,
+                }
+
+        class FakeHandler:
+            load_diagnostics = None
+
+            def is_loaded(self) -> bool:
+                return True
+
+            def get_accounting_snapshot(self) -> dict:
+                return {}
+
+        class FakeDHT:
+            peer_id = "peer"
+
+            def __init__(self) -> None:
+                self.values: dict[str, object] = {}
+
+            def store(
+                self,
+                key: str,
+                value: object,
+                expiration_time: float,
+                subkey: str | None = None,
+                exclude_self: bool = False,
+            ) -> bool:
+                self.assert_remote = exclude_self
+                if subkey is None:
+                    self.values[key] = value
+                else:
+                    self.values.setdefault(key, {})[subkey] = value
+                return True
+
+            def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
+                value = self.values.get(key)
+                return DummyDHTResult(value) if value is not None else None
+
+            def get_visible_maddrs(self) -> list[str]:
+                return ["/ip4/127.0.0.1/tcp/7001"]
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=12,
+            dht_prefix="test-prefix",
+            initial_peers=["/ip4/127.0.0.1/tcp/7001/p2p/bootstrap"],
+            device="cpu",
+        )
+        node.rpc = FakeRPC()
+        node.handler = FakeHandler()
+        node.dht = FakeDHT()
+        node._running = True
+        sequential = RemoteSequential(
+            node.dht,
+            "test-prefix",
+            num_layers=12,
+            model_name="facebook/opt-125m",
+        )
+
+        dht_times = [100.0 + index * (DHT_EXPIRY_TIME + 1) for index in range(11)]
+        with patch("node.node.get_dht_time", side_effect=dht_times):
+            for _ in dht_times:
+                node._announce()
+                nodes, errors = sequential._scan_node_metadata()
+                self.assertEqual(errors, [])
+                self.assertEqual([item["peer_id"] for item in nodes], ["peer"])
+
+        self.assertTrue(node.dht.assert_remote)
+        self.assertEqual(node._consecutive_announce_failures, 0)
+
+    def test_node_transport_recovery_preserves_loaded_layers(self) -> None:
+        class FakeRPC:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        class FakeDHT:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def shutdown(self) -> None:
+                self.stopped = True
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        handler = object()
+        rpc = FakeRPC()
+        dht = FakeDHT()
+        node.handler = handler
+        node.rpc = rpc
+        node.dht = dht
+        node._running = True
+        node._announce_enabled = True
+        node._consecutive_announce_failures = 2
+
+        with (
+            patch("node.node.DHT_RECOVERY_FAILURE_THRESHOLD", 2),
+            patch.object(node, "start") as restart,
+        ):
+            self.assertTrue(node._should_recover_network())
+            node._recover_network_transport()
+
+        self.assertTrue(rpc.stopped)
+        self.assertTrue(dht.stopped)
+        self.assertIs(node.handler, handler)
+        self.assertIsNone(node.rpc)
+        self.assertIsNone(node.dht)
+        self.assertEqual(node._network_recovery_count, 1)
+        restart.assert_called_once_with()
 
     def test_node_turn_off_stops_rpc_but_keeps_loaded_layers(self) -> None:
         class FakeRPC:
@@ -1813,8 +2059,18 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 self.values: dict[str, object] = {}
                 self.shutdown_called = False
 
-            def store(self, key: str, value: object, expiration_time: float) -> None:
-                self.values[key] = value
+            def store(
+                self,
+                key: str,
+                value: object,
+                expiration_time: float,
+                subkey: str | None = None,
+                exclude_self: bool = False,
+            ) -> None:
+                if subkey is None:
+                    self.values[key] = value
+                else:
+                    self.values.setdefault(key, {})[subkey] = value
 
             def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
                 value = self.values.get(key)
@@ -1887,8 +2143,18 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 self.values: dict[str, object] = {}
                 dht_kwargs.update(kwargs)
 
-            def store(self, key: str, value: object, expiration_time: float) -> None:
-                self.values[key] = value
+            def store(
+                self,
+                key: str,
+                value: object,
+                expiration_time: float,
+                subkey: str | None = None,
+                exclude_self: bool = False,
+            ) -> None:
+                if subkey is None:
+                    self.values[key] = value
+                else:
+                    self.values.setdefault(key, {})[subkey] = value
 
             def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
                 value = self.values.get(key)
@@ -1978,8 +2244,18 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 dht_kwargs.update(kwargs)
                 self.values: dict[str, object] = {}
 
-            def store(self, key: str, value: object, expiration_time: float) -> None:
-                self.values[key] = value
+            def store(
+                self,
+                key: str,
+                value: object,
+                expiration_time: float,
+                subkey: str | None = None,
+                exclude_self: bool = False,
+            ) -> None:
+                if subkey is None:
+                    self.values[key] = value
+                else:
+                    self.values.setdefault(key, {})[subkey] = value
 
             def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
                 value = self.values.get(key)

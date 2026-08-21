@@ -1392,10 +1392,7 @@ class RemoteSequential:
         """Return validated providers and distinct protocol-advertisement errors."""
         nodes: list[dict] = []
         errors: list[dict] = []
-        result = self.dht.get(f"{self.dht_prefix}.members", latest=True)
-        if result is None or not isinstance(result.value, list):
-            return nodes, errors
-        peer_ids: list[str] = result.value
+        peer_ids = self._get_member_peer_ids()
 
         for peer_id in peer_ids:
             try:
@@ -1418,6 +1415,32 @@ class RemoteSequential:
                     }
                 )
         return nodes, errors
+
+    def _get_member_peer_ids(self) -> list[str]:
+        """Read independently expiring v2 leases plus the legacy member list."""
+        peer_ids: list[str] = []
+        leases = self.dht.get(f"{self.dht_prefix}.members.v2", latest=True)
+        if leases is not None and isinstance(leases.value, dict):
+            for _subkey, wrapped_lease in leases.value.items():
+                lease = getattr(wrapped_lease, "value", wrapped_lease)
+                if isinstance(lease, dict):
+                    peer_id = lease.get("peer_id")
+                else:
+                    peer_id = None
+                if isinstance(peer_id, str) and peer_id:
+                    peer_ids.append(peer_id)
+
+        # Read the old aggregate key during rolling upgrades. Missing node_info
+        # records are ignored below, so expired legacy peers do not contribute
+        # to coverage even if an old aggregate list remains cached.
+        legacy = self.dht.get(f"{self.dht_prefix}.members", latest=True)
+        if legacy is not None and isinstance(legacy.value, list):
+            peer_ids.extend(
+                peer_id
+                for peer_id in legacy.value
+                if isinstance(peer_id, str) and peer_id
+            )
+        return list(dict.fromkeys(peer_ids))
 
     # ------------------------------------------------------------------
     # Coverage check

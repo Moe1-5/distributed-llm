@@ -313,6 +313,12 @@ DHT_PREFIX        = "distribllm"
 DHT_EXPIRY_TIME   = float(os.getenv("DISTRIBLLM_DHT_EXPIRY_SECONDS", "90"))
 ANNOUNCE_INTERVAL = float(os.getenv("DISTRIBLLM_ANNOUNCE_INTERVAL_SECONDS", "20"))
 DHT_OPERATION_TIMEOUT = float(os.getenv("DISTRIBLLM_DHT_OPERATION_TIMEOUT", "10"))
+DHT_RECOVERY_FAILURE_THRESHOLD = int(
+    os.getenv("DISTRIBLLM_DHT_RECOVERY_FAILURE_THRESHOLD", "2")
+)
+DHT_RECOVERY_COOLDOWN_SECONDS = float(
+    os.getenv("DISTRIBLLM_DHT_RECOVERY_COOLDOWN_SECONDS", "60")
+)
 
 if min(DHT_EXPIRY_TIME, ANNOUNCE_INTERVAL, DHT_OPERATION_TIMEOUT) <= 0:
     raise ValueError(
@@ -322,4 +328,12 @@ if DHT_EXPIRY_TIME <= ANNOUNCE_INTERVAL + DHT_OPERATION_TIMEOUT:
     raise ValueError(
         "DISTRIBLLM_DHT_EXPIRY_SECONDS must exceed the announce interval plus "
         "the DHT operation timeout"
+    )
+if DHT_RECOVERY_FAILURE_THRESHOLD <= 0:
+    raise ValueError(
+        "DISTRIBLLM_DHT_RECOVERY_FAILURE_THRESHOLD must be positive"
+    )
+if DHT_RECOVERY_COOLDOWN_SECONDS < 0:
+    raise ValueError(
+        "DISTRIBLLM_DHT_RECOVERY_COOLDOWN_SECONDS must be zero or greater"
     )

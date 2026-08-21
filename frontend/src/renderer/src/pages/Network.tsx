@@ -905,8 +905,10 @@ export default function Network(): React.JSX.Element {
   const handleStartGenerator = useCallback(async () => {
     if (!inferModel || genLoading) return
     if (!inferencePlan?.current_runnable) {
-      log(`Needs layers ${formatRanges(inferencePlan?.missing_ranges ?? [])}.`, 'error')
-      return
+      log(
+        'Connecting the generator DHT client to refresh remote coverage and validate the route.',
+        'info'
+      )
     }
     if (inferNeedsLocalImport) {
       log(`Import a local approved model directory for ${inferModel} before starting.`, 'error')
@@ -1519,13 +1521,19 @@ export default function Network(): React.JSX.Element {
                       </p>
                     )}
                     {!inferencePlan.current_runnable && (
-                      <button
-                        type="button"
-                        onClick={() => void handleServeMissingRange()}
-                        className="h-9 rounded-lg border border-amber/30 bg-amber/10 font-mono text-[10px] font-semibold text-amber hover:bg-amber/20"
-                      >
-                        SERVE MISSING RANGE
-                      </button>
+                      <div className="flex flex-col gap-2">
+                        <p className="font-mono text-[9px] leading-relaxed text-text-dim">
+                          This preflight snapshot may be local-only. Start Generator connects its
+                          own DHT client and performs the authoritative route and tensor checks.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => void handleServeMissingRange()}
+                          className="h-9 rounded-lg border border-amber/30 bg-amber/10 font-mono text-[10px] font-semibold text-amber hover:bg-amber/20"
+                        >
+                          SERVE MISSING RANGE
+                        </button>
+                      </div>
                     )}
                   </div>
                 )}
@@ -1594,7 +1602,7 @@ export default function Network(): React.JSX.Element {
                       : handleStartGenerator())
                   }
                   disabled={
-                    !genLoading && (!inferModel || !inferencePlan?.current_runnable)
+                    !genLoading && !inferModel
                   }
                   className={`
                     w-full rounded-xl border py-3 font-mono text-[12px] font-semibold
@@ -1602,7 +1610,7 @@ export default function Network(): React.JSX.Element {
                     ${
                       genLoading
                         ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
-                        : !inferModel || !inferencePlan?.current_runnable
+                        : !inferModel
                           ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
                         : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
                     }

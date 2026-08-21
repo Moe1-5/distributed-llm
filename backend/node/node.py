@@ -25,6 +25,8 @@ from constants import (
     ANNOUNCE_INTERVAL,
     DHT_EXPIRY_TIME,
     DHT_OPERATION_TIMEOUT,
+    DHT_RECOVERY_COOLDOWN_SECONDS,
+    DHT_RECOVERY_FAILURE_THRESHOLD,
     P2PNetworkConfig,
     get_p2p_network_config,
 )
@@ -95,6 +97,10 @@ class Node:
         self._last_announce_success_at: Optional[float] = None
         self._last_announce_error: Optional[str] = None
         self._consecutive_announce_failures = 0
+        self._network_recovery_lock = threading.Lock()
+        self._last_network_recovery_at: Optional[float] = None
+        self._last_network_recovery_error: Optional[str] = None
+        self._network_recovery_count = 0
         self._last_peer_id: Optional[str] = None
         self._last_maddrs: list[str] = []
         self.connection_mode = "checking"
@@ -197,6 +203,7 @@ class Node:
                 dht_prefix=self.dht_prefix,
                 uid_suffix=self.rpc_uid_suffix,
             )
+        self.rpc.require_remote_publication = self._remote_lease_required()
         self.rpc.start()
         if not self.rpc.is_running():
             raise RuntimeError("rpc.start() completed but is_running() is False")
@@ -377,7 +384,12 @@ class Node:
         """
         Write node metadata to DHT under two keys:
             1. {prefix}.node_info.{peer_id}  — full metadata
-            2. {prefix}.members              — list of all peer_ids
+            2. {prefix}.members.v2           — independently leased peer entries
+
+        When bootstrap peers are configured, every authoritative write excludes
+        this worker itself. This prevents a local cache-only write from being
+        reported as a healthy network announcement when remote replicas are no
+        longer reachable. Isolated local development remains self-contained.
         """
         with self._announce_lock:
             if self.dht is None:
@@ -459,28 +471,59 @@ class Node:
                         **(receipt_capability or {}),
                     },
                     expiration_time=expiry,
+                    exclude_self=self._remote_lease_required(),
                 )
                 if node_stored is False:
-                    raise RuntimeError("DHT rejected the node metadata refresh")
+                    raise RuntimeError(
+                        "Remote DHT peers rejected the node metadata refresh"
+                    )
 
-                members_key = f"{self.dht_prefix}.members"
-                result = self._dht_call(
-                    "members lookup",
-                    self.dht.get,
-                    members_key,
-                    latest=True,
-                )
-                existing = result.value if (result and isinstance(result.value, list)) else []
-                members = list(dict.fromkeys([*existing, peer_id]))
+                members_v2_key = f"{self.dht_prefix}.members.v2"
                 members_stored = self._dht_call(
-                    "members refresh",
+                    "member lease refresh",
                     self.dht.store,
-                    key=members_key,
-                    value=members,
+                    key=members_v2_key,
+                    subkey=peer_id,
+                    value={
+                        "peer_id": peer_id,
+                        "node_id": self.node_id,
+                        "timestamp": time.time(),
+                    },
                     expiration_time=expiry,
+                    exclude_self=self._remote_lease_required(),
                 )
                 if members_stored is False:
-                    raise RuntimeError("DHT rejected the members index refresh")
+                    raise RuntimeError(
+                        "Remote DHT peers rejected the member lease refresh"
+                    )
+
+                # Keep the legacy aggregate index during the transition. It is
+                # best-effort because concurrent read-modify-write updates can
+                # legitimately supersede one another. New clients use v2.
+                members_key = f"{self.dht_prefix}.members"
+                try:
+                    result = self._dht_call(
+                        "legacy members lookup",
+                        self.dht.get,
+                        members_key,
+                        latest=True,
+                    )
+                    existing = (
+                        result.value
+                        if result and isinstance(result.value, list)
+                        else []
+                    )
+                    members = list(dict.fromkeys([*existing, peer_id]))
+                    self._dht_call(
+                        "legacy members refresh",
+                        self.dht.store,
+                        key=members_key,
+                        value=members,
+                        expiration_time=expiry,
+                        exclude_self=self._remote_lease_required(),
+                    )
+                except Exception as exc:
+                    logger.debug("Legacy members refresh failed: %s", exc)
 
                 self._last_announce_success_at = time.time()
                 self._last_announce_error = None
@@ -527,6 +570,10 @@ class Node:
                 f"DHT {name} exceeded {DHT_OPERATION_TIMEOUT:g} seconds"
             ) from exc
 
+    def _remote_lease_required(self) -> bool:
+        """Require remote acknowledgement outside isolated local development."""
+        return bool(self.initial_peers)
+
     def _ensure_announce_thread(self) -> None:
         if (
             not self._announce_enabled
@@ -551,6 +598,70 @@ class Node:
                 self._announce()
             except Exception as e:
                 logger.warning("Re-announce failed: %s", e)
+                if self._should_recover_network():
+                    self._recover_network_transport()
+
+    def _should_recover_network(self) -> bool:
+        if (
+            not self._announce_enabled
+            or self._consecutive_announce_failures
+            < DHT_RECOVERY_FAILURE_THRESHOLD
+        ):
+            return False
+        if self._last_network_recovery_at is None:
+            return True
+        return (
+            time.time() - self._last_network_recovery_at
+            >= DHT_RECOVERY_COOLDOWN_SECONDS
+        )
+
+    def _recover_network_transport(self) -> None:
+        """Restart DHT and RPC handles while preserving loaded model layers."""
+        if not self._network_recovery_lock.acquire(blocking=False):
+            return
+        try:
+            if not self._announce_enabled:
+                return
+            self._last_network_recovery_at = time.time()
+            self._network_recovery_count += 1
+            self._last_network_recovery_error = None
+            logger.warning(
+                "Recovering worker DHT/RPC transport after %s failed remote "
+                "lease refreshes; loaded layers will be preserved",
+                self._consecutive_announce_failures,
+            )
+            self._running = False
+            if self.rpc is not None:
+                self.rpc.stop()
+                self.rpc = None
+            self._stop_reachability_protocol()
+            if self.dht is not None:
+                dht = self.dht
+                _run_with_timeout(
+                    "node-dht-recovery-shutdown",
+                    dht.shutdown,
+                    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+                self.dht = None
+            self.transport_verified = False
+            if not self._announce_enabled:
+                logger.info("Worker network recovery cancelled by lifecycle stop")
+                return
+            self.start()
+            logger.info("Worker DHT/RPC transport recovery completed")
+        except Exception as exc:
+            self._last_network_recovery_error = f"{type(exc).__name__}: {exc}"
+            self._last_announce_error = (
+                "Network transport recovery failed: "
+                f"{self._last_network_recovery_error}"
+            )
+            logger.error(
+                "Worker DHT/RPC transport recovery failed: %s",
+                exc,
+                exc_info=True,
+            )
+        finally:
+            self._network_recovery_lock.release()
 
     # ------------------------------------------------------------------
     # Status
@@ -597,6 +708,9 @@ class Node:
             "success_age_seconds": success_age,
             "last_error": self._last_announce_error,
             "consecutive_failures": self._consecutive_announce_failures,
+            "network_recovery_count": self._network_recovery_count,
+            "last_network_recovery_at": self._last_network_recovery_at,
+            "last_network_recovery_error": self._last_network_recovery_error,
             "fresh": bool(
                 self._last_announce_success_at is not None
                 and success_age is not None

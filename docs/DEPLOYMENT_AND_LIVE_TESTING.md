@@ -132,7 +132,7 @@ wsl -d Ubuntu -- bash -lc "cd /home/albad/FYP/fyp-projects/backend && uv run --p
 Expected result:
 
 - Electron Settings reports the managed backend as ready.
-- `http://127.0.0.1:8000/health` responds from Windows.
+- `http://127.0.0.1:8000/status` responds from Windows.
 - the backend logs reflect the updated source version.
 
 ## VPS Bootstrap Relay
@@ -298,7 +298,7 @@ Verify the tunnel from that same WSL distro:
 curl -fsS http://127.0.0.1:7101/v1/policy
 ```
 
-For a durable public deployment, replace the tunnel with an authenticated HTTPS reverse proxy to `127.0.0.1:7101`. Do not expose the plain HTTP settlement listener directly to the internet.
+For a durable public deployment, replace the tunnel with an authenticated HTTPS reverse proxy to `127.0.0.1:7101`. Do not expose the plain HTTP settlement listener directly to the internet. Ordinary participants must not receive VPS shell accounts or maintain SSH tunnels. The current incident, implemented publication-persistence repair, production service shape, and remaining release phases are recorded in [Current Two-Device Live-Test Issues And Production Roadmap](CURRENT_TWO_DEVICE_LIVE_TEST_ISSUES.md).
 
 ### 4. Configure Every Participant Backend
 
@@ -310,6 +310,11 @@ DISTRIBLLM_SETTLEMENT_URL=http://127.0.0.1:7101
 DISTRIBLLM_IDENTITY_PATH=
 DISTRIBLLM_MODEL_REVISION=main
 DISTRIBLLM_API_ACCESS_MODE=off
+DISTRIBLLM_DHT_EXPIRY_SECONDS=90
+DISTRIBLLM_ANNOUNCE_INTERVAL_SECONDS=20
+DISTRIBLLM_DHT_OPERATION_TIMEOUT=10
+DISTRIBLLM_DHT_RECOVERY_FAILURE_THRESHOLD=2
+DISTRIBLLM_DHT_RECOVERY_COOLDOWN_SECONDS=60
 ```
 
 Restart the managed backend after changing `.env`. Both serving workers and the generator must run in shadow mode for receipt-capable RPC and countersigned acceptance to be exercised.
@@ -346,15 +351,38 @@ tunnel manager.
 Use one branch, one backend version, and one executable hash across both devices.
 
 1. Validate the VPS bootstrap service.
-2. Confirm both Windows devices can reach `http://127.0.0.1:8000/health` after starting their local managed backend.
+2. Confirm both Windows devices can reach `http://127.0.0.1:8000/status` after starting their local managed backend.
 3. In Electron Settings on both devices, use the same bootstrap peer and trusted relay multiaddress.
 4. Use `Network Mode` as `Auto` for realistic testing, or `Relay` when specifically testing VPS circuit routing.
 5. Start provider nodes first.
 6. Wait for provider cards to show online and RPC active.
-7. Confirm Network -> Run Inference reports a complete route.
-8. Start the generator only after the complete route is visible.
-9. Open Inference and generate a short response.
-10. Check Monitoring for route chain, layer coverage, RPC counters, and timeout messages.
+7. Treat Network -> Run Inference as a preflight preview; on a generator-only backend it may remain local-only before startup.
+8. Start the independent lease observer shown below after the provider is visible.
+9. Start the generator. Its newly created DHT client performs the authoritative route, RPC, and tensor-canary validation.
+10. Open Inference and generate several short responses.
+11. Check Monitoring for route chain, layer coverage, RPC counters, and timeout messages.
+12. Keep the worker, generator, and observer running for at least ten DHT expiry windows.
+
+On Device 2, copy the full worker `peer_id` from:
+
+```bash
+curl -fsS http://127.0.0.1:8000/nodes/local | python3 -m json.tool
+```
+
+Then run the independent observer in a separate Device 1 WSL terminal. With the documented 90-second expiry, 1,000 seconds covers more than ten expiry windows:
+
+```bash
+cd "$HOME/FYP/fyp-projects/backend"
+set -o pipefail
+uv run --python 3.12 python -m lease_observer \
+  --expected-peer "PASTE_FULL_DEVICE_2_PEER_ID" \
+  --require-receipt \
+  --interval 10 \
+  --duration 1000 \
+  | tee "$HOME/distribllm-lease-soak.jsonl"
+```
+
+Every JSON line must contain `"ok": true`. The command exits nonzero if any observation loses the member lease, provider metadata, normal expert UID, receipt expert UID, or safe expiration horizon. Preserve the JSON Lines file with the runtime snapshots and artifact hashes.
 
 For a split OPT-125M route, the expected layer ranges are half-open:
 
@@ -382,7 +410,7 @@ Do not rebuild the executable as the first reaction. Capture the state first:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/runtime/snapshot
-Invoke-RestMethod http://127.0.0.1:8000/providers
+Invoke-RestMethod http://127.0.0.1:8000/nodes
 Invoke-RestMethod "http://127.0.0.1:8000/models/facebook%2Fopt-125m/serving-plan?layer_count=6"
 ```
 
