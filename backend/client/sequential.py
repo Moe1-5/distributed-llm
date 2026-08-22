@@ -1082,12 +1082,24 @@ class RemoteSequential:
         policy = self.rpc_attempt_policy
         last_error: Optional[Exception] = None
         attempted = 0
+        receipt_requested = node_info is not None and receipt_route is not None
+        requested_receipt_uid = (
+            str(node_info.get("receipt_rpc_uid", ""))
+            if receipt_requested and node_info is not None
+            else ""
+        )
         for attempt in range(policy.max_attempts):
             self._raise_if_cancelled(cancel_event)
             attempted = attempt + 1
             attempt_started_at = time.perf_counter()
+            rpc_mode = "receipt" if receipt_requested else "legacy"
+            effective_rpc_uid = requested_receipt_uid or rpc_uid
             try:
-                if node_info is not None and receipt_route is not None:
+                if (
+                    receipt_requested
+                    and node_info is not None
+                    and receipt_route is not None
+                ):
                     try:
                         response, submission = self._rpc_forward_with_receipt(
                             node_info=node_info,
@@ -1095,6 +1107,7 @@ class RemoteSequential:
                             hidden_states=hidden_states,
                             attention_mask=attention_mask,
                             position_ids=position_ids,
+                            request_id=request_id,
                         )
                         if pending_receipts is not None:
                             pending_receipts.append(submission)
@@ -1109,6 +1122,8 @@ class RemoteSequential:
                             peer_id[:8],
                             exc,
                         )
+                        rpc_mode = "legacy_fallback"
+                        effective_rpc_uid = rpc_uid
                         result = self._rpc_forward(
                             rpc_uid,
                             peer_id,
@@ -1140,12 +1155,13 @@ class RemoteSequential:
                         latency_ms=elapsed_seconds * 1000,
                     )
                 logger.info(
-                    "request=%s hop=%s peer=%s rpc_uid=%s attempt=%s/%s "
+                    "request=%s hop=%s peer=%s rpc_mode=%s rpc_uid=%s attempt=%s/%s "
                     "layers=%s-%s shape=%s bytes=%s elapsed_ms=%.1f status=complete",
                     request_id,
                     hop_index + 1,
                     peer_id[:8],
-                    rpc_uid,
+                    rpc_mode,
+                    effective_rpc_uid,
                     attempted,
                     policy.max_attempts,
                     node_info.get("layer_start", "unknown") if node_info else "unknown",
@@ -1163,12 +1179,13 @@ class RemoteSequential:
                 failure_class = classify_rpc_error(e)
                 retryable = is_retryable_rpc_error(e) and attempted < policy.max_attempts
                 logger.warning(
-                    "request=%s hop=%s peer=%s rpc_uid=%s attempt=%s/%s elapsed_ms=%.1f "
-                    "failure=%s retry=%s error=%s",
+                    "request=%s hop=%s peer=%s rpc_mode=%s rpc_uid=%s attempt=%s/%s "
+                    "elapsed_ms=%.1f failure=%s retry=%s error=%s",
                     request_id,
                     hop_index + 1,
                     peer_id[:8],
-                    rpc_uid,
+                    rpc_mode,
+                    effective_rpc_uid,
                     attempted,
                     policy.max_attempts,
                     elapsed_ms,
@@ -1184,6 +1201,7 @@ class RemoteSequential:
         terminal_message = (
             f"RPC request {request_id} to node {peer_id[:8]} failed after "
             f"{attempted}/{policy.max_attempts} attempt(s) "
+            f"via {rpc_mode} expert {effective_rpc_uid} "
             f"({classify_rpc_error(last_error) if last_error else 'unknown'}). "
             f"Last error: {last_error}"
         )
@@ -1305,7 +1323,8 @@ class RemoteSequential:
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
         position_ids: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+        request_id: str,
+    ) -> tuple[torch.Tensor, dict]:
         runtime = self.useful_work_runtime
         if runtime.identity is None or self._session_id is None:
             raise RuntimeError("Useful-work session is not initialized")
@@ -1319,54 +1338,83 @@ class RemoteSequential:
             and member["layer_start"] == node_info["layer_start"]
             and member["layer_end"] == node_info["layer_end"]
         )
-        request_document = create_inference_request(
-            runtime.identity,
-            generator_peer_id=generator_peer_id,
-            session_id=self._session_id,
-            model_name=str(self.model_name),
-            model_revision=str(node_info["model_revision"]),
-            route=route,
-            worker=worker,
-            hidden_states=hidden_states,
-            position_count=int(hidden_states.shape[0] * hidden_states.shape[1]),
-        )
-        experts = get_experts(self.dht, [worker["rpc_uid"]])
-        if not experts or experts[0] is None:
-            raise RuntimeError(f"Receipt expert {worker['rpc_uid']} was not found")
-        output = experts[0].forward(
-            hidden_states,
-            encode_metadata_tensor(request_document),
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-        )
-        if not isinstance(output, tuple) or len(output) != 2:
-            raise RuntimeError("Receipt expert returned an invalid response")
-        response, metadata_tensor = output
-        metadata = decode_metadata_tensor(metadata_tensor)
-        worker_receipt = metadata.get("worker_receipt")
-        worker_presence = metadata.get("worker_presence")
-        if not isinstance(worker_receipt, dict) or not isinstance(worker_presence, dict):
-            raise RuntimeError("Receipt expert omitted its signed receipt or presence")
-        verify_presence(
-            worker_presence,
-            public_key=str(node_info["application_public_key"]),
-            peer_id=str(node_info["peer_id"]),
-        )
-        acceptance = accept_worker_receipt(
-            runtime.identity,
-            request_document,
-            worker_receipt,
-            response,
-            generator_peer_id=generator_peer_id,
-        )
-        submission = build_submission(
-            worker_receipt=worker_receipt,
-            generator_acceptance=acceptance,
-            worker_presence=worker_presence,
-            generator_presence=runtime.presence(),
-            route=route,
-        )
-        return response, submission
+        stage = "build_request"
+        try:
+            request_document = create_inference_request(
+                runtime.identity,
+                generator_peer_id=generator_peer_id,
+                session_id=self._session_id,
+                model_name=str(self.model_name),
+                model_revision=str(node_info["model_revision"]),
+                route=route,
+                worker=worker,
+                hidden_states=hidden_states,
+                position_count=int(hidden_states.shape[0] * hidden_states.shape[1]),
+                request_id=request_id,
+            )
+            stage = "expert_lookup"
+            experts = get_experts(self.dht, [worker["rpc_uid"]])
+            if not experts or experts[0] is None:
+                raise RuntimeError(f"Receipt expert {worker['rpc_uid']} was not found")
+            stage = "remote_forward"
+            output = experts[0].forward(
+                hidden_states,
+                encode_metadata_tensor(request_document),
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
+            stage = "decode_response"
+            if not isinstance(output, tuple) or len(output) != 2:
+                raise RuntimeError("Receipt expert returned an invalid response")
+            response, metadata_tensor = output
+            metadata = decode_metadata_tensor(metadata_tensor)
+            worker_receipt = metadata.get("worker_receipt")
+            worker_presence = metadata.get("worker_presence")
+            if not isinstance(worker_receipt, dict) or not isinstance(
+                worker_presence,
+                dict,
+            ):
+                raise RuntimeError("Receipt expert omitted its signed receipt or presence")
+            stage = "verify_receipt"
+            verify_presence(
+                worker_presence,
+                public_key=str(node_info["application_public_key"]),
+                peer_id=str(node_info["peer_id"]),
+            )
+            acceptance = accept_worker_receipt(
+                runtime.identity,
+                request_document,
+                worker_receipt,
+                response,
+                generator_peer_id=generator_peer_id,
+            )
+            submission = build_submission(
+                worker_receipt=worker_receipt,
+                generator_acceptance=acceptance,
+                worker_presence=worker_presence,
+                generator_presence=runtime.presence(),
+                route=route,
+            )
+            logger.info(
+                "request=%s peer=%s rpc_mode=receipt rpc_uid=%s "
+                "stage=verify_receipt status=complete",
+                request_id,
+                str(node_info["peer_id"])[:8],
+                worker["rpc_uid"],
+            )
+            return response, submission
+        except Exception as exc:
+            logger.warning(
+                "request=%s peer=%s rpc_mode=receipt rpc_uid=%s stage=%s "
+                "status=failed error_type=%s error=%s",
+                request_id,
+                str(node_info["peer_id"])[:8],
+                worker["rpc_uid"],
+                stage,
+                type(exc).__name__,
+                exc,
+            )
+            raise
 
     # ------------------------------------------------------------------
     # DHT discovery

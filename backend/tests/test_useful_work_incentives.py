@@ -9,6 +9,7 @@ import time
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import torch
@@ -302,6 +303,113 @@ class IdentityAndProtocolTests(unittest.TestCase):
             successful_runtime.submissions,
             [{"peer_id": "head-peer"}, {"peer_id": "tail-peer"}],
         )
+
+    def test_receipt_rpc_reuses_outer_route_request_id(self) -> None:
+        sequential = RemoteSequential(
+            type("DHT", (), {"peer_id": "generator-peer"})(),
+            "distribllm",
+            12,
+            "facebook/opt-125m",
+        )
+        hidden = torch.zeros(1, 2, 8)
+        expected = torch.ones(1, 2, 8)
+        node = {
+            "peer_id": "worker-peer",
+            "rpc_uid": "distribllm.0.12",
+            "receipt_rpc_uid": "distribllm.999999.0.12",
+            "model_name": "facebook/opt-125m",
+            "model_revision": "main",
+            "layer_start": 0,
+            "layer_end": 12,
+        }
+        receipt_route = [
+            {
+                "peer_id": "worker-peer",
+                "rpc_uid": "distribllm.999999.0.12",
+                "layer_start": 0,
+                "layer_end": 12,
+            }
+        ]
+        pending_receipts: list[dict] = []
+
+        with patch.object(
+            sequential,
+            "_rpc_forward_with_receipt",
+            return_value=(expected, {"request_id": "route-request"}),
+        ) as receipt_forward:
+            result = sequential._call_node(
+                rpc_uid="distribllm.0.12",
+                peer_id="worker-peer",
+                hidden_states=hidden,
+                node_info=node,
+                receipt_route=receipt_route,
+                pending_receipts=pending_receipts,
+                request_id="route-request",
+            )
+
+        self.assertIs(result, expected)
+        self.assertEqual(pending_receipts, [{"request_id": "route-request"}])
+        self.assertEqual(
+            receipt_forward.call_args.kwargs["request_id"],
+            "route-request",
+        )
+
+    def test_signed_receipt_request_reuses_outer_route_request_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            identity = load_application_identity(
+                Path(directory) / "correlated-generator.json"
+            )
+            runtime = UsefulWorkRuntime(
+                IncentivesConfig("shadow", "", "main"),
+                identity=identity,
+            )
+            sequential = RemoteSequential(
+                type("DHT", (), {"peer_id": "generator-peer"})(),
+                "distribllm",
+                12,
+                "facebook/opt-125m",
+                useful_work_runtime=runtime,
+            )
+            sequential.start_session("session-one")
+            node = {
+                "peer_id": "worker-peer",
+                "application_public_key": "worker-public-key",
+                "receipt_rpc_uid": "distribllm.999999.0.12",
+                "model_revision": "main",
+                "layer_start": 0,
+                "layer_end": 12,
+            }
+            route = [
+                {
+                    "peer_id": "worker-peer",
+                    "application_public_key": "worker-public-key",
+                    "rpc_uid": "distribllm.999999.0.12",
+                    "layer_start": 0,
+                    "layer_end": 12,
+                }
+            ]
+
+            with patch(
+                "client.sequential.create_inference_request",
+                side_effect=RuntimeError("stop after request construction"),
+            ) as create_request:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "stop after request construction",
+                ):
+                    sequential._rpc_forward_with_receipt(
+                        node_info=node,
+                        route=route,
+                        hidden_states=torch.zeros(1, 2, 8),
+                        attention_mask=None,
+                        position_ids=None,
+                        request_id="route-request",
+                    )
+
+            self.assertEqual(
+                create_request.call_args.kwargs["request_id"],
+                "route-request",
+            )
 
     def test_real_hivemind_receipt_rpc_settles_verified_work(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

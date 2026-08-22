@@ -170,7 +170,7 @@ The packaged persistent-identity build was tested with Device 2 peer `QmRevwu67t
 
 Device 1 nevertheless failed the real prompt with `ambiguous_transport` at layers `0-12`. The UI correctly suppressed automatic failover because a reset after possible worker execution cannot be replayed safely without an idempotent completion result. The observer does not test this tensor stream; it only proves that discovery records remain independently retrievable.
 
-The Trace button did not bypass the failure. It calls the same distributed generation implementation through `POST /generator/trace`, while the frontend applies its generic eight-second request deadline. The displayed `POST /generator/trace timed out after 8000 ms` is therefore a second diagnostics/UI problem, not evidence that discovery failed and not a repair for the underlying stream reset.
+The Trace button did not bypass the failure, but source review found that it is not an equivalent receipt-path reproduction. `POST /generator/trace` calls `sequential.forward` without starting the useful-work session that normal chat starts, so Trace uses the legacy expert while shadow-mode chat uses the receipt expert. The frontend also applies its generic eight-second request deadline. The displayed `POST /generator/trace timed out after 8000 ms` is therefore a diagnostics/UI problem, not proof of another receipt reset, not evidence that discovery failed, and not a repair for the underlying stream reset.
 
 The screenshots also show contradictory presentation: `Generator: READY` and `Route: READY` coexist with a stale `Waiting for generator route` message. This is tracked separately in Sprint 27 and must not be confused with the transport root cause.
 
@@ -201,8 +201,8 @@ Device 2 has no local generator, so it has no generator-side provider health mon
 | ID | Severity | Issue | Effect | Status |
 |---|---|---|---|---|
 | LT-01 | Critical | Generator-only discovery/start circular dependency | The UI disabled generator start before the generator DHT existed | Fix implemented; physical validation pending |
-| LT-02 | Critical | Remote DHT and expert lease persistence failure | A valid route disappeared after approximately five minutes while the worker reported fresh local publication | First repair improved visibility; second soak pending |
-| LT-03 | High | Local publication success was treated as remote availability | Device 2 could present a healthy worker while Device 1 could not retrieve it | Remote-store acknowledgement implemented; independent observer still open |
+| LT-02 | Critical | Remote DHT and expert lease persistence failure | A valid route disappeared after approximately five minutes while the worker reported fresh local publication | Repair remained visible during the corrected failure window; full ten-window soak remains open |
+| LT-03 | High | Local publication success was treated as remote availability | Device 2 could present a healthy worker while Device 1 could not retrieve it | Remote acknowledgement and independent observer passed; managed production observation remains open |
 | LT-04 | High | Shared members index retained expired peers | Discovery saw member IDs whose per-peer metadata was already gone | Per-peer v2 leases implemented with legacy fallback |
 | LT-05 | High | Monitoring combined incompatible snapshots | It could show `100%` raw coverage and `Missing: 0-12` simultaneously | UI calculation fixed; physical validation pending |
 | LT-06 | Medium | Worker-only health said `RPC HEALTH UNKNOWN` | Operators could mistake “not probed” for RPC failure | Relabeled as lease state plus `NOT PROBED` |
@@ -212,23 +212,29 @@ Device 2 has no local generator, so it has no generator-side provider health mon
 | LT-10 | High | Portable EXE does not provision its backend | Every device still needs manual WSL, checkout, dependencies, configuration, and model setup | Packaging limitation |
 | LT-11 | Medium | Blank API database configuration can cause HTTP 500 | An empty path can resolve to a directory rather than a SQLite file | Workaround known; code/template fix open |
 | LT-12 | Medium | Runtime failure details are split across local and remote views | One machine alone cannot distinguish local success from global visibility | Instrumentation improvement required |
-| LT-13 | Critical | Worker transport recovery rotated its public peer ID | Loaded layers survived, but the generator's selected peer was replaced by a new identity | Persistent peer repair implemented; physical validation pending |
-| LT-14 | High | Inference and Trace present contradictory or misleading state | READY/READY coexists with stale route-waiting text, while Trace hides the same generation path behind an eight-second HTTP timeout | Planned in Sprint 27 |
+| LT-13 | Critical | Worker transport recovery rotated its public peer ID | Loaded layers survived, but the generator's selected peer was replaced by a new identity | Peer remained stable during the latest failure; injected-recovery acceptance remains open |
+| LT-14 | High | Inference and Trace present contradictory or misleading state | READY/READY coexists with stale route-waiting text, while Trace runs a legacy diagnostic behind an eight-second HTTP timeout and does not reproduce shadow chat's receipt RPC | Planned in Sprint 27 |
 
 ## 6. Confirmed Failure Boundary And Remaining Root-Cause Questions
 
-### Confirmed boundary
+### Current confirmed boundary
 
-The failure is after a successful worker start and before sustained remote observability:
+The latest persistent-identity run moved the open failure beyond discovery and legacy readiness:
 
 ```text
-Device 2 RPC and heartbeat threads continue running
-  -> local DHT/expert refresh calls return success
-  -> Device 1 initially retrieves and calls the worker
-  -> Device 1 later cannot resolve the expert UID
-  -> Device 1 later cannot retrieve the provider metadata
-  -> route is suspended
+Device 2 remotely publishes normal and receipt experts
+  -> independent Device 1 observer retrieves both with healthy horizons
+  -> normal-expert metadata health passes
+  -> normal-expert startup tensor canary passes
+  -> Device 1 starts a useful-work generation session
+  -> shadow chat selects the receipt expert
+  -> receipt forward ends in an ambiguous stream reset
+  -> no response is accepted and no safe automatic replay occurs
 ```
+
+The request path distinction and the exact next isolation matrix are documented in [`RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md`](RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md).
+
+### Historical lease defect and repair
 
 ### Why local `fresh` is insufficient
 

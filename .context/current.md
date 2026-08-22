@@ -2,15 +2,12 @@
 
 > Keep this under 40 lines. Read this after `INDEX.md`.
 > Update whenever the sprint changes, a major decision is made, or the stack changes.
-
 **Name:** DistribLLM  
 **Description:** Electron + FastAPI prototype for project-owned public/discoverable peer-to-peer distributed LLM inference over Hivemind DHT/RPC.  
 **Stage:** [ ] Scaffolding [x] MVP prototype [ ] Feature-complete [ ] Production
-
 ## Active Sprint
 **Sprint:** Sprint 25 physical runtime validation remains active; Sprint 26 credit-gated API access is implemented; Sprint 27 frontend experience and model discovery is proposed.
 **Goal:** Resolve the physical relay forward-stream failure, then make remote model availability and runtime state clear throughout the desktop workflow.
-
 ## Tech Stack
 React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Transformers/PyTorch, uv for backend dependencies, npm for frontend scripts.
 ## Last Decision
@@ -30,7 +27,7 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 16 has verified public circuit reservation and expert metadata RPC. Persistent service tooling plus a cross-sprint manifest now bind VPS restart, relay probe, Windows lifecycle, relay inference, and direct inference evidence; the actual live run remains open.
 - Sprint 17 implements adjacent-range route selection, capacity-aware serving plans, stale/redundancy conflicts, selected/standby route visibility, and the inference-to-serving gap workflow on `feature/coverage-aware-serving`; local acceptance passes and two-device validation remains open.
 - Sprint 13 has signed settlement, real local split parity, bounded idempotent submission retries, and a VPS shadow service; the durable outbox, separate-device receipt/restart evidence, and credit approval remain open. The full integration and final desktop audit is in `docs/SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md`.
-- Sprint 22 prevents the generator relay-daemon panic, classifies RPC certainty, bounds retries, reuses sessions, and compresses legacy activation tensors; physical relay inference remains open.
+- Sprint 22 now isolates the physical reset to the boundary between a passing legacy startup canary and shadow chat's receipt-capable expert. Receipt requests share one generator/worker correlation ID and report their failure stage; incentives-off versus shadow relay comparison remains open.
 - Sprint 23 implements asynchronous jobs, prompt cancellation, a bounded warm component cache, and measured local startup/generation baselines.
 - Sprint 18 selectively materializes only served safetensor layers with strict fallback and measured TinyLlama memory/startup evidence.
 - Sprint 19 continuously probes DHT/protocol/transport/RPC health with hysteresis, deadlines, bounded concurrency, and clean lifecycle ownership.

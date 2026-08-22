@@ -9,7 +9,7 @@
 
 The current Network workflow mixes two different roles: contributing model layers and using remote providers for generation. A generator-only device can show `Needs layers 0-12` even when the authoritative generator DHT later discovers a complete remote route. The model selector also does not clearly distinguish a locally installed model from a model that can be generated through remote providers.
 
-Physical relay testing exposed contradictory Inference states. The header showed `Generator: READY` and `Route: READY` while the conversation retained `Waiting for generator route`. After the real forward failed, the WebSocket or stream state changed independently without a single authoritative explanation. The Trace action then displayed an unrelated generic eight-second HTTP timeout even though it exercises the same remote generation path.
+Physical relay testing exposed contradictory Inference states. The header showed `Generator: READY` and `Route: READY` while the conversation retained `Waiting for generator route`. After the real forward failed, the WebSocket or stream state changed independently without a single authoritative explanation. The Trace action then displayed an unrelated generic eight-second HTTP timeout. Source review showed that Trace uses the legacy expert, while shadow-mode chat starts a useful-work session and uses the receipt expert, so the UI currently presents unlike diagnostics as though they were equivalent.
 
 Users cannot currently answer these basic questions from the interface:
 
@@ -29,7 +29,7 @@ Users cannot currently answer these basic questions from the interface:
 - [ ] Define one status hierarchy for backend, DHT discovery, provider RPC health, tensor canary, active generation stream, local WebSocket, and diagnostics.
 - [ ] Remove stale `Waiting for generator route` messages immediately after authoritative readiness changes.
 - [ ] Show transport failures with their stage, peer or route, request identity, retry-safety decision, and recommended next action.
-- [ ] Make Trace a non-conflicting diagnostic job with an appropriate deadline and visible progress instead of the generic eight-second API timeout.
+- [ ] Make Trace a non-conflicting diagnostic job with an appropriate deadline and visible progress instead of the generic eight-second API timeout, and label it as legacy-only unless a distinct receipt-path diagnostic is implemented.
 - [ ] Explain the difference between local Nodes, remote providers, selected routes, and unprobed workers in Monitoring.
 - [ ] Add loading, empty, stale, mixed-version, timeout, suspended, and recovery states to renderer tests.
 - [ ] Review responsive layout, keyboard navigation, accessibility labels, contrast, information density, and error-copy consistency across the desktop UI.
@@ -56,5 +56,5 @@ Users cannot currently answer these basic questions from the interface:
 
 - Recorded that model discovery and local serving are not distinguished clearly enough for generator-only users.
 - Recorded the contradictory `Generator: READY`, `Route: READY`, stale `Waiting for generator route`, and failed stream presentation.
-- Recorded that Trace uses the same failing generation path and is additionally hidden behind a generic eight-second frontend request timeout.
+- Corrected the initial assumption about Trace: it uses the legacy expert because it does not start a useful-work session, while normal shadow chat uses the receipt expert; it is also hidden behind a generic eight-second frontend request timeout.
 - Status: planning only; the current transport failure remains owned by the relay tensor RPC acceptance work.

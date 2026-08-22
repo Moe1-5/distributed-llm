@@ -17,6 +17,11 @@
 
 ## Active
 
+### [2026-08-22] Verify session-dependent RPC selection before equating diagnostics
+**Problem:** I said Trace exercised the same failing generation path as shadow-mode chat, but source review showed that chat starts a useful-work session and selects the receipt expert while Trace starts no session and selects the legacy expert.
+**Rule:** Before treating a canary, trace, parity check, and user generation as equivalent distributed tests, follow their session setup and capability selection through the actual RPC UID used on the wire.
+**Why:** Two operations can share `sequential.forward` yet exercise different expert schemas, serialization, accounting, and relay behavior; equating them hides the most useful isolation boundary.
+
 ### [2026-08-22] Separate route validation from sustained streamed execution
 **Problem:** I treated independent lease visibility, metadata health, and a successful tensor canary as sufficient proof that the physical relay path was ready, but the first real prompt later failed with an ambiguous stream reset while the worker recovered its network transport and changed peer identity.
 **Rule:** Report discovery, route validation, tensor canary, and sustained streamed generation as separate acceptance gates. Do not call the system working until at least one real prompt completes and recovery preserves the provider identity used by the selected route.
