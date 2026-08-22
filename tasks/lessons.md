@@ -43,6 +43,11 @@ A successful `/p2p-circuit/` reservation proves that a peer can reserve transpor
 
 > Lessons that still need active enforcement.
 
+### [2026-08-22] Verify physical-test placeholders before interpreting evidence
+**Problem:** An observer command was run with the literal `PASTE_DEVICE_2_PEER_ID`, making every resulting provider-not-visible sample invalid even though it looked like network evidence.
+**Rule:** Before interpreting a physical-test command, verify that every placeholder was replaced with the value from the current runtime and echo or inspect that value in the produced evidence.
+**Why:** A syntactically successful diagnostic can confidently report the wrong conclusion when it is querying a placeholder or stale peer identity.
+
 ### [2026-08-14] Test packaged Windows command transport, not only generated shell text
 **Problem:** Launcher unit tests validated the generated multiline Bash script, but the Windows Electron to WSL process boundary did not preserve it reliably and the packaged application executed a malformed command.
 **Rule:** Commands sent through `wsl.exe` must use a transport that does not depend on multiline Windows argument preservation, and launcher tests must decode and verify the command at the final process-argument boundary.

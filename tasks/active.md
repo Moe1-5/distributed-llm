@@ -19,6 +19,7 @@
 | Sprint 24 | `tasks/sprints/sprint-24-windows-fundamental-acceptance-build.md` | Produce an audited Windows executable for repeatable two-device fundamental acceptance. |
 | Sprint 25 | `tasks/sprints/sprint-25-runtime-state-validation.md` | Make node, route, generator, and Monitoring readiness authoritative and reject unusable inference state. |
 | Sprint 26 | `tasks/sprints/sprint-26-credit-gated-api-access.md` | Let useful-work credits unlock authenticated API access while preserving fair-use Electron chat. |
+| Sprint 27 | `tasks/sprints/sprint-27-frontend-experience-and-model-discovery.md` | Clarify remote model availability, local serving roles, runtime status, diagnostics, and recovery across the desktop UI. |
 
 ## Completed Sprints
 

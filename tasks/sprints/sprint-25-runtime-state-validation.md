@@ -137,3 +137,12 @@
 - Verification: Electron type checks, 20 launcher tests, two renderer-flow tests, the production build, direct generated-bundle inspection, packaged ASAR inspection, and the Windows package audit pass. The audit reports 36 ASAR entries and zero forbidden entries.
 - Artifact: `DistribLLM-1.0.0-portable.exe` is 87,658,063 bytes with SHA-256 `816893d26e6d12e6aae261a5cc15c574268e612cd1aadf4942a69b27d7a2dbba`.
 - Status: this supersedes the prior `8daf6e21` artifact. Physical acceptance must use this exact executable and backend source commit on both devices, verify peer-ID continuity through any recovery, complete real prompts, and preserve correlated evidence if the relay stream reset recurs.
+
+### 2026-08-22 - Isolate the repeated real-forward stream failure
+
+- Physical result: the persistent-identity build reached generator ready and passed its tensor canary, while an independent observer repeatedly retrieved the same Device 2 peer, provider record, normal expert, and receipt expert with healthy lease horizons.
+- Failure: a real prompt still ended in `ambiguous_transport` at layers `0-12`; automatic failover was correctly suppressed because remote execution could not be ruled out.
+- Boundary: Device 2 reported zero network recoveries, so neither expired discovery data nor peer rotation caused this occurrence. The remaining fault is in the full forward/response stream after readiness validation.
+- Diagnostics: Trace uses the same generation path and separately exceeded the frontend's generic eight-second HTTP deadline. The UI also retained `Waiting for generator route` while showing Generator and Route ready; both presentation defects are routed to Sprint 27.
+- Evidence limitation: an earlier observer run used a literal peer placeholder and is invalid. The corrected run used `QmRevwu67tzcBjWW21u11Q7oPuhbtEodmuDD87aoW9Yp6z` and returned `ok: true`.
+- Status: stop repeated prompt attempts, preserve post-failure participant and relay evidence, and correlate the reset before implementing another transport change.

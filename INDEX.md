@@ -98,6 +98,7 @@
 | `tasks/sprints/sprint-24-windows-fundamental-acceptance-build.md` | Active sprint for one audited Windows executable bound to fundamental two-device acceptance evidence. |
 | `tasks/sprints/sprint-25-runtime-state-validation.md` | Active sprint for authoritative runtime readiness, lifecycle dependency validation, and staged diagnostics. |
 | `tasks/sprints/sprint-26-credit-gated-api-access.md` | Active sprint for fair-use chat, verified-credit API access, and signed inference capabilities. |
+| `tasks/sprints/sprint-27-frontend-experience-and-model-discovery.md` | Proposed sprint for remote-model discovery, role clarity, coherent runtime status, diagnostics, and desktop UI optimization. |
 | `tasks/archive/sprint-10-gated-model-local-import.md`          | Completed sprint for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
 | `tasks/archive/sprint-11-instruction-ready-model-expansion.md` | Completed sprint for instruction-ready/chat-ready model registry expansion, tuning labels, local-import contracts, and live TinyLlama generation validation. |
 | `tasks/archive/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Completed sprint for public-model auth isolation, failed-start cleanup, model cache cleanup, local expert routing, and safetensors/bin-index gated import validation. |

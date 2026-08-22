@@ -3,7 +3,7 @@
 **Report updated:** 2026-08-22
 **Latest physical evidence:** 2026-08-22
 **Branch:** `fix/remote-dht-lease-recovery`
-**Physically tested source baseline:** `8daf6e21fa542bdfdbf87d36e459f916682466ea`
+**Physically tested source baseline:** `9fec4a8903162d34432bc2b7357b665fda8715c1`
 **Topology:** Windows Electron clients, WSL 2 participant backends, a public VPS bootstrap/circuit relay, and a loopback-only VPS settlement service reached through per-device SSH tunnels
 **Incentive rollout:** `shadow`
 
@@ -15,7 +15,9 @@ The first real prompts then failed with `ambiguous_transport` and `stream reset`
 
 Device 2 later reported one successful DHT/RPC network recovery. Its loaded handler and accounting survived, but its public P2P peer ID changed from `12D3KooWJrG3axje2Bg3mqhkSYKSnsztUtxz2Jx3nd6BKwfh5gwF` to `12D3KooWRuQFSqJLCL6GDwC9MhVB582FfZWKby2St4MUPHqSTZjG`. That is a confirmed recovery defect: the generator's selected route names the old peer, so a recovered worker cannot transparently return under a new identity.
 
-The second repair now stores one private libp2p key per local worker, reuses it for every DHT restart, refuses recovery if the peer ID changes, and records the pre-recovery trigger plus before/after peer IDs. A real local Hivemind restart reproduced the exact same peer ID from the saved key. Physical validation is still pending, and this repair must not be described as proof that the original relay stream reset itself is fixed.
+The second repair stores one private libp2p key per local worker, reuses it for every DHT restart, refuses recovery if the peer ID changes, and records the pre-recovery trigger plus before/after peer IDs. The new physical run used peer `QmRevwu67tzcBjWW21u11Q7oPuhbtEodmuDD87aoW9Yp6z`; Device 2 reported persistent identity and zero recoveries while an independent Device 1 observer repeatedly retrieved the same provider and both expert UIDs with healthy lease horizons.
+
+The real prompt still failed with the same ambiguous stream reset. This result rules out expired DHT leases and peer rotation as the cause of this occurrence. The remaining defect is in the real forward/response data path after discovery, metadata health, route validation, and the one-position tensor canary have succeeded.
 
 The preceding physical run had exposed a longer-term publication failure. It proved that the two devices could initially find each other and exchange a real tensor through the VPS relay. Device 1 created a generator, discovered Device 2's complete worker, validated the route, and completed a tensor canary.
 
@@ -155,6 +157,23 @@ Two user prompts failed at layers `0-12` with an ambiguous stream reset. Device 
 1. a real forward response was lost after remote execution, and its exact relay/RPC cause remains open;
 2. subsequent network recovery rotated the worker identity and prevented the selected route from recovering under the same peer.
 
+### 3.6 Persistent-identity retest keeps leases healthy while generation fails
+
+The packaged persistent-identity build was tested with Device 2 peer `QmRevwu67tzcBjWW21u11Q7oPuhbtEodmuDD87aoW9Yp6z`. A corrected independent observer on Device 1 repeatedly returned `ok: true` and confirmed all of the following during the failed generation window:
+
+- the same Device 2 peer remained remotely visible;
+- the `members.v2` record and provider metadata remained beyond the required lease horizon;
+- both `distribllm.0.12` and `distribllm.999999.0.12` resolved to that peer;
+- the RPC server, runtime, and publisher reported ready and fresh;
+- remote-store acknowledgement remained required;
+- Device 2 reported zero network recoveries, so no peer rotation occurred.
+
+Device 1 nevertheless failed the real prompt with `ambiguous_transport` at layers `0-12`. The UI correctly suppressed automatic failover because a reset after possible worker execution cannot be replayed safely without an idempotent completion result. The observer does not test this tensor stream; it only proves that discovery records remain independently retrievable.
+
+The Trace button did not bypass the failure. It calls the same distributed generation implementation through `POST /generator/trace`, while the frontend applies its generic eight-second request deadline. The displayed `POST /generator/trace timed out after 8000 ms` is therefore a second diagnostics/UI problem, not evidence that discovery failed and not a repair for the underlying stream reset.
+
+The screenshots also show contradictory presentation: `Generator: READY` and `Route: READY` coexist with a stale `Waiting for generator route` message. This is tracked separately in Sprint 27 and must not be confused with the transport root cause.
+
 ## 4. What The Current Screens Mean
 
 ### Device 1 Nodes: `0 online`
@@ -194,6 +213,7 @@ Device 2 has no local generator, so it has no generator-side provider health mon
 | LT-11 | Medium | Blank API database configuration can cause HTTP 500 | An empty path can resolve to a directory rather than a SQLite file | Workaround known; code/template fix open |
 | LT-12 | Medium | Runtime failure details are split across local and remote views | One machine alone cannot distinguish local success from global visibility | Instrumentation improvement required |
 | LT-13 | Critical | Worker transport recovery rotated its public peer ID | Loaded layers survived, but the generator's selected peer was replaced by a new identity | Persistent peer repair implemented; physical validation pending |
+| LT-14 | High | Inference and Trace present contradictory or misleading state | READY/READY coexists with stale route-waiting text, while Trace hides the same generation path behind an eight-second HTTP timeout | Planned in Sprint 27 |
 
 ## 6. Confirmed Failure Boundary And Remaining Root-Cause Questions
 
@@ -481,21 +501,21 @@ Users should not need Git, `uv`, manual `.env` editing, shell commands, or a pre
 | Device 1 initially resolves and probes Device 2 RPC | Passed |
 | Relay tensor canary | Passed |
 | Device 1 generator reaches ready | Passed |
-| Provider remains remotely visible across sustained lease refreshes | **Failed** |
-| Generator remains ready for the soak interval | **Failed** |
+| Provider remains remotely visible during the corrected prompt retest | Passed for the observed interval; full 1,000-second soak still open |
+| Generator reaches and reports a ready route | Passed; readiness does not guarantee completion of a full generation stream |
 | User prompt completes through Device 2 | **Failed: ambiguous stream reset after remote execution** |
 | Device 2 useful-work receipt is accepted | Not accepted because the generator could not accept the uncertain response |
 | Shadow mode leaves credits unchanged | Passed by policy; successful receipt path remains unproven |
 | Provider failure suspends unsafe inference | Passed |
-| Provider automatically recovers without model reload | Partial: layers survived, but the tested build rotated peer identity |
+| Provider identity remains stable without recovery | Passed for this occurrence; recovery itself was not exercised |
 | Clean-machine packaged installation | Not implemented |
 | Participant operation without SSH tunnel | Not implemented |
 
 ## 11. Current Stopping Point
 
-The latest physical run should be retained as a failed streamed-inference and recovery-identity acceptance result. Repeating the same tested build is not useful: route validation already passed, real forwards reset, and its recovery changed peer identity.
+The persistent-identity physical run is a failed real-generation result but a successful discovery and lease-observation result. The same worker remained visible, its peer identity did not rotate, the generator became ready, and the tensor canary passed. The real prompt still ended in an ambiguous stream reset.
 
-The next useful action is to commit and package the identity-preserving recovery revision, then repeat the physical test with matching backend source on both devices. Keep Device 2's full worker and Device 1's generator alive for at least ten lease windows while `backend/lease_observer.py` checks the member lease, provider record, and both expert UIDs. Complete real prompts early and throughout the soak. Any recovery must keep the same Device 2 peer ID and report `last_network_recovery_identity_preserved: true`. A repeated stream reset remains a separate failure that requires fresh correlated Device 1, Device 2, and relay evidence.
+Do not repeat prompts or Trace requests in the same evidence pass. Preserve the post-failure Device 1 generator/runtime state, Device 2 RPC/accounting state, and VPS relay logs with their request identity and timestamps. The next diagnosis must correlate where the request was accepted, whether worker execution completed, how many response bytes left Device 2 and crossed the relay, and which endpoint reset the stream. The full 1,000-second lease soak and successful shadow receipt remain acceptance gates after the transport defect is isolated.
 
 ## 12. Related Documentation
 
