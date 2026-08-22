@@ -130,3 +130,10 @@
 - Configuration: added `DISTRIBLLM_P2P_IDENTITY_DIR`; its empty/default value uses the WSL-local `~/.distribllm/p2p-identities` directory and remains separate from the useful-work application signing identity.
 - Verification: 157 generation-readiness, provider-health, coverage, and observer tests pass; five focused identity/recovery regressions pass; a real local Hivemind DHT restart reproduced the same peer ID from one saved key; Python compilation, Electron type checks, 20 launcher tests, two renderer-flow tests, and diff checks pass.
 - Status: the confirmed peer-rotation defect is repaired locally. The original real-forward stream reset is not claimed fixed and remains a separate physical transport gate. A clean committed build and two-device retest are next.
+
+### 2026-08-22 - Package the identity-preserving recovery build
+
+- What changed: committed and pushed the persistent worker-identity repair as `9fec4a8903162d34432bc2b7357b665fda8715c1`, then built the Windows portable application with that exact source commit and a clean tracked-source flag embedded in the packaged main process.
+- Verification: Electron type checks, 20 launcher tests, two renderer-flow tests, the production build, direct generated-bundle inspection, packaged ASAR inspection, and the Windows package audit pass. The audit reports 36 ASAR entries and zero forbidden entries.
+- Artifact: `DistribLLM-1.0.0-portable.exe` is 87,658,063 bytes with SHA-256 `816893d26e6d12e6aae261a5cc15c574268e612cd1aadf4942a69b27d7a2dbba`.
+- Status: this supersedes the prior `8daf6e21` artifact. Physical acceptance must use this exact executable and backend source commit on both devices, verify peer-ID continuity through any recovery, complete real prompts, and preserve correlated evidence if the relay stream reset recurs.

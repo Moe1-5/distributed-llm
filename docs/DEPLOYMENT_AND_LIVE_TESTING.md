@@ -89,18 +89,18 @@ Expected result:
 - package audit reports zero forbidden entries.
 - both physical devices use the same executable hash for acceptance.
 
-### Current Remote-Lease-Recovery Test Artifact
+### Current Identity-Preserving-Recovery Test Artifact
 
-The 2026-08-22 remote-lease-recovery build is:
+The 2026-08-22 identity-preserving-recovery build is:
 
 - file: `frontend/dist/DistribLLM-1.0.0-portable.exe`
-- source commit: `8daf6e21fa542bdfdbf87d36e459f916682466ea`
+- source commit: `9fec4a8903162d34432bc2b7357b665fda8715c1`
 - tracked source: clean
-- size: `87,656,445` bytes
-- SHA-256: `833ef6c17e757e75e16634890583172ed741eecb2ebdb35fcf43ae3c98dc8b58`
+- size: `87,658,063` bytes
+- SHA-256: `816893d26e6d12e6aae261a5cc15c574268e612cd1aadf4942a69b27d7a2dbba`
 - package audit: 36 ASAR entries and zero forbidden entries
 
-This executable supersedes the earlier incentives-recovery artifacts. Both physical
+This executable supersedes the earlier remote-lease-recovery and incentives-recovery artifacts. Both physical
 devices must run this exact hash and the backend checkout at the embedded source
 commit before recording the remote lease soak and final acceptance evidence.
 
