@@ -6,8 +6,8 @@
 **Description:** Electron + FastAPI prototype for project-owned public/discoverable peer-to-peer distributed LLM inference over Hivemind DHT/RPC.  
 **Stage:** [ ] Scaffolding [x] MVP prototype [ ] Feature-complete [ ] Production
 ## Active Sprint
-**Sprint:** Sprint 25 physical runtime validation remains active; Sprint 26 credit-gated API access is implemented; Sprint 27 frontend experience and model discovery is proposed.
-**Goal:** Resolve the physical relay forward-stream failure, then make remote model availability and runtime state clear throughout the desktop workflow.
+**Sprint:** Sprint 13 remains the lowest active sprint by workflow; Sprint 28 is locally implemented with physical rollout pending, Sprints 29-32 are planned, and Sprints 22, 25, and 27 retain open transport, runtime, and UI gates.
+**Goal:** Make routed peer identity exact, then decouple network lifecycle, add atomic placement, reduce token traffic with sessions, and harden infrastructure.
 ## Tech Stack
 React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Transformers/PyTorch, uv for backend dependencies, npm for frontend scripts.
 ## Last Decision
@@ -36,4 +36,4 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 24 now binds device reports to executable SHA-256 and clean source commit; one final post-commit rebuild plus physical relay/failover/direct acceptance remain open.
 - Sprint 25 now refreshes worker metadata and membership on bounded heartbeats, rejects stale local advertisements, gates generator readiness on RPC health and a tensor canary, and exposes suspended generators for explicit unload. Physical relay retesting remains open.
 - Sprint 26 now keeps Electron chat free while verified credits unlock hashed local API keys, shared atomic reservations, signed capabilities, and OpenAI-compatible chat completions; hosted global spending remains future work.
-- Sprint 27 implementation now quarantines stale/local-only serving recommendations, labels coverage freshness, removes stale route-waiting text after readiness, and adds persistent exportable runtime diagnostics. Broader model availability, Trace, and workflow work remains open.
+- Sprint 27 retains frontend workflow and diagnostics. Sprint 28 now pins Hivemind 1.1.12, gives normal and receipt experts peer-scoped identities, and binds dispatch to the route-selected peer; real duplicate-range, complementary-split, alternate-failover, and receipt tests pass locally, while packaged two-device validation remains open. Sprints 29-32 retain the supervisor, placement, session, and infrastructure program.

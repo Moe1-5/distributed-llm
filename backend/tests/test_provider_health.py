@@ -369,7 +369,7 @@ class HealthReadinessIntegrationTests(unittest.TestCase):
                 errors.append(exc)
 
         with (
-            patch("client.sequential.get_experts", return_value=[expert]) as lookup,
+            patch("client.sequential.get_peer_expert", return_value=expert) as lookup,
             patch.object(
                 sys.modules["client.sequential"].RemoteExpertWorker,
                 "run_coroutine",
@@ -382,7 +382,7 @@ class HealthReadinessIntegrationTests(unittest.TestCase):
 
         self.assertFalse(probe_thread.is_alive())
         self.assertEqual(errors, [])
-        lookup.assert_called_once_with(sequential.dht, ["rpc.peer-a"])
+        lookup.assert_called_once_with(sequential.dht, "rpc.peer-a", "peer-a")
 
     def test_production_probe_cancels_timed_out_rpc_info(self) -> None:
         class DHT:
@@ -409,7 +409,7 @@ class HealthReadinessIntegrationTests(unittest.TestCase):
         )
         rpc_info = Future()
         with (
-            patch("client.sequential.get_experts", return_value=[expert]),
+            patch("client.sequential.get_peer_expert", return_value=expert),
             patch.object(
                 sys.modules["client.sequential"].RemoteExpertWorker,
                 "run_coroutine",

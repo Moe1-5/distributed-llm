@@ -18,6 +18,7 @@ from tensor_payload_probe import (
     _validate_options,
     _validate_route_identity,
 )
+from node.rpc_server import RPCServer
 
 
 def options(**overrides) -> ProbeOptions:
@@ -51,7 +52,16 @@ class TensorPayloadProbeTests(unittest.TestCase):
         self.assertIn(96, DEFAULT_SEQUENCE_LENGTHS)
         self.assertEqual(
             _validate_options(options()),
-            (12, 768, "distribllm.0.12"),
+            (
+                12,
+                768,
+                RPCServer.build_rpc_uid(
+                    "distribllm",
+                    0,
+                    12,
+                    provider_peer_id="worker-peer",
+                ),
+            ),
         )
 
     def test_options_require_safe_explicit_target(self) -> None:
@@ -110,6 +120,8 @@ class TensorPayloadProbeTests(unittest.TestCase):
         self.assertNotIn("receipt_rpc_uid", evidence)
         self.assertNotIn("application_public_key", evidence)
         self.assertEqual(evidence["connection_mode"], "relay")
+        self.assertEqual(evidence["rpc_peer_id"], "worker-peer")
+        self.assertEqual(evidence["rpc_uid_schema_version"], 1)
 
     def test_request_measurements_reflect_float16_activation_wire_format(self) -> None:
         hidden = torch.zeros((1, 8, 768), dtype=torch.float32)

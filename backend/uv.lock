@@ -323,7 +323,7 @@ requires-dist = [
     { name = "blake3", specifier = ">=1.0.8" },
     { name = "cryptography", specifier = ">=46.0.5" },
     { name = "fastapi", specifier = ">=0.135.1" },
-    { name = "hivemind", specifier = ">=1.1.12" },
+    { name = "hivemind", specifier = "==1.1.12" },
     { name = "nvidia-ml-py", specifier = ">=12.560.30" },
     { name = "psutil", specifier = ">=6.1.0" },
     { name = "transformers", specifier = ">=5.3.0" },

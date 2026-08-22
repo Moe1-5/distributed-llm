@@ -49,6 +49,8 @@ class LocalSplitProbeTests(unittest.TestCase):
         )
 
         self.assertEqual(route[0]["peer_id"], "head")
+        self.assertEqual(route[0]["rpc_peer_id"], "head")
+        self.assertEqual(route[0]["rpc_uid_schema_version"], 1)
         self.assertNotIn("maddrs", route[0])
 
     def test_evidence_file_is_private(self) -> None:

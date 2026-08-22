@@ -15,7 +15,6 @@ import httpx
 import torch
 import torch.nn as nn
 import hivemind
-from hivemind.moe import get_experts
 from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -46,7 +45,7 @@ from incentives.settlement import (
 )
 from incentives.config import IncentivesConfig
 from incentives.runtime import UsefulWorkRuntime
-from client.sequential import RemoteSequential
+from client.sequential import RemoteSequential, get_peer_expert
 from node.rpc_server import RPCServer, _ReceiptHandlerModule
 
 
@@ -389,13 +388,19 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 }
             ]
 
-            with patch(
-                "client.sequential.create_inference_request",
-                side_effect=RuntimeError("stop after request construction"),
-            ) as create_request:
+            with (
+                patch(
+                    "client.sequential.create_inference_request",
+                    return_value={"document_type": "inference_request"},
+                ) as create_request,
+                patch(
+                    "client.sequential.get_peer_expert",
+                    side_effect=RuntimeError("stop after peer binding"),
+                ) as bind_expert,
+            ):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    "stop after request construction",
+                    "stop after peer binding",
                 ):
                     sequential._rpc_forward_with_receipt(
                         node_info=node,
@@ -409,6 +414,11 @@ class IdentityAndProtocolTests(unittest.TestCase):
             self.assertEqual(
                 create_request.call_args.kwargs["request_id"],
                 "route-request",
+            )
+            bind_expert.assert_called_once_with(
+                sequential.dht,
+                "distribllm.999999.0.12",
+                "worker-peer",
             )
 
     def test_real_hivemind_receipt_rpc_settles_verified_work(self) -> None:
@@ -488,11 +498,11 @@ class IdentityAndProtocolTests(unittest.TestCase):
                     position_count=50,
                     request_id="integration-request",
                 )
-                expert = get_experts(
+                expert = get_peer_expert(
                     client_dht,
-                    [capability["receipt_rpc_uid"]],
-                )[0]
-                self.assertIsNotNone(expert)
+                    capability["receipt_rpc_uid"],
+                    worker_peer,
+                )
 
                 output, metadata_tensor = expert.forward(
                     hidden,

@@ -130,7 +130,9 @@ def _route_evidence(route: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "peer_id": str(node.get("peer_id", "")),
+            "rpc_peer_id": str(node.get("rpc_peer_id", node.get("peer_id", ""))),
             "rpc_uid": str(node.get("rpc_uid", "")),
+            "rpc_uid_schema_version": int(node.get("rpc_uid_schema_version", 1)),
             "layer_start": int(node["layer_start"]),
             "layer_end": int(node["layer_end"]),
             "model_name": str(node.get("model_name", "")),
@@ -192,6 +194,9 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
     cleanup: dict[str, Any] = {}
     result: dict[str, Any] | None = None
     failure: Exception | None = None
+    identity_directory = tempfile.TemporaryDirectory(
+        prefix="distribllm-local-split-identities-"
+    )
 
     try:
         bootstrap = hivemind.DHT(
@@ -213,6 +218,7 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
                 dtype=torch.float32,
                 local_model_path=model_path,
                 p2p_config=_direct_config(),
+                p2p_identity_dir=identity_directory.name,
             )
             nodes.append(node)
             node.start()
@@ -394,6 +400,12 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
                     {"node_id": node.node_id, "stopped": False, "error": str(exc)}
                 )
         cleanup["nodes"] = list(reversed(node_results))
+        try:
+            identity_directory.cleanup()
+            cleanup["identity_directory_removed"] = True
+        except Exception as exc:
+            cleanup["identity_directory_removed"] = False
+            cleanup["identity_directory_error"] = str(exc)
         if client_dht is not None:
             cleanup["remote_expert_p2p_stopped"] = shutdown_remote_expert_p2p(
                 client_dht
@@ -417,6 +429,7 @@ def run_probe(options: ProbeOptions) -> dict[str, Any]:
         and cleanup.get("client_dht_stopped") is True
         and cleanup.get("remote_expert_p2p_stopped") is True
         and cleanup.get("bootstrap_stopped") is True
+        and cleanup.get("identity_directory_removed") is True
         and all(item.get("stopped") is True for item in cleanup["nodes"])
     )
     if options.output is not None:

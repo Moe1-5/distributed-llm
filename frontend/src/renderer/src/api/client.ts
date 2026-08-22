@@ -409,6 +409,8 @@ export interface RouteFailoverStatus {
 
 export interface HopPerformance {
   peer_id: string
+  selected_peer_id?: string
+  executed_peer_id?: string
   rpc_uid: string
   layer_start: number
   layer_end: number

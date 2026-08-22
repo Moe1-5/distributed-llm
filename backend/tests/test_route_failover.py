@@ -12,6 +12,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 from client.coverage import plan_health_aware_routes
 from client.failover import RouteAttemptError, RouteFailoverConfig
 from client.failover import RouteCancellationError
+from client.rpc_policy import RPCPreExecutionError
 from client.sequential import RemoteSequential
 
 
@@ -160,6 +161,28 @@ class RouteFailoverTests(unittest.TestCase):
         self.assertEqual(calls[-1][1], 0.0)
         self.assertTrue(torch.equal(output, torch.ones(1, 1, 2)))
         self.assertEqual(trace, ["relay-fu… (layers 0→4)"])
+        self.assertTrue(instance.get_last_forward_metrics()["failed_over"])
+
+    def test_typed_expert_preflight_failure_uses_a_safe_alternate(self) -> None:
+        nodes = [provider("a", 0, 4), provider("b", 0, 4)]
+        instance = self.sequential(nodes)
+        calls: list[str] = []
+
+        def rpc_forward(_rpc_uid, peer_id, hidden_states, **_kwargs):
+            calls.append(peer_id)
+            if peer_id == "a":
+                raise RPCPreExecutionError(
+                    "normal expert is unavailable before tensor dispatch",
+                    rpc_role="normal",
+                )
+            return hidden_states + 1
+
+        instance._rpc_forward = rpc_forward
+        output, trace = instance.forward(torch.zeros(1, 1, 2))
+
+        self.assertEqual(calls, ["a", "a", "b"])
+        self.assertTrue(torch.equal(output, torch.ones(1, 1, 2)))
+        self.assertEqual(trace, ["b… (layers 0→4)"])
         self.assertTrue(instance.get_last_forward_metrics()["failed_over"])
 
     def test_ambiguous_failure_never_uses_alternate(self) -> None:

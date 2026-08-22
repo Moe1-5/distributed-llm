@@ -2,7 +2,7 @@
 
 This plan turns the current prototype into a reliable Petals-inspired distributed inference system for this project's own public/discoverable swarm. The network should be open enough for external devices to join and contribute resources, but isolated from public Petals/IPFS infrastructure by project-owned bootstrap nodes, DHT namespaces, metadata contracts, model registry, and routing rules.
 
-## Current Position - 2026-08-13
+## Current Position - 2026-08-23
 
 Phases 0 through 3 have substantial implemented foundations: structured readiness, contiguous route planning, cancellation, OPT/Llama-family adapter behavior, parity/trace tooling, multi-node local registries, monitoring, Hugging Face OAuth downloads, validated gated local imports, and instruction-ready model metadata. These areas still require broader live multi-machine validation; their presence in earlier roadmap phases no longer means they are wholly unimplemented.
 
@@ -21,7 +21,19 @@ Approved work that can proceed without treating the live two-device evidence as 
 - Sprint 20: typed tensor/metadata validation, nonblocking bounded Hivemind queues, shared safety counters, cooperative deadlines, and transactional receipt accounting are implemented; live relay compatibility remains.
 - Sprint 21: consume accepted health and RPC semantics for bounded health-aware route failover.
 
-Sprints 18 through 21 were approved for implementation. Session/key-value cache routing, API keys, transferable incentives, and distributed training remain deferred.
+Sprints 18 through 21 were approved for implementation. Session/key-value cache routing is now assigned to Sprint 31 behind the stateless transport and peer-correctness gates. Transferable incentives and distributed training remain deferred; local credit-gated API access is implemented in Sprint 26.
+
+## Distributed Runtime Architecture Program
+
+The 2026-08-23 source, Hivemind 1.1.12, and Petals comparison audit found that transformer partitioning is not the primary architectural defect. The correction program instead separates provider identity, participant network lifecycle, placement coordination, tensor sessions, and infrastructure resilience into dependency-ordered owners:
+
+1. **Sprint 28 - Peer-addressed expert protocol:** locally implemented against pinned Hivemind 1.1.12. Normal and receipt identities are peer-unique, every health/forward path binds to the selected peer, and duplicate-range, complementary-split, alternate-failover, and receipt tests pass. Packaged two-device rollout remains open.
+2. **Sprint 29 - Persistent network supervisor:** give each backend an always-on control-plane discovery owner, explicit network state, last-good topology, distinct role-specific peer runtimes, and evidence-based publication recovery.
+3. **Sprint 30 - Transactional swarm placement:** allocate ranges through authoritative expiring reservations so concurrent participants cannot act on the same snapshot recommendation.
+4. **Sprint 31 - Session-aware KV-cache inference:** add bounded prefill and decode sessions after the direct-versus-relay stateless payload baseline is known.
+5. **Sprint 32 - Infrastructure redundancy and architecture acceptance:** separate bootstrap/DHT, relay, coordinator, and settlement roles, add independent redundancy, and run the final failure matrix.
+
+Existing ownership remains intact: Sprint 22 diagnoses the stateless relay tensor stream, Sprint 25 owns application runtime truth, and Sprint 27 owns renderer workflow and diagnostics. Sprints 28 through 32 provide new backend and infrastructure contracts for those sprints to consume rather than duplicating them.
 
 ## Phase 0: Stabilize the Current Prototype
 
@@ -171,7 +183,7 @@ Goal: catch dead nodes before inference.
 ### Tasks
 
 - Add a lightweight node health probe.
-- Verify `get_experts(...)` resolves each selected `rpc_uid`.
+- Bind each selected `rpc_uid` to its route-selected peer, preflight that exact expert, and reject ownership mismatches before tensor dispatch.
 - Optionally send a tiny synthetic tensor through each node.
 - Record latency and last success timestamp.
 - Store health info in route planner scoring.
@@ -180,20 +192,22 @@ Goal: catch dead nodes before inference.
 
 Goal: move toward Petals-like efficiency.
 
+**Implementation owner:** Sprint 31, after Sprints 22 and 28 establish the stateless transport baseline and exact peer execution.
+
 ### Current Behavior
 
 Each token step embeds and sends the full generated sequence through all remote layers.
 
 ### Target Behavior
 
-Longer term:
+Sprint 31 will:
 
 - create a session id per generation
 - hold route stable during the session
 - support KV cache on remote nodes
 - send only the new token after the initial prefill
 
-This is a larger change because node RPC APIs need to support cache state.
+This is a larger change because node RPC APIs need to support versioned cache state, bounded admission and cleanup, architecture parity, cancellation, and accounting-safe recovery.
 
 ## Phase 6: Multi-Node and Multi-Generator Management
 
@@ -334,11 +348,13 @@ This is intentionally last because training is harder than inference. It require
 5. Expand architecture parity evidence for every user-facing model.
 6. Implement Sprint 19 continuous health and Sprint 20 RPC resource safety.
 7. Implement Sprint 21 health-aware route failover after Sprints 19 and 20 are accepted.
-8. Add stable session routing and distributed KV cache.
-9. Harden public swarm operations, protocol/version compatibility, and bootstrap rotation.
-10. Add API-key access for inferenced models.
-11. Validate Sprint 13 receipts and shadow settlement across two devices before approving credit mode.
-12. Consider distributed training/fine-tuning resource requests last.
+8. Complete Sprint 28 peer-addressed expert ownership and Sprint 29 persistent network lifecycle.
+9. Add Sprint 30 transactional placement after peer and network state are authoritative.
+10. Implement Sprint 31 stable session routing and distributed KV cache after the stateless payload baseline.
+11. Complete Sprint 32 infrastructure separation, redundancy, and architecture acceptance.
+12. Validate Sprint 26 API-key access against the accepted runtime architecture.
+13. Validate Sprint 13 receipts and shadow settlement across two devices before approving credit mode.
+14. Consider distributed training/fine-tuning resource requests last.
 
 ## Definition of Done for Correct Inference
 

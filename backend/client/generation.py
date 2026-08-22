@@ -611,6 +611,12 @@ class DistributedGenerator:
                             key,
                             {
                                 "peer_id": key[0],
+                                "selected_peer_id": str(
+                                    hop.get("selected_peer_id", key[0])
+                                ),
+                                "executed_peer_id": str(
+                                    hop.get("executed_peer_id", key[0])
+                                ),
                                 "rpc_uid": str(hop.get("rpc_uid", "")),
                                 "layer_start": key[1],
                                 "layer_end": key[2],

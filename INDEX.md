@@ -48,6 +48,12 @@
 | Selective layer loading tests             | `backend/tests/test_selective_layer_loading.py` |
 | Remote layer routing                      | `backend/client/sequential.py`            |
 | Health-aware route failover policy        | `backend/client/failover.py`              |
+| Peer-addressed expert protocol            | `tasks/sprints/sprint-28-peer-addressed-expert-protocol.md` |
+| Peer-addressed expert RPC tests            | `backend/tests/test_peer_addressed_rpc.py` |
+| Persistent network lifecycle plan         | `tasks/sprints/sprint-29-persistent-network-supervisor.md` |
+| Transactional layer placement plan        | `tasks/sprints/sprint-30-transactional-swarm-placement.md` |
+| Session and KV-cache inference plan       | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` |
+| Infrastructure resilience and final architecture acceptance | `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` |
 | Continuous provider health                | `backend/client/health.py`                |
 | Provider health tests                     | `backend/tests/test_provider_health.py`   |
 | Route failover tests                      | `backend/tests/test_route_failover.py`    |
@@ -104,6 +110,11 @@
 | `tasks/sprints/sprint-25-runtime-state-validation.md` | Active sprint for authoritative runtime readiness, lifecycle dependency validation, and staged diagnostics. |
 | `tasks/sprints/sprint-26-credit-gated-api-access.md` | Active sprint for fair-use chat, verified-credit API access, and signed inference capabilities. |
 | `tasks/sprints/sprint-27-frontend-experience-and-model-discovery.md` | Proposed sprint for remote-model discovery, role clarity, coherent runtime status, diagnostics, and desktop UI optimization. |
+| `tasks/sprints/sprint-28-peer-addressed-expert-protocol.md` | Locally implemented peer-unique expert ownership, exact peer dispatch, and Hivemind 1.1.12 compatibility; physical rollout remains open. |
+| `tasks/sprints/sprint-29-persistent-network-supervisor.md` | Planned sprint for backend-owned discovery, explicit network state, publication ownership, and evidence-based transport recovery. |
+| `tasks/sprints/sprint-30-transactional-swarm-placement.md` | Planned sprint for authoritative layer reservations, provider lease states, and atomic placement. |
+| `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` | Planned sprint for bounded remote prefill/decode sessions, key/value caches, parity, and safe recovery. |
+| `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` | Planned sprint for separated infrastructure roles, independent redundancy, failure injection, and final architecture evidence. |
 | `tasks/archive/sprint-10-gated-model-local-import.md`          | Completed sprint for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
 | `tasks/archive/sprint-11-instruction-ready-model-expansion.md` | Completed sprint for instruction-ready/chat-ready model registry expansion, tuning labels, local-import contracts, and live TinyLlama generation validation. |
 | `tasks/archive/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Completed sprint for public-model auth isolation, failed-start cleanup, model cache cleanup, local expert routing, and safetensors/bin-index gated import validation. |
@@ -189,6 +200,7 @@
 | `backend/tests/test_local_split_probe.py` | Local split probe option, range, evidence sanitization, and private-output regressions. |
 | `backend/tests/test_tinyllama_performance_probe.py` | TinyLlama probe bounds, metric sanitization, and acceptance-contract regressions. |
 | `backend/tests/test_tensor_payload_probe.py` | Controlled-target validation, tensor byte accounting, repeated-canary ordering, legacy-only dispatch, and first-failure stop regressions. |
+| `backend/tests/test_peer_addressed_rpc.py` | Exact Hivemind version, peer-scoped UID ownership, direct peer binding, and real duplicate-range provider regressions. |
 | `backend/tests/test_lifecycle_jobs.py` | Long-running startup job progress, deduplication, cancellation, failure, and prompt-response regressions. |
 | `backend/tests/test_runtime_state_validation.py` | Generator state, tensor canary, local replica limits, route suspension, and dependent-node deletion regressions. |
 | `backend/tests/test_api_access.py` | Hashed API-key eligibility, revocation, shared atomic credit reservations, shadow accounting, and signed capability regressions. |

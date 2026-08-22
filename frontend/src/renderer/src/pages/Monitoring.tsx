@@ -389,7 +389,15 @@ export default function Monitoring(): React.JSX.Element {
                     key={`${hop.peer_id}-${hop.layer_start}-${hop.layer_end}`}
                     className="grid grid-cols-[minmax(0,1fr)_100px_90px_110px] gap-3 border-b border-border px-4 py-2.5 font-mono text-[11px] last:border-b-0"
                   >
-                    <span className="truncate text-text-secondary">{shortPeer(hop.peer_id)}</span>
+                    <span
+                      className="truncate text-text-secondary"
+                      title={`Selected ${hop.selected_peer_id ?? hop.peer_id}; executed ${hop.executed_peer_id ?? hop.peer_id}`}
+                    >
+                      {shortPeer(hop.selected_peer_id ?? hop.peer_id)}
+                      {(hop.executed_peer_id ?? hop.peer_id) !==
+                        (hop.selected_peer_id ?? hop.peer_id) &&
+                        ` → ${shortPeer(hop.executed_peer_id ?? hop.peer_id)}`}
+                    </span>
                     <span className="text-cyan">
                       {hop.layer_start}-{hop.layer_end}
                     </span>

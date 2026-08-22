@@ -84,3 +84,13 @@
 **Alternatives:** Require public router forwarding on every participant, require all users to join a private overlay network, or send every connection through a central relay. These add unacceptable setup, administrative coupling, or avoidable latency and bandwidth cost.
 
 **Consequences:** Most Windows/WSL participants can operate without opening a public router port, while reachable operators retain the faster direct path. The VPS relay forwards activation traffic and therefore needs capacity limits, monitoring, redundancy, and live Hivemind compatibility validation.
+
+### [2026-08-23] Bind expert execution to the route-selected peer
+
+**Context:** A route selected providers by peer ID, but health checks and forward calls resolved each expert UID through the DHT again. Independent devices serving the same range published the same UID, so a later publication could make a request selected for peer A execute on peer B. The implementation also depends on APIs and behavior verified specifically in Hivemind 1.1.12.
+
+**Decision:** Pin Hivemind exactly to version 1.1.12. Version-two workers publish peer-scoped normal and receipt UIDs containing the complete stable Base58 peer ID, numeric role, layer range, and local replica coordinate. Node metadata explicitly reports the UID schema version and owner. Generators construct `RemoteExpert` from the advertised UID and selected `PeerID` instead of resolving the UID to an executor through the DHT, and reject version-two ownership mismatches before tensor dispatch. Legacy advertisements remain readable but are also called through their selected peer.
+
+**Alternatives:** Keep UID-only DHT resolution, use a probabilistic peer hash, encode the peer as one oversized numeric coordinate, or centralize all tensor RPC. UID-only resolution preserves the race; a hash is not collision-free; very large numeric coordinates can cross Hivemind serialization bounds; centralization abandons the peer-to-peer data plane.
+
+**Consequences:** Duplicate-range providers can coexist and a cached route cannot silently change executor. Normal and receipt UIDs change for upgraded workers, so generators should be upgraded before or with workers during rollout. Old generators can resolve the new unique UIDs, but they do not gain peer-pinning until upgraded. DHT publication remains control-plane evidence; execution ownership now comes from the route-selected peer binding.

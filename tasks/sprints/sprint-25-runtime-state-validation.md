@@ -27,6 +27,12 @@
 - [x] Model catalog, serving-plan, status, and Monitoring refreshes remain deadline-bound.
 - [ ] Backend, frontend, package, and two-device relay acceptance checks pass.
 
+## Ownership Boundary
+
+- This sprint remains the owner of authoritative application readiness, lifecycle validation, and API runtime snapshots.
+- Sprint 29 owns the persistent DHT/network lifecycle and publication-recovery semantics; this sprint consumes its structured network state.
+- Sprint 27 owns renderer presentation and recovery guidance; application correctness must not depend on renderer polling.
+
 ---
 
 ## Session Log

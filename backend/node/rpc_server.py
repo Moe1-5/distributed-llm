@@ -2,15 +2,15 @@
 rpc_server.py
 Exposes this node's InferenceHandler over the hivemind P2P network.
 
-UID format fix:
+UID format:
     hivemind requires UIDs matching: ^(([^.])+)([.](?:[0]|([1-9]([0-9]*))))+$
     Meaning the UID must end with a DOT followed by a NUMBER.
     e.g. "distribllm.expert.0" is valid
          "distribllm.12D3KooWAbc..." is NOT valid (letters after dot)
 
-    We use: "{dht_prefix}.expert.0"
-    And store the actual peer_id in the DHT node_info entry so
-    sequential.py can look up the UID from the metadata.
+    We put the stable Base58 peer ID in Hivemind's non-numeric prefix and use
+    numeric role, layer, and replica coordinates. Independent devices serving
+    the same range therefore do not compete for one expert key.
 """
 
 import asyncio
@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 import hivemind
 from hivemind.moe.server import ModuleBackend
+from hivemind.moe.expert_uid import is_valid_uid
 from hivemind.moe.server.task_pool import Task, TaskPool
 from hivemind.proto.runtime_pb2 import CompressionType
 from hivemind.utils.tensor_descr import BatchTensorDescriptor
@@ -410,8 +411,11 @@ class RPCServer:
         layer_start: int,
         layer_end: int,
         uid_suffix: Optional[int] = None,
+        *,
+        provider_peer_id: Optional[str] = None,
     ) -> str:
-        if not dht_prefix.strip():
+        normalized_prefix = dht_prefix.strip()
+        if not normalized_prefix:
             raise ValueError("dht_prefix must not be empty")
         if layer_start < 0:
             raise ValueError(f"layer_start must be >= 0, got {layer_start}")
@@ -419,12 +423,29 @@ class RPCServer:
             raise ValueError(
                 f"layer_end ({layer_end}) must be > layer_start ({layer_start})"
             )
-        base_uid = f"{dht_prefix}.{layer_start}.{layer_end}"
-        if uid_suffix is None:
-            return base_uid
-        if uid_suffix < 0:
+        if uid_suffix is not None and uid_suffix < 0:
             raise ValueError(f"uid_suffix must be >= 0, got {uid_suffix}")
-        return f"{base_uid}.{uid_suffix}"
+        if provider_peer_id is None:
+            base_uid = f"{normalized_prefix}.{layer_start}.{layer_end}"
+            rpc_uid = base_uid if uid_suffix is None else f"{base_uid}.{uid_suffix}"
+            if not is_valid_uid(rpc_uid):
+                raise ValueError(
+                    f"dht_prefix produces an invalid Hivemind expert UID: {rpc_uid!r}"
+                )
+            return rpc_uid
+
+        normalized_peer_id = str(provider_peer_id).strip()
+        if "." in normalized_prefix:
+            raise ValueError("dht_prefix must not contain dots for peer-addressed RPC")
+        if not normalized_peer_id:
+            raise ValueError("provider_peer_id must not be empty")
+        if "." in normalized_peer_id:
+            raise ValueError("provider_peer_id must not contain dots")
+        replica = 0 if uid_suffix is None else uid_suffix
+        return (
+            f"{normalized_prefix}-{normalized_peer_id}.0."
+            f"{layer_start}.{layer_end}.{replica}"
+        )
 
     @staticmethod
     def build_receipt_rpc_uid(
@@ -432,7 +453,27 @@ class RPCServer:
         layer_start: int,
         layer_end: int,
         uid_suffix: Optional[int] = None,
+        *,
+        provider_peer_id: Optional[str] = None,
     ) -> str:
+        if provider_peer_id is not None:
+            normalized_prefix = dht_prefix.strip()
+            normalized_peer_id = str(provider_peer_id).strip()
+            if not normalized_prefix:
+                raise ValueError("dht_prefix must not be empty")
+            if "." in normalized_prefix:
+                raise ValueError("dht_prefix must not contain dots for peer-addressed RPC")
+            if not normalized_peer_id:
+                raise ValueError("provider_peer_id must not be empty")
+            if "." in normalized_peer_id:
+                raise ValueError("provider_peer_id must not contain dots")
+            if uid_suffix is not None and uid_suffix < 0:
+                raise ValueError(f"uid_suffix must be >= 0, got {uid_suffix}")
+            replica = 0 if uid_suffix is None else uid_suffix
+            return (
+                f"{normalized_prefix}-{normalized_peer_id}.1."
+                f"{layer_start}.{layer_end}.{replica}"
+            )
         return RPCServer.build_rpc_uid(
             f"{dht_prefix}.999999",
             layer_start,
@@ -448,12 +489,14 @@ class RPCServer:
 
             # UID must match: ^(([^.])+)([.](?:[0]|([1-9]([0-9]*))))+$
             # i.e. segments separated by dots, last segment must be a number
-            # We use prefix.expert.0 — simple and always valid
+            # Version two embeds the stable peer in the text prefix and keeps
+            # all following coordinates numeric for Hivemind 1.1.12.
             self._uid = self.build_rpc_uid(
                 self.dht_prefix,
                 self.handler.layer_start,
                 self.handler.layer_end,
                 self.uid_suffix,
+                provider_peer_id=str(self.dht.peer_id),
             )
             hidden_size = self._get_hidden_size()
             self.safety_controller = RPCSafetyController(
@@ -514,6 +557,7 @@ class RPCServer:
                     self.handler.layer_start,
                     self.handler.layer_end,
                     self.uid_suffix,
+                    provider_peer_id=str(self.dht.peer_id),
                 )
                 metadata_descriptor = BatchTensorDescriptor(
                     METADATA_TENSOR_SIZE,

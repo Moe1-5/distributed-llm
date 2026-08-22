@@ -398,7 +398,7 @@ When direct reachability is available, repeat Test A in incentives-off mode with
 
 ### Test D: controlled legacy payload sweep
 
-Use `backend/tensor_payload_probe.py`. It is a dialing-only diagnostic client, so it can run from Device 1 while the packaged Electron backend already owns port `8000`; do not press Settings **Start** and do not start another Uvicorn process. It always calls the normal legacy expert with one attempt per case and no receipt route, even if the repository `.env` is currently in shadow mode.
+Use `backend/tensor_payload_probe.py`. It is a dialing-only diagnostic client, so it can run from Device 1 while the packaged Electron backend already owns port `8000`; do not press Settings **Start** and do not start another Uvicorn process. It always calls the normal stateless expert with one attempt per case and no receipt route, even if the repository `.env` is currently in shadow mode.
 
 The default order is `1, 1, 2, 4, 8, 16, 32, 64, 96, 128`. Repeating sequence length one distinguishes a second-call lifecycle failure from a payload-size failure. The final cases cross the region around the observed `131072`-byte relay copy without claiming that value is a hard limit. The reported `serialized_tensor_protobuf_bytes` values cover the three serialized tensor protobufs, not the complete libp2p RPC envelope or framing.
 
@@ -417,7 +417,7 @@ uv run --python 3.12 python -m tensor_payload_probe \
 
 The command reads the VPS bootstrap address from `DISTRIBLLM_INITIAL_PEERS` in the repository-root `.env`. If an explicit address is required, add one `--initial-peer "<VPS_BOOTSTRAP_MULTIADDR>"`; its final peer ID must be the VPS bootstrap peer, never the Device 2 worker peer. Replace the expected peer placeholder with the full Device 2 worker peer ID shown by `/nodes/local`.
 
-The probe refuses to dispatch unless DHT metadata selects exactly that peer, the normal UID `distribllm.0.12`, layers `0-12`, the requested connection mode, and `transport_verified: true`. It checkpoints the private JSON file with mode `0600` before every remote forward, so a hung or externally interrupted call still leaves the last request ID, sequence length, stage, and byte measurements. It stops immediately after the first failure and never retries an ambiguous reset.
+For a version-two worker, the probe derives the expected normal UID from the selected peer as `distribllm-<DEVICE_2_WORKER_PEER_ID>.0.0.12.0` and requires matching `rpc_peer_id` ownership. Use `--expected-rpc-uid` only when intentionally testing a historical version-one worker such as the earlier `distribllm.0.12` evidence. The probe also requires layers `0-12`, the requested connection mode, and `transport_verified: true`. It checkpoints the private JSON file with mode `0600` before every remote forward, so a hung or externally interrupted call still leaves the last request ID, sequence length, stage, and byte measurements. It stops immediately after the first failure and never retries an ambiguous reset.
 
 Preserve the result and client log, then collect Device 2 worker state and the VPS journal for the result's `captured_at`, per-case request times, and first failed case. Do not run the direct comparison until the relayed result has been saved.
 

@@ -6,6 +6,14 @@ import os
 from dataclasses import dataclass
 
 
+class RPCPreExecutionError(RuntimeError):
+    """An expert failed before any tensor request could be dispatched."""
+
+    def __init__(self, message: str, *, rpc_role: str) -> None:
+        super().__init__(message)
+        self.rpc_role = rpc_role
+
+
 @dataclass(frozen=True)
 class RPCAttemptPolicy:
     max_attempts: int = 2
@@ -71,6 +79,8 @@ def get_rpc_attempt_policy() -> RPCAttemptPolicy:
 
 def classify_rpc_error(exc: Exception) -> str:
     """Classify whether another attempt is safe before remote execution."""
+    if isinstance(exc, RPCPreExecutionError):
+        return "pre_execution_transport"
     if isinstance(exc, (AssertionError, TypeError, ValueError)):
         return "invalid_request"
 
@@ -105,5 +115,7 @@ def is_retryable_rpc_error(exc: Exception) -> bool:
 
 
 def is_safe_receipt_fallback(exc: Exception) -> bool:
+    if isinstance(exc, RPCPreExecutionError):
+        return exc.rpc_role == "receipt"
     message = str(exc).lower()
     return "receipt expert" in message and "was not found" in message

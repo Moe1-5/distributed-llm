@@ -34,6 +34,8 @@ class LocalFailoverProbeTests(unittest.TestCase):
             }
         )
         self.assertEqual(evidence["peer_id"], "peer")
+        self.assertEqual(evidence["rpc_peer_id"], "peer")
+        self.assertEqual(evidence["rpc_uid_schema_version"], 1)
         self.assertNotIn("maddrs", evidence)
 
 

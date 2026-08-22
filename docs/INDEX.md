@@ -9,7 +9,7 @@
 | Source file map | `REPO_MAP.md` | Responsibilities for backend, frontend, incentives, and generated artifacts |
 | Current architecture | `CURRENT_ARCHITECTURE.md` | Backend, frontend, lifecycle jobs, DHT, compressed/exact RPC paths, generation, useful-work settlement, and limitations |
 | Runtime flows | `FLOWS.md` | Bootstrap, model access, lifecycle, routing, inference, useful-work receipts, remote workers, and cleanup |
-| Implementation roadmap | `IMPLEMENTATION.md` | Current validation status plus implemented selective loading and planned health, RPC safety, failover, incentives, API access, and later training work |
+| Implementation roadmap | `IMPLEMENTATION.md` | Current validation status, the Sprints 28-32 distributed-runtime architecture program, implemented reliability work, incentives, API access, and later training work |
 | Petals comparison | `PETALS_COMPARISON.md` | Similarities, differences, public-swarm positioning, and what to borrow from Petals |
 | Network reachability and relay review | `NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Sprint 14 transport defect, Petals-derived implementation, Windows/WSL direct setup, locked VPS deployment procedure, live relay diagnosis, rollout, and acceptance criteria |
 | Coverage-aware serving | `COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, replica behavior, serving-plan API, start revalidation, desktop workflow, and incentives boundary |

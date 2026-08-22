@@ -16,7 +16,11 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from client.generation import DistributedGenerator
 from client.failover import RouteCancellationError
-from client.rpc_policy import RPCAttemptPolicy, get_rpc_attempt_policy
+from client.rpc_policy import (
+    RPCAttemptPolicy,
+    RPCPreExecutionError,
+    get_rpc_attempt_policy,
+)
 from client.sequential import RemoteSequential
 from hivemind.compression import deserialize_torch_tensor, serialize_torch_tensor
 from models.architecture_adapter import get_architecture_adapter
@@ -1287,13 +1291,13 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         route = [self.make_node(0, 8, "peer-a")]
         sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
         sequential.validate_route = lambda nodes=None: route
-        original_get_experts = sequential_module.get_experts
+        original_get_peer_expert = sequential_module.get_peer_expert
         probed: list[bool] = []
-        sequential_module.get_experts = lambda dht, uids: [FakeExpert()]
+        sequential_module.get_peer_expert = lambda dht, rpc_uid, peer_id: FakeExpert()
         try:
             result = sequential.validate_reachable_route()
         finally:
-            sequential_module.get_experts = original_get_experts
+            sequential_module.get_peer_expert = original_get_peer_expert
 
         self.assertEqual(result, route)
         self.assertEqual(probed, [True])
@@ -1309,13 +1313,13 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         route = [self.make_node(0, 8, "peer-a")]
         sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
         sequential.validate_route = lambda nodes=None: route
-        original_get_experts = sequential_module.get_experts
-        sequential_module.get_experts = lambda dht, uids: [FailingExpert()]
+        original_get_peer_expert = sequential_module.get_peer_expert
+        sequential_module.get_peer_expert = lambda dht, rpc_uid, peer_id: FailingExpert()
         try:
             with self.assertRaisesRegex(RuntimeError, "Route RPC probe failed.*routing: not found"):
                 sequential.validate_reachable_route()
         finally:
-            sequential_module.get_experts = original_get_experts
+            sequential_module.get_peer_expert = original_get_peer_expert
 
     def test_forward_records_route_and_rpc_hop_timings(self) -> None:
         node = {
@@ -1549,8 +1553,12 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         import client.sequential as sequential_module
 
         sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
-        original_get_experts = sequential_module.get_experts
-        sequential_module.get_experts = lambda dht, uids: []
+        original_get_peer_expert = sequential_module.get_peer_expert
+
+        def missing_expert(dht, rpc_uid, peer_id):
+            raise RuntimeError("not found on selected peer")
+
+        sequential_module.get_peer_expert = missing_expert
         try:
             with self.assertRaisesRegex(RuntimeError, "not found"):
                 sequential._rpc_forward(
@@ -1559,7 +1567,110 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                     hidden_states=torch.zeros(1, 1, 8),
                 )
         finally:
-            sequential_module.get_experts = original_get_experts
+            sequential_module.get_peer_expert = original_get_peer_expert
+
+    def test_rpc_forward_binds_the_route_selected_peer(self) -> None:
+        import client.sequential as sequential_module
+
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
+        expected = torch.ones(1, 1, 8)
+
+        class Expert:
+            info = {}
+
+            def forward(self, hidden_states, **kwargs):
+                return expected
+
+        with patch.object(
+            sequential_module,
+            "get_peer_expert",
+            return_value=Expert(),
+        ) as bind:
+            result = sequential._rpc_forward(
+                rpc_uid="test-prefix.0.8",
+                peer_id="selected-peer",
+                hidden_states=torch.zeros(1, 1, 8),
+            )
+
+        self.assertIs(result, expected)
+        bind.assert_called_once_with(
+            sequential.dht,
+            "test-prefix.0.8",
+            "selected-peer",
+        )
+
+    def test_missing_receipt_preflight_falls_back_before_tensor_dispatch(self) -> None:
+        sequential = RemoteSequential(DummyDHT(), "test-prefix", num_layers=8)
+        hidden_states = torch.zeros(1, 1, 8)
+        node = {
+            "peer_id": "worker-peer",
+            "rpc_uid": "test-prefix.0.8",
+            "receipt_rpc_uid": "test-prefix.999999.0.8",
+            "model_name": "facebook/opt-125m",
+            "layer_start": 0,
+            "layer_end": 8,
+        }
+        calls: list[str] = []
+
+        def missing_receipt(**_kwargs):
+            raise RPCPreExecutionError(
+                "receipt expert is unavailable before tensor dispatch",
+                rpc_role="receipt",
+            )
+
+        def normal_forward(rpc_uid, peer_id, value, **_kwargs):
+            calls.append(f"{peer_id}:{rpc_uid}")
+            return value + 1
+
+        sequential._rpc_forward_with_receipt = missing_receipt
+        sequential._rpc_forward = normal_forward
+
+        result = sequential._call_node(
+            rpc_uid=node["rpc_uid"],
+            peer_id=node["peer_id"],
+            hidden_states=hidden_states,
+            node_info=node,
+            receipt_route=[
+                {
+                    "peer_id": node["peer_id"],
+                    "rpc_uid": node["receipt_rpc_uid"],
+                    "layer_start": 0,
+                    "layer_end": 8,
+                }
+            ],
+        )
+
+        self.assertTrue(torch.equal(result, hidden_states + 1))
+        self.assertEqual(calls, ["worker-peer:test-prefix.0.8"])
+
+    def test_peer_expert_adapter_constructs_exact_hivemind_peer(self) -> None:
+        import client.sequential as sequential_module
+        from hivemind.p2p import PeerID
+
+        peer_id = str(PeerID(b"\x12\x20" + b"p" * 32))
+        p2p = object()
+
+        class DHT:
+            async def replicate_p2p(self):
+                return p2p
+
+        with patch.object(
+            sequential_module.RemoteExpertWorker,
+            "run_coroutine",
+            side_effect=asyncio.run,
+        ):
+            expert = sequential_module.get_peer_expert(
+                DHT(),
+                "test-prefix.0.8",
+                peer_id,
+            )
+
+        self.assertEqual(str(expert.peer_id), peer_id)
+        self.assertEqual(expert.uid, "test-prefix.0.8")
+        self.assertIs(expert.p2p, p2p)
+
+        with self.assertRaisesRegex(ValueError, "Invalid provider peer_id"):
+            sequential_module.get_peer_expert(DHT(), "test-prefix.0.8", "not-a-peer")
 
     def test_remote_expert_p2p_cleanup_closes_and_clears_cached_replica(self) -> None:
         import client.sequential as sequential_module
@@ -1602,6 +1713,66 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(uid_a, "test-prefix.0.4")
         self.assertEqual(uid_b, "test-prefix.4.8")
         self.assertEqual(uid_c, "test-prefix.0.4.1")
+
+    def test_rpc_uid_is_peer_unique_and_hivemind_valid(self) -> None:
+        from hivemind.moe.expert_uid import is_valid_uid
+        from hivemind.p2p import PeerID
+
+        peer_a = str(PeerID(b"\x12\x20" + b"a" * 32))
+        peer_b = str(PeerID(b"\x12\x20" + b"b" * 32))
+        uid_a = RPCServer.build_rpc_uid(
+            "test-prefix",
+            0,
+            4,
+            provider_peer_id=peer_a,
+        )
+        uid_b = RPCServer.build_rpc_uid(
+            "test-prefix",
+            0,
+            4,
+            provider_peer_id=peer_b,
+        )
+        receipt_a = RPCServer.build_receipt_rpc_uid(
+            "test-prefix",
+            0,
+            4,
+            provider_peer_id=peer_a,
+        )
+
+        self.assertEqual(uid_a, f"test-prefix-{peer_a}.0.0.4.0")
+        self.assertEqual(uid_b, f"test-prefix-{peer_b}.0.0.4.0")
+        self.assertEqual(receipt_a, f"test-prefix-{peer_a}.1.0.4.0")
+        self.assertNotEqual(uid_a, uid_b)
+        self.assertNotEqual(uid_a, receipt_a)
+        self.assertTrue(is_valid_uid(uid_a))
+        self.assertTrue(is_valid_uid(uid_b))
+        self.assertTrue(is_valid_uid(receipt_a))
+
+    def test_versioned_rpc_uid_rejects_peer_ownership_mismatch(self) -> None:
+        from hivemind.p2p import PeerID
+
+        peer_a = str(PeerID(b"\x12\x20" + b"a" * 32))
+        peer_b = str(PeerID(b"\x12\x20" + b"b" * 32))
+        node = {
+            **self.make_node(0, 4, peer_a),
+            "rpc_uid_schema_version": 2,
+            "rpc_peer_id": peer_a,
+            "rpc_uid": RPCServer.build_rpc_uid(
+                "test-prefix",
+                0,
+                4,
+                provider_peer_id=peer_b,
+            ),
+        }
+        sequential = RemoteSequential(
+            DummyDHT(),
+            "test-prefix",
+            num_layers=4,
+            model_name="facebook/opt-125m",
+        )
+
+        with self.assertRaisesRegex(ValueError, "RPC UID ownership mismatch"):
+            sequential._validate_node_metadata(node, peer_a)
 
     def test_rpc_stop_is_bounded_when_hivemind_shutdown_hangs(self) -> None:
         class BlockingServer:
@@ -1872,6 +2043,9 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         members_expirations = node.dht.expirations["test-prefix.members"]
         self.assertEqual(len(members_expirations), 2)
         self.assertGreater(members_expirations[1], members_expirations[0])
+        metadata = node.dht.values["test-prefix.node_info.peer"]
+        self.assertEqual(metadata["rpc_uid_schema_version"], 2)
+        self.assertEqual(metadata["rpc_peer_id"], "peer")
         member_lease_expirations = node.dht.expirations["test-prefix.members.v2"]
         self.assertEqual(len(member_lease_expirations), 2)
         self.assertTrue(
@@ -2787,6 +2961,8 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                     "hops": [
                         {
                             "peer_id": "peer-id",
+                            "selected_peer_id": "peer-id",
+                            "executed_peer_id": "peer-id",
                             "rpc_uid": "distribllm.0.1",
                             "layer_start": 0,
                             "layer_end": 1,
@@ -2807,6 +2983,11 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         generator.norm = nn.Identity()
         generator.lm_head = nn.Linear(4, 10)
         generator._sample = lambda logits, **kwargs: torch.tensor([[1]])
+
+        async def forward_without_thread(**kwargs):
+            return generator.sequential.forward(**kwargs)
+
+        generator._forward_async = forward_without_thread
 
         async def run_generation() -> list[dict]:
             return [
@@ -2834,6 +3015,8 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(metrics["hop_metrics"][0]["calls"], 2)
         self.assertEqual(metrics["hop_metrics"][0]["total_latency_ms"], 5.0)
         self.assertEqual(metrics["hop_metrics"][0]["average_latency_ms"], 2.5)
+        self.assertEqual(metrics["hop_metrics"][0]["selected_peer_id"], "peer-id")
+        self.assertEqual(metrics["hop_metrics"][0]["executed_peer_id"], "peer-id")
         self.assertEqual(
             generator.get_performance_snapshot()["last_generation"],
             metrics,

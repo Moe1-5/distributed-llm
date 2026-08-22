@@ -23,6 +23,9 @@ This sprint owns the immediate inference blocker. It must distinguish worker exe
 - Keep one immutable route for one forward attempt.
 - Do not implement automatic alternate-route failover; Sprint 21 owns that behavior.
 - Do not claim two-device completion from local or simulated tests.
+- Keep this sprint focused on the stateless tensor payload sweep, direct-versus-relay comparison, stream lifecycle, and correlated transport failure.
+- Peer-addressed expert ownership, persistent DHT lifecycle, transactional placement, and session key/value caching belong to Sprints 28 through 31.
+- Physical evidence produced after Sprint 28 must assert that the selected peer is the peer that actually executed every hop.
 
 ## Work Plan
 

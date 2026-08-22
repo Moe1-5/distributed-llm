@@ -18,6 +18,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+
+# Provider metadata version for peer-addressed expert RPC. Version 1 relied on
+# resolving a shared expert UID through the DHT. Version 2 binds the advertised
+# UID to the provider peer selected by the route planner.
+EXPERT_RPC_UID_SCHEMA_VERSION = 2
+
 # ---------------------------------------------------------------------------
 # Bootstrap peers
 # Infrastructure addresses are deployment configuration, not source defaults.

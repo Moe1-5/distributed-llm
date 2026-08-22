@@ -31,7 +31,7 @@ from constants import DHT_PREFIX, SUPPORTED_MODELS, get_initial_peers
 from incentives.config import IncentivesConfig
 from incentives.runtime import UsefulWorkRuntime
 from local_split_probe import _write_private_json
-from node.rpc_server import _run_with_timeout
+from node.rpc_server import RPCServer, _run_with_timeout
 
 SCHEMA_VERSION = 1
 DEFAULT_MODEL = "facebook/opt-125m"
@@ -97,7 +97,12 @@ def _validate_options(options: ProbeOptions) -> tuple[int, int, str]:
     expected_rpc_uid = (
         options.expected_rpc_uid.strip()
         if options.expected_rpc_uid is not None
-        else f"{options.dht_prefix.strip()}.0.{total_layers}"
+        else RPCServer.build_rpc_uid(
+            options.dht_prefix.strip(),
+            0,
+            total_layers,
+            provider_peer_id=options.expected_peer.strip(),
+        )
     )
     if not expected_rpc_uid:
         raise TensorPayloadProbeError("expected_rpc_uid must not be empty")
@@ -108,7 +113,9 @@ def _route_evidence(node: dict[str, Any]) -> dict[str, Any]:
     """Keep route identity and transport proof without copying multiaddresses."""
     return {
         "peer_id": str(node.get("peer_id", "")),
+        "rpc_peer_id": str(node.get("rpc_peer_id", node.get("peer_id", ""))),
         "rpc_uid": str(node.get("rpc_uid", "")),
+        "rpc_uid_schema_version": int(node.get("rpc_uid_schema_version", 1)),
         "model_name": str(node.get("model_name", "")),
         "layer_start": int(node.get("layer_start", -1)),
         "layer_end": int(node.get("layer_end", -1)),

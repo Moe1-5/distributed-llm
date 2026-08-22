@@ -3,10 +3,10 @@ sequential.py
 Client-side routing — discovers nodes via DHT and chains
 forward passes through them in layer order.
  
-RPC UID lookup:
-    Each node stores its rpc_uid in the DHT node_info entry.
-    sequential.py reads this uid and calls get_experts() with it.
-    This decouples the UID format from the peer_id.
+Peer-addressed RPC:
+    Each node stores both its rpc_uid and owning peer_id in DHT metadata.
+    The route-selected pair is used to construct the RemoteExpert directly,
+    so a concurrent DHT publication cannot redirect a request to another peer.
  
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HIVEMIND IMPORT NOTES (v1.1.12)
@@ -36,11 +36,14 @@ from uuid import uuid4
  
 import hivemind
 import torch
-from hivemind.moe import get_experts
+from hivemind.moe import RemoteExpert
 from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
+from hivemind.moe.expert_uid import ExpertInfo, is_valid_uid
+from hivemind.p2p import PeerID
 from hivemind.proto import runtime_pb2
 from hivemind.utils.logging import get_logger
 
+from constants import EXPERT_RPC_UID_SCHEMA_VERSION
 from client.coverage import (
     plan_health_aware_routes,
     provider_identity,
@@ -62,6 +65,7 @@ from client.health import (
 )
 from client.rpc_policy import (
     RPCAttemptPolicy,
+    RPCPreExecutionError,
     classify_rpc_error,
     get_rpc_attempt_policy,
     is_retryable_rpc_error,
@@ -77,6 +81,64 @@ from incentives.receipts import (
 from incentives.runtime import UsefulWorkRuntime, get_useful_work_runtime
  
 logger = get_logger(__name__)
+
+
+def get_peer_expert(dht: object, rpc_uid: str, peer_id: str) -> RemoteExpert:
+    """Construct an expert bound to the exact peer selected by the route."""
+    normalized_uid = str(rpc_uid).strip()
+    normalized_peer_id = str(peer_id).strip()
+    if not normalized_uid:
+        raise ValueError("rpc_uid must not be empty")
+    if not is_valid_uid(normalized_uid):
+        raise ValueError(f"Invalid Hivemind expert UID {normalized_uid!r}")
+    if not normalized_peer_id:
+        raise ValueError("peer_id must not be empty")
+    try:
+        expected_peer = PeerID.from_base58(normalized_peer_id)
+    except Exception as exc:
+        raise ValueError(f"Invalid provider peer_id {normalized_peer_id!r}") from exc
+
+    p2p = RemoteExpertWorker.run_coroutine(dht.replicate_p2p())
+    expert = RemoteExpert(ExpertInfo(normalized_uid, expected_peer), p2p)
+    if str(expert.peer_id) != normalized_peer_id:
+        raise RuntimeError(
+            "Peer-addressed expert ownership mismatch: "
+            f"selected={normalized_peer_id} constructed={expert.peer_id}"
+        )
+    return expert
+
+
+def get_ready_peer_expert(
+    dht: object,
+    rpc_uid: str,
+    peer_id: str,
+    *,
+    rpc_role: str = "normal",
+) -> RemoteExpert:
+    """Bind and preflight an exact expert before any tensor can be dispatched."""
+    if rpc_role not in {"normal", "receipt"}:
+        raise ValueError(f"Unsupported RPC role {rpc_role!r}")
+    try:
+        expert = get_peer_expert(dht, rpc_uid, peer_id)
+    except (TypeError, ValueError):
+        raise
+    except Exception as exc:
+        raise RPCPreExecutionError(
+            f"{rpc_role.capitalize()} expert {rpc_uid} is unavailable on selected "
+            f"peer {str(peer_id)[:8]} before tensor dispatch: "
+            f"{type(exc).__name__}: {exc}",
+            rpc_role=rpc_role,
+        ) from exc
+    try:
+        expert.info
+        return expert
+    except Exception as exc:
+        raise RPCPreExecutionError(
+            f"{rpc_role.capitalize()} expert {rpc_uid} is unavailable on selected "
+            f"peer {str(peer_id)[:8]} before tensor dispatch: "
+            f"{type(exc).__name__}: {exc}",
+            rpc_role=rpc_role,
+        ) from exc
  
 def shutdown_remote_expert_p2p(dht: object) -> bool:
     """Close Hivemind's cached replicated P2P control client before DHT teardown."""
@@ -116,7 +178,7 @@ def _verify_imports() -> None:
       - ImportError was caught silently → _announce() never ran → DHT empty
     """
     required = {
-        "hivemind.moe":          ["get_experts"],
+        "hivemind.moe":          ["RemoteExpert"],
         "hivemind.utils":        ["get_dht_time"],          # NOT hivemind.dht
         "hivemind.utils.logging": ["get_logger"],
     }
@@ -342,14 +404,11 @@ class RemoteSequential:
             # background probe thread, where Python 3.12 has no event loop.
             # Keep discovery synchronous as in the proven Sprint 14 route path;
             # the health monitor already bounds concurrent and stalled probes.
-            experts = get_experts(self.dht, [rpc_uid])
+            expert = get_peer_expert(self.dht, rpc_uid, peer_id)
             if time.monotonic() >= deadline:
                 raise TimeoutError(
-                    f"Expert lookup exceeded {self.health_config.probe_timeout_seconds:g} seconds"
+                    f"Peer binding exceeded {self.health_config.probe_timeout_seconds:g} seconds"
                 )
-            expert = experts[0] if experts else None
-            if expert is None:
-                raise RuntimeError(f"Expert {rpc_uid} was not found")
 
             stage = "metadata_rpc"
             rpc_info = RemoteExpertWorker.run_coroutine(
@@ -554,6 +613,12 @@ class RemoteSequential:
             raise ValueError(f"Node {peer_id[:8]} missing fields: {sorted(missing)}")
 
         metadata_peer_id = str(info["peer_id"])
+        expected_peer_id = str(peer_id)
+        if expected_peer_id != "unknown" and metadata_peer_id != expected_peer_id:
+            raise ValueError(
+                f"Node metadata peer mismatch: key={expected_peer_id} "
+                f"value={metadata_peer_id}"
+            )
         model_name = str(info["model_name"]).strip()
         if not model_name:
             raise ValueError(f"Node {metadata_peer_id[:8]} has empty model_name")
@@ -591,6 +656,49 @@ class RemoteSequential:
         if not rpc_uid:
             raise ValueError(f"Node {metadata_peer_id[:8]} has empty rpc_uid")
 
+        try:
+            rpc_uid_schema_version = int(info.get("rpc_uid_schema_version", 1))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Node {metadata_peer_id[:8]} has invalid rpc_uid_schema_version"
+            ) from exc
+        if rpc_uid_schema_version not in {1, EXPERT_RPC_UID_SCHEMA_VERSION}:
+            raise ValueError(
+                f"Node {metadata_peer_id[:8]} uses unsupported RPC UID schema "
+                f"version {rpc_uid_schema_version}"
+            )
+        if (
+            rpc_uid_schema_version >= EXPERT_RPC_UID_SCHEMA_VERSION
+            and "rpc_peer_id" not in info
+        ):
+            raise ValueError(
+                f"Node {metadata_peer_id[:8]} is missing versioned rpc_peer_id ownership"
+            )
+        rpc_peer_id = str(info.get("rpc_peer_id", metadata_peer_id)).strip()
+        if not rpc_peer_id:
+            raise ValueError(f"Node {metadata_peer_id[:8]} has empty rpc_peer_id")
+        if rpc_peer_id != metadata_peer_id:
+            raise ValueError(
+                f"Node {metadata_peer_id[:8]} RPC ownership mismatch: "
+                f"rpc_peer_id={rpc_peer_id}"
+            )
+        if rpc_uid_schema_version >= EXPERT_RPC_UID_SCHEMA_VERSION:
+            try:
+                PeerID.from_base58(metadata_peer_id)
+            except Exception as exc:
+                raise ValueError(
+                    f"Node {metadata_peer_id[:8]} has invalid versioned peer_id"
+                ) from exc
+            expected_uid_prefix = (
+                f"{self.dht_prefix}-{metadata_peer_id}.0."
+                f"{layer_start}.{layer_end}."
+            )
+            if not is_valid_uid(rpc_uid) or not rpc_uid.startswith(expected_uid_prefix):
+                raise ValueError(
+                    f"Node {metadata_peer_id[:8]} RPC UID ownership mismatch: "
+                    f"expected prefix {expected_uid_prefix!r}, got {rpc_uid!r}"
+                )
+
         layers_loaded = bool(info.get("layers_loaded", True))
         rpc_running = bool(info.get("rpc_running", True))
         running = bool(info.get("running", layers_loaded and rpc_running))
@@ -617,6 +725,19 @@ class RemoteSequential:
                 model_revision = str(info["model_revision"]).strip()
                 if not receipt_rpc_uid or not application_public_key or not model_revision:
                     raise ValueError("empty receipt capability field")
+                if rpc_uid_schema_version >= EXPERT_RPC_UID_SCHEMA_VERSION:
+                    expected_receipt_prefix = (
+                        f"{self.dht_prefix}-{metadata_peer_id}.1."
+                        f"{layer_start}.{layer_end}."
+                    )
+                    if not is_valid_uid(receipt_rpc_uid) or not receipt_rpc_uid.startswith(
+                        expected_receipt_prefix
+                    ):
+                        raise ValueError(
+                            "receipt RPC UID ownership mismatch: "
+                            f"expected prefix {expected_receipt_prefix!r}, "
+                            f"got {receipt_rpc_uid!r}"
+                        )
                 verify_presence(
                     info["application_presence"],
                     public_key=application_public_key,
@@ -646,6 +767,8 @@ class RemoteSequential:
             "layer_start": layer_start,
             "layer_end": layer_end,
             "rpc_uid": rpc_uid,
+            "rpc_uid_schema_version": rpc_uid_schema_version,
+            "rpc_peer_id": rpc_peer_id,
             "device": str(info.get("device", "unknown")),
             "maddrs": info.get("maddrs", []),
             "layers_loaded": layers_loaded,
@@ -825,6 +948,8 @@ class RemoteSequential:
             hop_metrics.append(
                 {
                     "peer_id": str(peer_id),
+                    "selected_peer_id": str(peer_id),
+                    "executed_peer_id": str(peer_id),
                     "rpc_uid": str(rpc_uid),
                     "layer_start": int(layer_start),
                     "layer_end": int(layer_end),
@@ -1234,17 +1359,11 @@ class RemoteSequential:
                 raise RuntimeError("; ".join(readiness["reasons"]))
             return [dict(node) for node in readiness["selected_route"]]
         route = self.validate_route()
-        rpc_uids = [str(node["rpc_uid"]) for node in route]
-        experts = get_experts(self.dht, rpc_uids)
         failures: list[str] = []
-        for index, node in enumerate(route):
+        for node in route:
             peer_id = str(node["peer_id"])
-            expert = experts[index] if index < len(experts) else None
-            if expert is None:
-                failures.append(f"{peer_id[:8]}: expert {node['rpc_uid']} not found")
-                continue
             try:
-                expert.info
+                get_ready_peer_expert(self.dht, str(node["rpc_uid"]), peer_id)
             except Exception as exc:
                 failures.append(f"{peer_id[:8]}: {exc}")
         if failures:
@@ -1288,15 +1407,8 @@ class RemoteSequential:
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Call remote node using its rpc_uid stored in DHT metadata."""
-        experts = get_experts(self.dht, [rpc_uid])
-
-        if not experts or experts[0] is None:
-            raise RuntimeError(
-                f"Node uid={rpc_uid} not found in DHT. Node may have gone offline."
-            )
-
-        expert = experts[0]
+        """Call the advertised RPC UID on the exact route-selected peer."""
+        expert = get_ready_peer_expert(self.dht, rpc_uid, peer_id)
 
         # Flatten [batch, seq_len, hidden] → [batch*seq_len, hidden]
         # hivemind experts expect 2D input
@@ -1337,6 +1449,7 @@ class RemoteSequential:
             if member["peer_id"] == node_info["peer_id"]
             and member["layer_start"] == node_info["layer_start"]
             and member["layer_end"] == node_info["layer_end"]
+            and member["rpc_uid"] == node_info["receipt_rpc_uid"]
         )
         stage = "build_request"
         try:
@@ -1352,12 +1465,15 @@ class RemoteSequential:
                 position_count=int(hidden_states.shape[0] * hidden_states.shape[1]),
                 request_id=request_id,
             )
-            stage = "expert_lookup"
-            experts = get_experts(self.dht, [worker["rpc_uid"]])
-            if not experts or experts[0] is None:
-                raise RuntimeError(f"Receipt expert {worker['rpc_uid']} was not found")
+            stage = "expert_preflight"
+            expert = get_ready_peer_expert(
+                self.dht,
+                str(worker["rpc_uid"]),
+                str(worker["peer_id"]),
+                rpc_role="receipt",
+            )
             stage = "remote_forward"
-            output = experts[0].forward(
+            output = expert.forward(
                 hidden_states,
                 encode_metadata_tensor(request_document),
                 attention_mask=attention_mask,

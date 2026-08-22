@@ -49,6 +49,8 @@ Users cannot currently answer these basic questions from the interface:
 - This sprint does not weaken generator route validation, RPC health checks, tensor canaries, or accounting-safe retry rules.
 - This sprint does not treat visual changes as a fix for the open relay stream-reset defect.
 - A larger visual redesign must preserve the current backend contracts or version any intentional contract changes.
+- Sprint 29 owns authoritative network lifecycle and freshness; this sprint renders that contract without inferring or repairing discovery state.
+- Sprint 30 owns placement allocation and reservations; the renderer submits capacity and displays the backend decision instead of calculating correctness.
 
 ## Session Log
 
