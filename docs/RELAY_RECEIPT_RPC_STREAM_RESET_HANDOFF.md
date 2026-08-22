@@ -34,6 +34,8 @@ No speculative receipt-only change should be merged. The next isolation target i
 
 ## 2. Physical Topology And Tested Artifact
 
+The next untested acceptance candidate embeds source commit `232acb1bdcba5c7347a8f58aba056881115a8308` with a clean source flag. The portable EXE is 87,663,434 bytes with SHA-256 `0b6121de080fb5f16df53d9f47df95d39a5ff07cd99892eef1f0e2af23de89ee`; its package audit reports 36 ASAR entries and zero forbidden entries. Do not describe it as physically accepted until both devices run the procedure below.
+
 ```text
 Device 1: generator and Electron UI
   -> project DHT bootstrap and circuit relay on VPS port 7001
