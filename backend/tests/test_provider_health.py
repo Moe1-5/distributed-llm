@@ -165,6 +165,32 @@ class ProviderHealthMonitorTests(unittest.TestCase):
         self.assertTrue(monitor.stop())
         self.assertFalse(monitor.running)
 
+    def test_stop_timeout_retains_scheduler_thread_for_retry(self) -> None:
+        release = threading.Event()
+        scheduler = threading.Thread(target=release.wait, daemon=True)
+        scheduler.start()
+        monitor = ProviderHealthMonitor(
+            config=self.config(),
+            registry=ProviderHealthRegistry(self.config()),
+            discover=lambda: ([], []),
+            classify=lambda _found: ([], []),
+            probe=lambda _node: None,
+        )
+        monitor._thread = scheduler
+
+        try:
+            self.assertFalse(monitor.stop(timeout=0.01))
+            self.assertIs(monitor._thread, scheduler)
+            self.assertTrue(monitor.running)
+
+            release.set()
+            self.assertTrue(monitor.stop(timeout=1.0))
+            self.assertIsNone(monitor._thread)
+            self.assertFalse(monitor.running)
+        finally:
+            release.set()
+            scheduler.join(timeout=1.0)
+
     def test_hung_probe_consumes_one_bounded_slot_and_records_one_timeout(self) -> None:
         clock = FakeClock()
         nodes = [provider("peer-a"), provider("peer-b")]
@@ -249,6 +275,39 @@ class ProviderHealthMonitorTests(unittest.TestCase):
 
 
 class HealthReadinessIntegrationTests(unittest.TestCase):
+    def test_sequential_retains_monitor_until_retry_confirms_stop(self) -> None:
+        class Monitor:
+            running = True
+
+            def __init__(self) -> None:
+                self.stop_calls: list[float] = []
+
+            def stop(self, timeout: float = 2.0) -> bool:
+                self.stop_calls.append(timeout)
+                return len(self.stop_calls) > 2
+
+        sequential = RemoteSequential(
+            object(),
+            "test-prefix",
+            num_layers=4,
+            model_name="test/model",
+        )
+        monitor = Monitor()
+        sequential.health_monitor = monitor
+
+        self.assertFalse(sequential.stop_health_monitor(timeout=0.01))
+        self.assertIs(sequential.health_monitor, monitor)
+
+        monitor.running = False
+        with patch("client.sequential.ProviderHealthMonitor") as replacement:
+            sequential.start_health_monitor()
+        replacement.assert_not_called()
+        self.assertIs(sequential.health_monitor, monitor)
+
+        self.assertTrue(sequential.stop_health_monitor(timeout=1.0))
+        self.assertIsNone(sequential.health_monitor)
+        self.assertEqual(monitor.stop_calls, [0.01, 0.0, 1.0])
+
     def test_degraded_selected_provider_yields_to_healthy_replica(self) -> None:
         class DHT:
             pass

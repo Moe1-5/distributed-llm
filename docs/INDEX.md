@@ -7,7 +7,7 @@
 |-------|------|---------------|
 | Documentation landing page | `README.md` | Start-here guide, current project goal, and end vision |
 | Source file map | `REPO_MAP.md` | Responsibilities for backend, frontend, incentives, and generated artifacts |
-| Current architecture | `CURRENT_ARCHITECTURE.md` | Backend, frontend, lifecycle jobs, DHT, compressed/exact RPC paths, generation, useful-work settlement, and limitations |
+| Current architecture | `CURRENT_ARCHITECTURE.md` | Backend, frontend, persistent network supervisor, last-good topology, role identities, publication/recovery policy, RPC paths, generation, useful-work settlement, and limitations |
 | Runtime flows | `FLOWS.md` | Bootstrap, model access, lifecycle, routing, inference, useful-work receipts, remote workers, and cleanup |
 | Implementation roadmap | `IMPLEMENTATION.md` | Current validation status, the Sprints 28-32 distributed-runtime architecture program, implemented reliability work, incentives, API access, and later training work |
 | Petals comparison | `PETALS_COMPARISON.md` | Similarities, differences, public-swarm positioning, and what to borrow from Petals |

@@ -18,13 +18,13 @@ import os
 import threading
 import time
 import inspect
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from queue import Full
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import hivemind
+from hivemind.p2p import P2P
 from hivemind.moe.server import ModuleBackend
 from hivemind.moe.expert_uid import is_valid_uid
 from hivemind.moe.server.task_pool import Task, TaskPool
@@ -42,7 +42,7 @@ from incentives.protocol import (
     encode_metadata_tensor,
 )
 from incentives.receipts import create_worker_receipt, verify_inference_request
-from constants import ANNOUNCE_INTERVAL, DHT_EXPIRY_TIME, DHT_OPERATION_TIMEOUT
+from constants import ANNOUNCE_INTERVAL, DHT_EXPIRY_TIME
 from node.handler import InferenceHandler
 from node.rpc_safety import (
     RPCOverloadedError,
@@ -159,6 +159,72 @@ def _run_with_timeout(name: str, target, timeout: float) -> bool:
     if not finished:
         logger.warning("%s did not finish within %.1fs; continuing shutdown", name, timeout)
     return finished
+
+
+class _BorrowedDHT:
+    """Delegate a worker DHT while keeping shutdown ownership in ``Node``.
+
+    Hivemind 1.1.12's ``Server.shutdown`` always shuts down the supplied DHT.
+    The worker lifecycle also owns that DHT, so the server receives this
+    non-owning view and may stop its own processes without double-closing the
+    worker transport.
+    """
+
+    def __init__(
+        self,
+        dht: hivemind.DHT,
+        command_lock,
+        *,
+        p2p_daemon_listen_maddr=None,
+    ) -> None:
+        self._dht = dht
+        self._command_lock = command_lock
+        self._owner_pid = os.getpid()
+        if p2p_daemon_listen_maddr is None:
+            # Hivemind 1.1.12's DHT.replicate_p2p() first sends a private
+            # run_coroutine command through DHT._outer_pipe, then creates a
+            # P2P replica from the returned daemon address. Resolve that one
+            # address while still in the owning process. ConnectionHandler is
+            # a ForkProcess that Hivemind may force-terminate during shutdown;
+            # it must never own the lock protecting the shared command pipe.
+            with self._command_lock:
+                p2p_daemon_listen_maddr = dht.run_coroutine(
+                    hivemind.DHT._get_p2p_daemon_listen_maddr
+                )
+        if p2p_daemon_listen_maddr is None:
+            raise RuntimeError("Worker DHT returned no P2P daemon listen address")
+        self._p2p_daemon_listen_maddr = p2p_daemon_listen_maddr
+
+    def _require_owner_process(self, name: str) -> None:
+        if os.getpid() != self._owner_pid:
+            raise RuntimeError(
+                "Borrowed worker DHT access is restricted to its owner process; "
+                f"child processes may only call replicate_p2p(), not {name}"
+            )
+
+    def __getattr__(self, name: str):
+        self._require_owner_process(name)
+        with self._command_lock:
+            attribute = getattr(self._dht, name)
+        if not callable(attribute):
+            return attribute
+
+        def _serialized_call(*args, **kwargs):
+            self._require_owner_process(name)
+            with self._command_lock:
+                return attribute(*args, **kwargs)
+
+        return _serialized_call
+
+    async def replicate_p2p(self):
+        # Hivemind connection handlers await this coroutine in forked
+        # processes. Replicate directly from the parent-captured daemon address
+        # so a force-killed handler never holds a lock or writes to the shared
+        # DHT command pipe.
+        return await P2P.replicate(self._p2p_daemon_listen_maddr)
+
+    def shutdown(self) -> None:
+        logger.debug("Hivemind server released its borrowed worker DHT view")
 
 
 class _HandlerModule(nn.Module):
@@ -363,10 +429,18 @@ class RPCServer:
         incentives_config: Optional[IncentivesConfig] = None,
         application_identity: Optional[ApplicationIdentity] = None,
         safety_config: Optional[RPCSafetyConfig] = None,
+        dht_command_lock=None,
     ):
+        self._dht_command_lock = (
+            dht_command_lock
+            if dht_command_lock is not None
+            else threading.RLock()
+        )
         if not handler.is_loaded():
             raise RuntimeError("RPCServer requires a loaded InferenceHandler")
-        if dht.peer_id is None:
+        with self._dht_command_lock:
+            dht_peer_id = dht.peer_id
+        if dht_peer_id is None:
             raise RuntimeError("RPCServer requires a started DHT")
         if not dht_prefix.strip():
             raise ValueError("dht_prefix must not be empty")
@@ -392,7 +466,10 @@ class RPCServer:
         self._uid:     Optional[str] = None
         self._receipt_uid: Optional[str] = None
         self._lock     = threading.Lock()
-        self._publication_lock = threading.Lock()
+        self._shutdown_thread: Optional[threading.Thread] = None
+        self._shutdown_server: Optional[hivemind.moe.Server] = None
+        self._shutdown_error: Optional[BaseException] = None
+        self._publication_lock = threading.RLock()
         self._last_publication_attempt_at: Optional[float] = None
         self._last_publication_success_at: Optional[float] = None
         self._last_publication_expiration_time: Optional[float] = None
@@ -487,6 +564,9 @@ class RPCServer:
                 logger.warning("RPCServer already running")
                 return
 
+            with self._dht_command_lock:
+                provider_peer_id = str(self.dht.peer_id)
+
             # UID must match: ^(([^.])+)([.](?:[0]|([1-9]([0-9]*))))+$
             # i.e. segments separated by dots, last segment must be a number
             # Version two embeds the stable peer in the text prefix and keeps
@@ -496,7 +576,7 @@ class RPCServer:
                 self.handler.layer_start,
                 self.handler.layer_end,
                 self.uid_suffix,
-                provider_peer_id=str(self.dht.peer_id),
+                provider_peer_id=provider_peer_id,
             )
             hidden_size = self._get_hidden_size()
             self.safety_controller = RPCSafetyController(
@@ -557,7 +637,7 @@ class RPCServer:
                     self.handler.layer_start,
                     self.handler.layer_end,
                     self.uid_suffix,
-                    provider_peer_id=str(self.dht.peer_id),
+                    provider_peer_id=provider_peer_id,
                 )
                 metadata_descriptor = BatchTensorDescriptor(
                     METADATA_TENSOR_SIZE,
@@ -573,7 +653,7 @@ class RPCServer:
                     module=_ReceiptHandlerModule(
                         self.handler,
                         self.application_identity,
-                        str(self.dht.peer_id),
+                        provider_peer_id,
                         self._receipt_uid,
                         self.incentives_config.model_revision,
                         self.safety_controller,
@@ -597,7 +677,7 @@ class RPCServer:
             )
 
             self._server = hivemind.moe.Server(
-                dht=self.dht,
+                dht=_BorrowedDHT(self.dht, self._dht_command_lock),
                 module_backends=module_backends,
                 num_connection_handlers=max(
                     1,
@@ -619,15 +699,72 @@ class RPCServer:
                 DHT_EXPIRY_TIME,
             )
 
-    def stop(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS) -> None:
+    def stop(self, timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS) -> bool:
         with self._lock:
             server = self._server
-            if server is not None:
-                _run_with_timeout("rpc-server-shutdown", server.shutdown, timeout)
+            if server is None:
+                self._running = False
+                self._receipt_uid = None
+                return True
+
+            shutdown_thread = getattr(self, "_shutdown_thread", None)
+            shutdown_server = getattr(self, "_shutdown_server", None)
+            if shutdown_thread is not None and shutdown_server is not server:
+                logger.error(
+                    "RPC shutdown ownership mismatch; retaining both server handles"
+                )
+                return False
+
+            if shutdown_thread is None:
+                self._shutdown_error = None
+                self._shutdown_server = server
+
+                def _shutdown() -> None:
+                    try:
+                        server.shutdown()
+                    except BaseException as exc:
+                        self._shutdown_error = exc
+
+                shutdown_thread = threading.Thread(
+                    target=_shutdown,
+                    daemon=True,
+                    name="rpc-server-shutdown",
+                )
+                self._shutdown_thread = shutdown_thread
+                shutdown_thread.start()
+
+            shutdown_thread.join(timeout=max(0.0, timeout))
+            if shutdown_thread.is_alive():
+                logger.warning(
+                    "RPC server shutdown did not finish within %.3g seconds; "
+                    "retaining the live server and shutdown attempt for retry",
+                    timeout,
+                )
+                return False
+
+            shutdown_error = getattr(self, "_shutdown_error", None)
+            if shutdown_error is not None:
+                logger.warning(
+                    "RPC server shutdown failed; retaining ownership for retry: %s",
+                    shutdown_error,
+                    exc_info=(
+                        type(shutdown_error),
+                        shutdown_error,
+                        shutdown_error.__traceback__,
+                    ),
+                )
+                return False
+
+            self._shutdown_thread = None
+            self._shutdown_server = None
+            self._shutdown_error = None
+
+            if self._server is server:
                 self._server = None
             self._running = False
             self._receipt_uid = None
             logger.info("RPC server stopped.")
+            return True
 
     # ------------------------------------------------------------------
     # Status
@@ -643,13 +780,13 @@ class RPCServer:
         )
 
     def refresh_publication(self, expiration_time: float) -> dict:
-        """Refresh exact expert leases on remote DHT peers.
+        """Observe Hivemind's sole expert publisher without writing its keys.
 
-        Hivemind's built-in publisher may count a client-mode worker's local
-        cache as a successful store. A generator cannot read that cache after
-        the remote replicas expire. In a bootstrapped network these supervised
-        writes exclude the worker itself, so success means at least one remote
-        DHT peer accepted every exact UID used by DistribLLM routing.
+        The pinned Hivemind server owns expert UID and prefix declarations via
+        ``DHTHandlerThread``. DistribLLM previously wrote the same UIDs here,
+        racing that publisher and interpreting a harmless newer record as a
+        failed transport. Peer-addressed dispatch no longer resolves the
+        selected worker through those DHT keys, so this method is diagnostic.
         """
         with self._publication_lock:
             self._last_publication_attempt_at = time.time()
@@ -659,51 +796,18 @@ class RPCServer:
                     raise RuntimeError("RPC runtime is not running")
                 if not uids:
                     raise RuntimeError("RPC server has no expert UIDs to publish")
-
-                # Stay ahead of the Server's built-in publisher, which writes
-                # the same exact keys on its own heartbeat. The extra interval
-                # avoids a harmless newer local write causing the required
-                # remote-only write to be rejected.
-                remote_expiration = expiration_time + ANNOUNCE_INTERVAL
-                peer_id = str(self.dht.peer_id)
-                exclude_self = self.require_remote_publication
-                pending = {
-                    uid: self.dht.store(
-                        key=uid,
-                        value=peer_id,
-                        expiration_time=remote_expiration,
-                        exclude_self=exclude_self,
-                        return_future=True,
-                    )
-                    for uid in uids
-                }
-                result: dict[str, bool] = {}
-                for uid, future in pending.items():
-                    try:
-                        result[uid] = bool(
-                            future.result(timeout=DHT_OPERATION_TIMEOUT)
-                        )
-                    except FutureTimeoutError as exc:
-                        future.cancel()
-                        raise TimeoutError(
-                            f"RPC expert publication for {uid} exceeded "
-                            f"{DHT_OPERATION_TIMEOUT:g} seconds"
-                        ) from exc
-
-                rejected = [uid for uid, stored in result.items() if not stored]
-                if rejected:
-                    raise RuntimeError(
-                        "Remote DHT peers rejected or did not acknowledge expert "
-                        f"leases: {', '.join(rejected)}"
-                    )
+                server = self._server
+                publisher = getattr(server, "dht_handler_thread", None)
+                if not self._thread_alive(publisher):
+                    raise RuntimeError("Hivemind expert publisher is not running")
                 self._last_publication_success_at = time.time()
-                self._last_publication_expiration_time = remote_expiration
+                self._last_publication_expiration_time = expiration_time
                 self._last_publication_error = None
                 self._consecutive_publication_failures = 0
                 logger.debug(
-                    "RPC expert publication refreshed | uids=%s expiry=%s",
+                    "Hivemind expert publisher observed | uids=%s expiry=%s",
                     uids,
-                    remote_expiration,
+                    expiration_time,
                 )
             except Exception as exc:
                 self._last_publication_error = f"{type(exc).__name__}: {exc}"
@@ -718,40 +822,45 @@ class RPCServer:
             return self.get_publication_status()
 
     def get_publication_status(self) -> dict:
-        server = self._server
-        success_age = (
-            max(0.0, time.time() - self._last_publication_success_at)
-            if self._last_publication_success_at is not None
-            else None
-        )
-        server_alive = bool(
-            server is not None and self._server_thread_alive(server)
-        )
-        runtime_ready = bool(
-            server is not None and self._server_runtime_ready(server)
-        )
-        publisher = getattr(server, "dht_handler_thread", None)
-        publisher_alive = self._thread_alive(publisher)
-        return {
-            "uids": self._publication_uids(),
-            "server_alive": server_alive,
-            "runtime_ready": runtime_ready,
-            "hivemind_publisher_alive": publisher_alive,
-            "last_attempt_at": self._last_publication_attempt_at,
-            "last_success_at": self._last_publication_success_at,
-            "last_expiration_time": self._last_publication_expiration_time,
-            "success_age_seconds": success_age,
-            "last_error": self._last_publication_error,
-            "consecutive_failures": self._consecutive_publication_failures,
-            "fresh": bool(
-                self._running
-                and server_alive
-                and runtime_ready
-                and success_age is not None
-                and success_age < DHT_EXPIRY_TIME
-            ),
-            "remote_store_required": self.require_remote_publication,
-        }
+        with self._publication_lock:
+            server = self._server
+            success_age = (
+                max(0.0, time.time() - self._last_publication_success_at)
+                if self._last_publication_success_at is not None
+                else None
+            )
+            server_alive = bool(
+                server is not None and self._server_thread_alive(server)
+            )
+            runtime_ready = bool(
+                server is not None and self._server_runtime_ready(server)
+            )
+            publisher = getattr(server, "dht_handler_thread", None)
+            publisher_alive = self._thread_alive(publisher)
+            return {
+                "uids": self._publication_uids(),
+                "server_alive": server_alive,
+                "runtime_ready": runtime_ready,
+                "hivemind_publisher_alive": publisher_alive,
+                "last_attempt_at": self._last_publication_attempt_at,
+                "last_success_at": self._last_publication_success_at,
+                "last_expiration_time": self._last_publication_expiration_time,
+                "success_age_seconds": success_age,
+                "last_error": self._last_publication_error,
+                "consecutive_failures": self._consecutive_publication_failures,
+                "fresh": bool(
+                    self._running
+                    and server_alive
+                    and runtime_ready
+                    and publisher_alive
+                    and success_age is not None
+                    and success_age < DHT_EXPIRY_TIME
+                ),
+                "remote_store_required": False,
+                "publication_owner": "hivemind_server",
+                "manual_store_enabled": False,
+                "independent_remote_verified": False,
+            }
 
     def get_uid(self) -> Optional[str]:
         return self._uid

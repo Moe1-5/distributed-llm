@@ -19,6 +19,7 @@ import inspect
 import threading
 import time
 from collections.abc import Mapping
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import AsyncGenerator, Optional
 from uuid import uuid4
@@ -49,6 +50,10 @@ class _LocalComponentBundle:
 _COMPONENT_CACHE_LOCK = threading.RLock()
 _COMPONENT_CACHE: dict[tuple[str, str, str], _LocalComponentBundle] = {}
 _COMPONENT_CACHE_LIMIT = 1
+
+
+class GeneratorOperationBusyError(RuntimeError):
+    """Raised when another request already owns the singleton generator."""
 
 
 class _ContextAwareTextDecoder:
@@ -143,6 +148,9 @@ class DistributedGenerator:
         self._loaded = False
         self._stop_requested = False
         self._stop_event = threading.Event()
+        self._operation_condition = threading.Condition(threading.RLock())
+        self._active_operations: dict[str, str] = {}
+        self._closing = False
         self._load_duration_ms: Optional[float] = None
         self._load_kind = "not_loaded"
         self._cold_load_duration_ms: Optional[float] = None
@@ -253,7 +261,7 @@ class DistributedGenerator:
         cached = self._take_cached_components(cache_key)
         if cached is not None:
             self._install_component_bundle(cached)
-            self._loaded = True
+            self._open_operation_admission()
             self._load_kind = "warm_component_cache"
             self._load_duration_ms = (time.perf_counter() - started_at) * 1000
             self._warm_load_duration_ms = self._load_duration_ms
@@ -301,7 +309,7 @@ class DistributedGenerator:
         self._model_shell_pruned = True
         torch.cuda.empty_cache()
 
-        self._loaded = True
+        self._open_operation_admission()
         self._load_kind = "cold_model_load"
         self._load_duration_ms = (time.perf_counter() - started_at) * 1000
         self._cold_load_duration_ms = self._load_duration_ms
@@ -441,13 +449,89 @@ class DistributedGenerator:
                     f"registry={expected_hidden_size}, embeddings={actual_hidden_size}"
                 )
 
-    def unload(self) -> None:
+    def _open_operation_admission(self) -> None:
+        """Publish a loaded runtime and reset cancellation for its first request."""
+        with self._operation_condition:
+            if self._active_operations:
+                raise RuntimeError(
+                    "Cannot load generator components while operations are active"
+                )
+            self._loaded = True
+            self._closing = False
+            self._stop_requested = False
+            self._stop_event.clear()
+
+    def _begin_operation(self, kind: str) -> str:
+        """Acquire exclusive ownership of the shared generation runtime."""
+        with self._operation_condition:
+            if self._closing:
+                raise RuntimeError(
+                    "Generator is unloading; new operations are not accepted"
+                )
+            if not self._loaded:
+                raise RuntimeError("Generator not loaded; call load() first")
+            if self._active_operations:
+                active_kind = next(iter(self._active_operations.values()))
+                raise GeneratorOperationBusyError(
+                    f"Generator is busy with active {active_kind} operation; "
+                    f"cannot start concurrent {kind} operation"
+                )
+            self._stop_requested = False
+            self._stop_event.clear()
+            operation_id = uuid4().hex
+            self._active_operations[operation_id] = kind
+            return operation_id
+
+    def _end_operation(self, operation_id: str) -> None:
+        """Release one operation and wake a teardown waiting on exact owners."""
+        with self._operation_condition:
+            if self._active_operations.pop(operation_id, None) is None:
+                raise RuntimeError("Generator operation ownership was already released")
+            self._operation_condition.notify_all()
+
+    def _request_operation_stop(self, operation_id: str) -> bool:
+        """Cancel only while the named request still owns the generator."""
+        with self._operation_condition:
+            if operation_id not in self._active_operations:
+                return False
+            self._stop_requested = True
+            self._stop_event.set()
+            return True
+
+    def unload(self, timeout: float = 2.0) -> bool:
         """Release local model components after failed startup or explicit teardown."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._operation_condition:
+            self._closing = True
+            self._stop_requested = True
+            self._stop_event.set()
+            while self._active_operations:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "Generator unload retained components because operations "
+                        "are still active: %s",
+                        sorted(self._active_operations.values()),
+                    )
+                    return False
+                self._operation_condition.wait(remaining)
+
         stop_health_monitor = getattr(self.sequential, "stop_health_monitor", None)
         if callable(stop_health_monitor):
-            stop_health_monitor()
-        self._loaded = False
-        self.request_stop()
+            try:
+                stopped = stop_health_monitor(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+            except TypeError:
+                stopped = stop_health_monitor()
+            if stopped is False:
+                logger.warning(
+                    "Generator unload retained components because its provider "
+                    "health monitor is still stopping"
+                )
+                return False
+        with self._operation_condition:
+            self._loaded = False
         if self._model_shell_pruned and self._component_cache_key is not None:
             try:
                 self._store_cached_components(self._component_cache_key)
@@ -466,6 +550,7 @@ class DistributedGenerator:
         self._component_cache_key = None
         self._last_generation_metrics = None
         torch.cuda.empty_cache()
+        return True
 
     # ------------------------------------------------------------------
     # Generation
@@ -481,12 +566,40 @@ class DistributedGenerator:
         repetition_penalty: Optional[float] = None,
         do_sample:      Optional[bool]  = None,
     ) -> AsyncGenerator[dict, None]:
-        if not self._loaded:
-            raise RuntimeError("Generator not loaded; call load() first")
+        operation_id = self._begin_operation("generate")
+        completed = False
+        try:
+            owned_stream = self._generate_stream_owned(
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                do_sample=do_sample,
+            )
+            async with aclosing(owned_stream):
+                async for chunk in owned_stream:
+                    yield chunk
+            completed = True
+        finally:
+            if not completed:
+                self._request_operation_stop(operation_id)
+            self._end_operation(operation_id)
+
+    async def _generate_stream_owned(
+        self,
+        prompt:         str,
+        max_new_tokens: Optional[int]   = None,
+        temperature:    Optional[float] = None,
+        top_p:          Optional[float] = None,
+        top_k:          Optional[int]   = None,
+        repetition_penalty: Optional[float] = None,
+        do_sample:      Optional[bool]  = None,
+    ) -> AsyncGenerator[dict, None]:
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
 
-        self.clear_stop()
         session_started = False
         start_session = getattr(self.sequential, "start_session", None)
         if callable(start_session):
@@ -739,6 +852,30 @@ class DistributedGenerator:
         repetition_penalty: Optional[float] = None,
         do_sample: Optional[bool] = None,
     ) -> dict:
+        operation_id = self._begin_operation("generated_output_parity")
+        try:
+            return await self._compare_generated_output_owned(
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                do_sample=do_sample,
+            )
+        finally:
+            self._end_operation(operation_id)
+
+    async def _compare_generated_output_owned(
+        self,
+        prompt: str,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        repetition_penalty: Optional[float] = None,
+        do_sample: Optional[bool] = None,
+    ) -> dict:
         """
         Compare direct HuggingFace generation against the distributed route.
 
@@ -746,8 +883,6 @@ class DistributedGenerator:
         generation can still be compared qualitatively, but stochastic outputs
         should not be treated as an exact route-correctness signal.
         """
-        if not self._loaded:
-            raise RuntimeError("Generator not loaded; call load() first")
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
         if self._loaded_model is None:
@@ -779,7 +914,7 @@ class DistributedGenerator:
         distributed_response = ""
         node_trace: list[str] = []
         generation_metrics: Optional[dict] = None
-        async for chunk in self.generate_stream(
+        async for chunk in self._generate_stream_owned(
             prompt=prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -828,6 +963,22 @@ class DistributedGenerator:
         atol: float = 1e-4,
         rtol: float = 1e-4,
     ) -> dict:
+        operation_id = self._begin_operation("next_token_parity")
+        try:
+            return self._compare_next_token_logits_owned(
+                prompt=prompt,
+                atol=atol,
+                rtol=rtol,
+            )
+        finally:
+            self._end_operation(operation_id)
+
+    def _compare_next_token_logits_owned(
+        self,
+        prompt: str,
+        atol: float = 1e-4,
+        rtol: float = 1e-4,
+    ) -> dict:
         """
         Deterministic parity probe for Sprint 07.
 
@@ -835,8 +986,6 @@ class DistributedGenerator:
         distributed route for the same prompt. This bypasses sampling so bad
         prose can be classified separately from route/model mismatch.
         """
-        if not self._loaded:
-            raise RuntimeError("Generator not loaded; call load() first")
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
         with self._reference_lock:
@@ -1003,18 +1152,39 @@ class DistributedGenerator:
         repetition_penalty: Optional[float] = None,
         do_sample: Optional[bool] = None,
     ) -> dict:
+        operation_id = self._begin_operation("trace")
+        try:
+            return self._trace_generation_owned(
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                do_sample=do_sample,
+            )
+        finally:
+            self._end_operation(operation_id)
+
+    def _trace_generation_owned(
+        self,
+        prompt: str,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        repetition_penalty: Optional[float] = None,
+        do_sample: Optional[bool] = None,
+    ) -> dict:
         """
         Diagnostic generation path that records token-level state.
 
         This is intentionally synchronous and non-streaming so debugging can
         inspect exactly which token introduced odd text or replacement chars.
         """
-        if not self._loaded:
-            raise RuntimeError("Generator not loaded; call load() first")
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
 
-        self.clear_stop()
         cfg = self._get_gen_config()
         max_new_tokens = max_new_tokens if max_new_tokens is not None else cfg["max_new_tokens"]
         temperature = temperature if temperature is not None else cfg["temperature"]
@@ -1035,6 +1205,9 @@ class DistributedGenerator:
         decoded_output = ""
 
         for step in range(max_new_tokens):
+            if self._stop_requested:
+                logger.info("[trace] stop requested before step=%s", step)
+                break
             position_ids = torch.arange(
                 generated_ids.shape[1],
                 device=self.device,
@@ -1065,6 +1238,9 @@ class DistributedGenerator:
                 attention_mask=attention_mask,
                 position_ids=position_ids,
             )
+            if self._stop_requested:
+                logger.info("[trace] stop requested after route step=%s", step)
+                break
             hidden_shape_after_route = list(hidden_states.shape)
             hidden_states = hidden_states.to(self.device, dtype=self.dtype)
 
@@ -1377,9 +1553,14 @@ class DistributedGenerator:
         return self._loaded
 
     def request_stop(self) -> None:
-        self._stop_requested = True
-        self._stop_event.set()
+        with self._operation_condition:
+            self._stop_requested = True
+            self._stop_event.set()
 
-    def clear_stop(self) -> None:
-        self._stop_requested = False
-        self._stop_event.clear()
+    def clear_stop(self) -> bool:
+        with self._operation_condition:
+            if self._closing:
+                return False
+            self._stop_requested = False
+            self._stop_event.clear()
+            return True

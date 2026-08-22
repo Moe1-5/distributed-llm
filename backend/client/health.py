@@ -361,7 +361,7 @@ class ProviderHealthMonitor:
 
     @property
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
+        return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> None:
         if self.running:
@@ -381,11 +381,13 @@ class ProviderHealthMonitor:
         thread = self._thread
         if thread is not None:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        thread_stopped = thread is None or not thread.is_alive()
+        if thread_stopped and self._thread is thread:
+            self._thread = None
         probes_stopped = self.wait_for_idle(
             timeout=max(0.0, deadline - time.monotonic())
         )
-        self._thread = None
-        return (thread is None or not thread.is_alive()) and probes_stopped
+        return thread_stopped and probes_stopped
 
     def _run(self) -> None:
         while not self._stop.wait(self.config.scheduler_interval_seconds):
@@ -519,13 +521,15 @@ class ProviderHealthMonitor:
         }
 
     def wait_for_idle(self, timeout: float = 2.0) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
             with self._active_lock:
                 if not self._active:
                     return True
-            time.sleep(0.005)
-        return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.005, remaining))
 
 
 def _env_float(name: str, default: float) -> float:

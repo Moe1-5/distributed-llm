@@ -134,7 +134,7 @@ class CoverageApiConflictTests(unittest.TestCase):
         self.api_server._local_node_infos = self.original_local_node_infos
 
     def test_stale_revision_returns_http_409_with_fresh_plan(self) -> None:
-        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None: [
+        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None, **_kwargs: [
             node(0, 6, "head")
         ]
         request = self.api_server.NodeStartRequest(
@@ -155,7 +155,7 @@ class CoverageApiConflictTests(unittest.TestCase):
         self.assertEqual(raised.exception.detail["plan"]["missing_ranges"], [{"start": 6, "end": 12}])
 
     def test_unhelpful_replica_requires_redundancy_confirmation(self) -> None:
-        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None: [
+        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None, **_kwargs: [
             node(0, 6, "head")
         ]
         request = self.api_server.NodeStartRequest(
@@ -181,7 +181,7 @@ class CoverageApiConflictTests(unittest.TestCase):
         )
 
     def test_serving_plan_endpoint_returns_selected_and_standby_ranges(self) -> None:
-        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None: [
+        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None, **_kwargs: [
             node(0, 6, "partial"),
             node(0, 12, "full"),
         ]
@@ -208,7 +208,7 @@ class CoverageApiConflictTests(unittest.TestCase):
 
     def test_local_only_plan_is_provisional_until_remote_refresh_completes(self) -> None:
         self.api_server._local_node_infos = lambda: []
-        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None: [
+        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None, **_kwargs: [
             node(0, 6, "remote-head")
         ]
 
@@ -314,7 +314,7 @@ class CoverageApiConflictTests(unittest.TestCase):
         self.api_server.get_local_model_path = lambda model_name: None
         self.api_server.node = None
         self.api_server.local_nodes.clear()
-        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None: [
+        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None, **_kwargs: [
             node(0, 6, "remote-head")
         ]
         try:

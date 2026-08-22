@@ -17,6 +17,11 @@
 
 ## Active
 
+### [2026-08-23] Finish the explicitly selected sprint before resuming the broader goal
+**Problem:** I treated the repository-wide goal as the immediate work item even though the user had explicitly asked to continue Sprint 29 first.
+**Rule:** When the user specifies an order between an active sprint and a broader goal, finish and verify the named sprint first, then resume the wider backlog without interleaving later-sprint implementation.
+**Why:** Preserving the requested sequence keeps one architectural change reviewable and prevents unfinished verification from being obscured by unrelated sprint work.
+
 ### [2026-08-22] Never present a timed-out coverage plan as live guidance
 **Problem:** The serving page retained and displayed a recommended layer range after repeated serving-plan request timeouts, and the user followed an automatic `0-6` recommendation even though another device was already serving that range.
 **Rule:** Coverage recommendations must expose freshness and request failure explicitly, clear or quarantine stale guidance after a refresh failure, and prevent automatic serving from using a plan that was not successfully refreshed against the current remote topology.

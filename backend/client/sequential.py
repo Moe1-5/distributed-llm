@@ -30,8 +30,9 @@ appears to be running.
 import sys
 import time
 import traceback
+from collections.abc import Callable
 from threading import Event
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
  
 import hivemind
@@ -147,17 +148,18 @@ def shutdown_remote_expert_p2p(dht: object) -> bool:
         return True
     try:
         RemoteExpertWorker.run_coroutine(replica.shutdown())
-        return True
     except Exception as exc:
         logger.warning("Remote expert P2P cleanup failed: %s", exc, exc_info=True)
         return False
-    finally:
-        # Hivemind 1.1.12 caches this wrapper but DHT.shutdown() does not close it.
-        # Clear the private cache so later lifecycle code cannot reuse a dead client.
-        try:
-            setattr(dht, "_p2p_replica", None)
-        except Exception:
-            logger.warning("Could not clear the cached remote expert P2P wrapper")
+    # Hivemind 1.1.12 caches this wrapper but DHT.shutdown() does not close it.
+    # Clear it only after confirmed shutdown. On failure the exact handle must
+    # remain owned and visible to the lifecycle quarantine rather than being lost.
+    try:
+        setattr(dht, "_p2p_replica", None)
+    except Exception:
+        logger.warning("Could not clear the cached remote expert P2P wrapper")
+        return False
+    return True
  
  
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,6 +261,7 @@ class RemoteSequential:
         rpc_attempt_policy: Optional[RPCAttemptPolicy] = None,
         health_config: Optional[ProviderHealthConfig] = None,
         failover_config: Optional[RouteFailoverConfig] = None,
+        topology_provider: Optional[Callable[[], list[dict] | dict[str, Any]]] = None,
     ):
         if dht is None:
             raise ValueError("dht must not be None")
@@ -275,6 +278,7 @@ class RemoteSequential:
         self.rpc_attempt_policy = rpc_attempt_policy or get_rpc_attempt_policy()
         self.health_config = health_config or get_provider_health_config()
         self.failover_config = failover_config or get_route_failover_config()
+        self.topology_provider = topology_provider
         self.health_registry = ProviderHealthRegistry(self.health_config)
         self.health_monitor: Optional[ProviderHealthMonitor] = None
         self._replica_cursors: dict[tuple[int, int], int] = {}
@@ -291,8 +295,16 @@ class RemoteSequential:
         }
 
     def start_health_monitor(self) -> None:
-        if self.health_monitor is not None and self.health_monitor.running:
-            return
+        if self.health_monitor is not None:
+            if self.health_monitor.running:
+                return
+            if not self.health_monitor.stop(timeout=0.0):
+                logger.warning(
+                    "Previous provider health monitor still owns active probes; "
+                    "not starting a replacement"
+                )
+                return
+            self.health_monitor = None
         self.health_monitor = ProviderHealthMonitor(
             config=self.health_config,
             registry=self.health_registry,
@@ -309,7 +321,8 @@ class RemoteSequential:
         stopped = monitor.stop(timeout=timeout)
         if not stopped:
             logger.warning("Provider health monitor did not stop all active probes in time")
-        self.health_monitor = None
+        elif self.health_monitor is monitor:
+            self.health_monitor = None
         return stopped
 
     def _classify_health_roles(self, nodes: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -1556,6 +1569,32 @@ class RemoteSequential:
         """Return validated providers and distinct protocol-advertisement errors."""
         nodes: list[dict] = []
         errors: list[dict] = []
+        if self.topology_provider is not None:
+            provided = self.topology_provider()
+            raw_nodes = provided.get("nodes", []) if isinstance(provided, dict) else provided
+            if not isinstance(raw_nodes, list):
+                raise TypeError("Topology provider must return a node list or snapshot")
+            for raw_node in raw_nodes:
+                peer_id = (
+                    str(raw_node.get("peer_id", "unknown"))
+                    if isinstance(raw_node, dict)
+                    else "unknown"
+                )
+                try:
+                    if not isinstance(raw_node, dict):
+                        raise ValueError("Provider metadata must be an object")
+                    nodes.append(self._validate_node_metadata(raw_node, peer_id))
+                except Exception as exc:
+                    errors.append(
+                        {
+                            "peer_id": peer_id,
+                            "model_name": self.model_name or "unknown",
+                            "kind": "protocol_incompatible",
+                            "reason": str(exc),
+                        }
+                    )
+            return nodes, errors
+
         peer_ids = self._get_member_peer_ids()
 
         for peer_id in peer_ids:

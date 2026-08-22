@@ -53,12 +53,31 @@ class LifecycleJobStore:
             raise ValueError("max_history must be positive")
         self._max_history = max_history
         self._jobs: dict[str, _LifecycleJob] = {}
+        self._threads: dict[str, threading.Thread] = {}
+        self._admission_open = True
         self._lock = threading.RLock()
 
     def submit(self, kind: str, resource_key: str, target: JobTarget) -> dict[str, Any]:
         if not kind.strip() or not resource_key.strip():
             raise ValueError("kind and resource_key must not be empty")
         with self._lock:
+            if not self._admission_open:
+                self._prune_locked()
+                detail = "Lifecycle job admission is closed while the backend is stopping."
+                job = _LifecycleJob(
+                    uuid4().hex,
+                    kind,
+                    resource_key,
+                    status="cancelled",
+                    stage="admission_closed",
+                    detail=detail,
+                    result={"status": "cancelled", "message": detail},
+                    error=detail,
+                )
+                job.cancel_event.set()
+                self._jobs[job.job_id] = job
+                return {**job.snapshot(), "reused": False}
+
             existing = next(
                 (
                     job
@@ -79,8 +98,44 @@ class LifecycleJobStore:
                 daemon=True,
                 name=f"distribllm-{kind}-{job.job_id[:8]}",
             )
-            thread.start()
+            self._threads[job.job_id] = thread
+            try:
+                thread.start()
+            except Exception as exc:
+                self._threads.pop(job.job_id, None)
+                job.status = "failed"
+                job.stage = "failed"
+                job.error = f"Could not start lifecycle job thread: {exc}"
+                job.detail = job.error
+                job.updated_at = time.time()
             return {**job.snapshot(), "reused": False}
+
+    @property
+    def admission_open(self) -> bool:
+        with self._lock:
+            return self._admission_open
+
+    def close_admission(self) -> None:
+        """Prevent new targets from starting while preserving pollable results."""
+        with self._lock:
+            self._admission_open = False
+
+    def reopen_admission(self) -> None:
+        """Allow submissions after a previous, fully completed shutdown."""
+        with self._lock:
+            if self._threads:
+                raise RuntimeError(
+                    "Cannot reopen lifecycle job admission while workers are active."
+                )
+            self._admission_open = True
+
+    def diagnostics(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "admission_open": self._admission_open,
+                "active_thread_count": len(self._threads),
+                "active_job_ids": sorted(self._threads),
+            }
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -112,30 +167,79 @@ class LifecycleJobStore:
 
     def cancel_all(self) -> None:
         with self._lock:
-            for job in self._jobs.values():
-                if job.status not in TERMINAL_STATES:
-                    job.cancel_event.set()
+            self._cancel_all_locked()
+
+    def cancel_all_and_wait(self, timeout: float) -> bool:
+        """Close admission, request cancellation, and join owned workers once.
+
+        Returns ``True`` when every tracked worker has stopped before the shared
+        deadline. Repeated calls are safe and can continue waiting for a target
+        that did not honor an earlier cancellation request in time.
+        """
+        if timeout < 0:
+            raise ValueError("timeout must not be negative")
+
+        with self._lock:
+            self._admission_open = False
+            self._cancel_all_locked()
+            current_thread = threading.current_thread()
+            threads = [
+                thread
+                for thread in self._threads.values()
+                if thread is not current_thread
+            ]
+
+        deadline = time.monotonic() + timeout
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+
+        with self._lock:
+            return not self._threads
+
+    def _cancel_all_locked(self) -> None:
+        for job in self._jobs.values():
+            if job.status in TERMINAL_STATES:
+                continue
+            job.cancel_event.set()
+            job.stage = "cancelling"
+            job.detail = "Cancellation requested; cleaning up owned resources."
+            job.updated_at = time.time()
 
     def _run(self, job: _LifecycleJob, target: JobTarget) -> None:
         def progress(stage: str, detail: str) -> None:
             with self._lock:
-                if job.status in TERMINAL_STATES:
+                if job.status in TERMINAL_STATES or job.cancel_event.is_set():
                     return
                 job.status = "running"
                 job.stage = stage
                 job.detail = detail
                 job.updated_at = time.time()
 
+        result: dict[str, Any] | None = None
+        result_status = ""
+        failure: Exception | None = None
         try:
             if job.cancel_event.is_set():
                 result = {"status": "cancelled"}
             else:
                 progress("starting", "Starting the requested runtime.")
                 result = target(progress, job.cancel_event)
-            with self._lock:
+            if not isinstance(result, dict):
+                raise TypeError("Lifecycle job target must return a result dictionary.")
+            result_status = str(result.get("status", ""))
+        except Exception as exc:
+            failure = exc
+
+        with self._lock:
+            if failure is not None:
+                job.status = "failed"
+                job.stage = "failed"
+                job.error = str(failure)
+                job.detail = str(failure)
+                job.updated_at = time.time()
+            else:
                 job.result = result
-                result_status = str(result.get("status", ""))
-                if job.cancel_event.is_set() or result_status == "cancelled":
+                if result_status == "cancelled":
                     job.status = "cancelled"
                     job.stage = "cancelled"
                     job.detail = "The operation was cancelled and cleaned up."
@@ -151,15 +255,14 @@ class LifecycleJobStore:
                 else:
                     job.status = "ready"
                     job.stage = "ready"
-                    job.detail = "Runtime is ready."
+                    job.detail = (
+                        "Runtime committed before the cancellation request could "
+                        "take effect."
+                        if job.cancel_event.is_set()
+                        else "Runtime is ready."
+                    )
                 job.updated_at = time.time()
-        except Exception as exc:
-            with self._lock:
-                job.status = "failed"
-                job.stage = "failed"
-                job.error = str(exc)
-                job.detail = str(exc)
-                job.updated_at = time.time()
+            self._threads.pop(job.job_id, None)
 
     def _prune_locked(self) -> None:
         if len(self._jobs) < self._max_history:

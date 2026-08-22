@@ -55,6 +55,14 @@ def get_p2p_identity_dir() -> Path:
     return Path.home() / ".distribllm" / "p2p-identities"
 
 
+def get_role_identity_path(role: str) -> Path:
+    """Return a stable identity path for a non-worker network role."""
+    normalized = role.strip().lower()
+    if normalized not in {"control-plane", "generator"}:
+        raise ValueError(f"Unknown persistent P2P role: {role!r}")
+    return get_p2p_identity_dir() / "roles" / f"{normalized}.key"
+
+
 def _get_bool_env(name: str, default: bool) -> bool:
     raw_value = os.environ.get(name)
     if raw_value is None or not raw_value.strip():

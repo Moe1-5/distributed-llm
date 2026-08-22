@@ -8,12 +8,15 @@ New in this version:
 """
 
 import asyncio
+import inspect
 import json
 import os
 import sys
 import threading
 import time
-from contextlib import asynccontextmanager
+import weakref
+from dataclasses import dataclass, field
+from contextlib import aclosing, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -36,14 +39,21 @@ from hivemind.utils.logging import get_logger
 from pydantic import BaseModel, field_validator
 
 from api.env_loader import load_project_env
+
+# Load the repository environment before importing modules whose constants are
+# evaluated at import time (DHT lease horizons, recovery thresholds, and the
+# control-plane refresh cadence).
+load_project_env()
+
 from api.lifecycle_jobs import LifecycleJobStore
 from api.runtime_state import RuntimeStateStore
+from network.supervisor import NetworkSupervisor
 from node.gpu_monitor import GPUMonitor
 from node.node import Node
-from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, _run_with_timeout
+from node.rpc_server import DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
 from client.sequential import RemoteSequential, shutdown_remote_expert_p2p
 from client.coverage import build_serving_plan, evaluate_candidate
-from client.generation import DistributedGenerator
+from client.generation import DistributedGenerator, GeneratorOperationBusyError
 from incentives.runtime import get_useful_work_runtime
 from incentives.access import AccessError, get_api_access_manager
 from api.local_models import (
@@ -71,9 +81,8 @@ from constants import (
     SUPPORTED_MODELS,
     DHT_PREFIX,
     get_initial_peers,
+    get_role_identity_path,
 )
-
-load_project_env()
 
 logger = get_logger(__name__)
 DEFAULT_TRACE_DIR = Path(__file__).resolve().parents[1] / "traces"
@@ -159,22 +168,26 @@ def _huggingface_reconnect_response(model_name: str) -> dict:
     }
 
 
-def _cleanup_failed_node(candidate: object | None) -> None:
+def _cleanup_failed_node(candidate: object | None) -> bool:
     if candidate is None or not hasattr(candidate, "stop"):
-        return
+        return True
     try:
-        candidate.stop()
+        return candidate.stop() is not False
     except Exception as exc:
         logger.warning("Failed to clean up partially started node: %s", exc)
+        return False
 
 
-def _cleanup_failed_generator(candidate: object | None) -> None:
+def _cleanup_failed_generator(candidate: object | None) -> bool:
+    cleanup_complete = True
     if candidate is not None and hasattr(candidate, "unload"):
         try:
-            candidate.unload()
+            cleanup_complete = candidate.unload() is not False
         except Exception as exc:
             logger.warning("Failed to clean up partially loaded generator: %s", exc)
+            cleanup_complete = False
     torch.cuda.empty_cache()
+    return cleanup_complete
 
 
 def _safe_filename_part(value: str) -> str:
@@ -434,6 +447,116 @@ client_dht:  Optional[hivemind.DHT]         = None
 client_dht_prefix: str = DHT_PREFIX
 _lifecycle_jobs = LifecycleJobStore()
 _runtime_state = RuntimeStateStore()
+_generator_start_lock = threading.Lock()
+_generator_lifecycle_lock = threading.RLock()
+_backend_closing = False
+_generator_cleanup_in_progress = False
+_generator_identity_quarantine: Optional[str] = None
+
+
+@dataclass
+class _GeneratorStartTransaction:
+    operation_id: str
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    done_event: threading.Event = field(default_factory=threading.Event)
+    candidate_dht: Optional[object] = None
+    sequential: Optional[object] = None
+    candidate_generator: Optional[object] = None
+    dht_future: Optional[asyncio.Future] = None
+    route_validation_future: Optional[asyncio.Future] = None
+    tensor_canary_future: Optional[asyncio.Future] = None
+    load_future: Optional[asyncio.Future] = None
+    role_registered: bool = False
+    committed: bool = False
+
+
+@dataclass
+class _NodeStartTransaction:
+    operation_id: str
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    done_event: threading.Event = field(default_factory=threading.Event)
+    candidate: Optional[object] = None
+    start_future: Optional[asyncio.Future] = None
+    role_registered: bool = False
+    committed: bool = False
+
+
+@dataclass
+class _NodeLifecycleOperation:
+    """One exact API-owned lifecycle action for one registered local node."""
+
+    node: object
+    action: str
+    done_event: threading.Event = field(default_factory=threading.Event)
+    future: Optional[asyncio.Future] = None
+
+
+@dataclass
+class _GeneratorCleanupHandles:
+    candidate_generator: Optional[object]
+    sequential: Optional[object]
+    dht: Optional[object]
+    reason: str
+
+
+@dataclass
+class _LocalNodeShutdownAttempt:
+    node: object
+    thread: threading.Thread
+    outcome: dict[str, object]
+
+
+@dataclass
+class _GeneratorDHTShutdownAttempt:
+    """One retained shutdown call for one exact generator DHT."""
+
+    dht: Optional[object]
+    name: str
+    done: threading.Event = field(default_factory=threading.Event)
+    thread: Optional[threading.Thread] = None
+    remote_expert_p2p: str = "not_started"
+    errors: list[str] = field(default_factory=list)
+    quarantines_identity: bool = False
+
+
+@dataclass(frozen=True)
+class _GeneratorDHTShutdownTombstone:
+    """Weak terminal record that makes repeated close calls idempotent."""
+
+    dht_ref: weakref.ReferenceType
+    result: dict
+
+
+_active_generator_start: Optional[_GeneratorStartTransaction] = None
+_active_node_starts: dict[str, _NodeStartTransaction] = {}
+_active_node_operations: dict[str, _NodeLifecycleOperation] = {}
+_pending_generator_cleanup: Optional[_GeneratorCleanupHandles] = None
+_local_node_shutdown_attempts: dict[str, _LocalNodeShutdownAttempt] = {}
+_generator_dht_shutdown_attempts: dict[
+    int,
+    _GeneratorDHTShutdownAttempt | _GeneratorDHTShutdownTombstone,
+] = {}
+
+_GENERATOR_DHT_QUARANTINE_REASON = (
+    "The previous generator transport has not stopped cleanly. Restart the "
+    "backend before reusing its stable peer identity."
+)
+_GENERATOR_DHT_TOMBSTONE_ATTRIBUTE = (
+    "_distribllm_generator_dht_shutdown_result"
+)
+
+
+def _record_network_event(**kwargs) -> dict:
+    """Resolve the current runtime store so tests may replace it safely."""
+    return _runtime_state.record_event(**kwargs)
+
+
+network_supervisor = NetworkSupervisor(
+    initial_peers=get_initial_peers(),
+    dht_prefix=DHT_PREFIX,
+    identity_path=get_role_identity_path("control-plane"),
+    event_sink=_record_network_event,
+)
 _serving_plan_cache: dict[tuple[str, int], tuple[float, dict]] = {}
 _serving_plan_cache_lock = threading.RLock()
 _serving_plan_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
@@ -465,6 +588,9 @@ def _unregister_local_node(local_node: Node) -> None:
     node_id = getattr(local_node, "node_id", None)
     if node_id is not None:
         local_nodes.pop(node_id, None)
+        if _supervisor_active():
+            network_supervisor.unregister_role("worker", role_id=node_id)
+            network_supervisor.request_refresh()
     global node
     if node is local_node:
         if local_nodes:
@@ -503,6 +629,147 @@ def _active_dht_prefix() -> str:
     return client_dht_prefix or DHT_PREFIX
 
 
+def _network_snapshot() -> dict:
+    snapshot = network_supervisor.snapshot()
+    roles = snapshot.setdefault("roles", {"workers": [], "generator": None})
+    workers = {
+        str(record.get("node_id")): record
+        for record in roles.get("workers", [])
+        if record.get("node_id") is not None
+    }
+    for local_node in _local_node_list():
+        info_getter = getattr(local_node, "get_info", None)
+        if not callable(info_getter):
+            logger.warning(
+                "Skipping local worker role overlay without get_info(): %r",
+                local_node,
+            )
+            continue
+        try:
+            info = info_getter()
+        except Exception as exc:
+            logger.warning(
+                "Failed to read authoritative local worker role state: %s",
+                exc,
+            )
+            continue
+        raw_node_id = info.get("node_id") or getattr(local_node, "node_id", None)
+        if raw_node_id is None:
+            logger.warning(
+                "Skipping local worker role overlay without a node_id: %r",
+                local_node,
+            )
+            continue
+        node_id = str(raw_node_id)
+        pending_getter = getattr(
+            local_node,
+            "has_pending_serving_cleanup",
+            None,
+        )
+        cleanup_pending = bool(
+            pending_getter() if callable(pending_getter) else False
+        )
+        announcement = info.get("announcement")
+        if info.get("running"):
+            worker_state = (
+                "ready"
+                if isinstance(announcement, dict)
+                and announcement.get("publication_state") == "healthy"
+                else "degraded"
+            )
+        else:
+            worker_state = "cleanup_pending" if cleanup_pending else "stopped"
+        existing = workers.get(node_id, {})
+        workers[node_id] = {
+            **existing,
+            "node_id": node_id,
+            "peer_id": info.get("peer_id"),
+            "state": worker_state,
+        }
+    roles["workers"] = list(workers.values())
+    resources = snapshot.get("resources")
+    if isinstance(resources, dict):
+        resources["registered_workers"] = len(workers)
+    generator_role = roles.get("generator")
+    if isinstance(generator_role, dict):
+        generator_role["state"] = _runtime_state.generator_snapshot()["state"]
+    return snapshot
+
+
+def _supervisor_active(snapshot: Optional[dict] = None) -> bool:
+    current = snapshot or _network_snapshot()
+    return bool(
+        current.get("state") != "disconnected"
+        or current.get("resources", {}).get("control_dht")
+        or current.get("resources", {}).get("discovery_task")
+    )
+
+
+def _network_response_fields(snapshot: Optional[dict] = None) -> dict:
+    current = snapshot or _network_snapshot()
+    state = str(current.get("state", "disconnected"))
+    has_snapshot = current.get("snapshot_captured_at") is not None
+    return {
+        "snapshot_stale": state != "ready",
+        "refreshing": state == "syncing",
+        "snapshot_source": (
+            "validated_dht"
+            if state == "ready"
+            else "dht_cache"
+            if has_snapshot
+            else "local_only"
+        ),
+        "snapshot_age_seconds": current.get("snapshot_age_seconds") or 0.0,
+        "network_state": state,
+        "network_revision": current.get("revision"),
+        "network_topology_revision": current.get("topology_revision"),
+        "network_failure": current.get("failure"),
+    }
+
+
+def _role_initial_peers(requested_peers: list[str]) -> list[str]:
+    """Keep every co-located role on the supervisor's configured swarm."""
+    if not _supervisor_active():
+        return list(requested_peers or get_initial_peers())
+    supervisor_peers = list(
+        getattr(network_supervisor, "initial_peers", get_initial_peers())
+    )
+    if requested_peers and set(requested_peers) != set(supervisor_peers):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "network_peers_mismatch",
+                "message": (
+                    "Worker and generator roles must use the backend supervisor's "
+                    "bootstrap peer set. Save the shared network settings and restart "
+                    "the backend before starting this role."
+                ),
+            },
+        )
+    return supervisor_peers
+
+
+def _register_network_worker(local_node: Node, state: str) -> None:
+    if not _supervisor_active():
+        return
+    info = local_node.get_info()
+    announcement = info.get("announcement")
+    role_state = state
+    if (
+        state == "ready"
+        and isinstance(announcement, dict)
+        and announcement.get("publication_state") != "healthy"
+    ):
+        role_state = "degraded"
+    network_supervisor.register_role(
+        "worker",
+        role_id=local_node.node_id,
+        peer_id=info.get("peer_id"),
+        state=role_state,
+    )
+    network_supervisor.request_refresh()
+
+
 def _local_node_key(info: dict) -> str:
     node_id = info.get("node_id")
     if node_id:
@@ -513,8 +780,33 @@ def _local_node_key(info: dict) -> str:
     )
 
 
+def _merge_supervisor_and_local_nodes(
+    discovered_nodes: list[dict],
+    *,
+    model_name: Optional[str] = None,
+) -> list[dict]:
+    """Overlay authoritative in-process worker state onto cached discovery."""
+    merged: dict[str, dict] = {
+        _local_node_key(info): info
+        for info in discovered_nodes
+        if model_name is None or info.get("model_name") == model_name
+    }
+    for info in _local_node_infos():
+        if model_name is None or info.get("model_name") == model_name:
+            merged[_local_node_key(info)] = info
+    return list(merged.values())
+
+
 def _local_node_infos() -> list[dict]:
     return [local_node.get_info() for local_node in _local_node_list()]
+
+
+def _generator_topology_nodes(model_name: str) -> list[dict]:
+    """Merge supervisor discovery with authoritative co-located worker state."""
+    return _merge_supervisor_and_local_nodes(
+        network_supervisor.nodes_for_model(model_name),
+        model_name=model_name,
+    )
 
 
 def _has_overlapping_local_node(req) -> Optional[Node]:
@@ -582,59 +874,260 @@ def _route_contains_local_node(route: list[dict], local_node: Node) -> bool:
 
 
 def _generator_dependency(local_node: Node) -> dict:
-    if (
-        generator is None
-        or not generator.is_loaded()
-        or generator.model_name != local_node.model_name
-    ):
-        return {"required": False, "alternate_available": False}
-    health_getter = getattr(generator.sequential, "get_health_readiness", None)
-    if not callable(health_getter):
-        return {"required": True, "alternate_available": False}
-    health = health_getter()
-    selected_route = health.get("selected_route", [])
-    if not _route_contains_local_node(selected_route, local_node):
-        return {"required": False, "alternate_available": False, "health": health}
-    alternate_available = any(
-        not _route_contains_local_node(candidate.get("route", []), local_node)
-        for candidate in health.get("alternate_routes", [])
-    )
-    return {
-        "required": not alternate_available,
-        "alternate_available": alternate_available,
-        "health": health,
-    }
+    with _generator_lifecycle_lock:
+        active_generator = generator
+        if (
+            active_generator is None
+            or not active_generator.is_loaded()
+            or active_generator.model_name != local_node.model_name
+        ):
+            return {
+                "required": False,
+                "alternate_available": False,
+                "generator_owner": active_generator,
+            }
+        health_getter = getattr(
+            active_generator.sequential,
+            "get_health_readiness",
+            None,
+        )
+        if not callable(health_getter):
+            return {
+                "required": True,
+                "alternate_available": False,
+                "generator_owner": active_generator,
+            }
+        health = health_getter()
+        selected_route = health.get("selected_route", [])
+        if not _route_contains_local_node(selected_route, local_node):
+            return {
+                "required": False,
+                "alternate_available": False,
+                "health": health,
+                "generator_owner": active_generator,
+            }
+        alternate_available = any(
+            not _route_contains_local_node(candidate.get("route", []), local_node)
+            for candidate in health.get("alternate_routes", [])
+        )
+        return {
+            "required": not alternate_available,
+            "alternate_available": alternate_available,
+            "health": health,
+            "generator_owner": active_generator,
+        }
 
 
-async def _unload_generator_runtime(reason: str) -> dict:
-    global generator
-    if generator is None:
+async def _unload_generator_runtime(
+    reason: str,
+    timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+) -> dict:
+    global generator, client_dht, _generator_cleanup_in_progress
+    global _pending_generator_cleanup
+    with _generator_lifecycle_lock:
+        active_start = _active_generator_start
+        if active_start is not None and not active_start.committed:
+            active_start.cancel_event.set()
+            return {
+                "status": "startup_cancelling",
+                "reason": reason,
+            }
+        if _generator_cleanup_in_progress:
+            return {
+                "status": "cleanup_in_progress",
+                "reason": reason,
+            }
+        handles = _pending_generator_cleanup
+        if handles is None and generator is None and client_dht is None:
+            _runtime_state.transition_generator(
+                "stopped",
+                model_name=None,
+                components_loaded=False,
+                route_ready=False,
+                reasons=[reason],
+            )
+            return {"status": "not_running"}
+        if handles is None:
+            candidate = generator
+            handles = _GeneratorCleanupHandles(
+                candidate_generator=candidate,
+                sequential=None,
+                dht=client_dht,
+                reason=reason,
+            )
+            _pending_generator_cleanup = handles
+            generator = None
+            client_dht = None
+        else:
+            candidate = handles.candidate_generator
+            handles.reason = reason
+        _generator_cleanup_in_progress = True
+
+    try:
+        network_supervisor.unregister_role("generator")
+    except Exception as exc:
+        logger.warning("Could not unregister generator network role: %s", exc)
+    if candidate is None:
         _runtime_state.transition_generator(
-            "stopped",
+            "stopping",
             model_name=None,
             components_loaded=False,
             route_ready=False,
             reasons=[reason],
         )
-        return {"status": "not_running"}
-    candidate = generator
-    generator = None
-    _runtime_state.transition_generator(
-        "stopping",
-        model_name=getattr(candidate, "model_name", None),
-        route_ready=False,
-        reasons=[reason],
-    )
-    candidate.request_stop()
-    await asyncio.to_thread(candidate.unload)
-    network = await asyncio.to_thread(_shutdown_client_dht)
-    _runtime_state.transition_generator(
-        "stopped",
-        model_name=None,
-        components_loaded=False,
-        route_ready=False,
-        reasons=[reason],
-    )
+    else:
+        _runtime_state.transition_generator(
+            "stopping",
+            model_name=getattr(candidate, "model_name", None),
+            route_ready=False,
+            reasons=[reason],
+        )
+
+    cancellation_count = 0
+    unload_error: Optional[BaseException] = None
+    network = None
+    cleanup_complete = True
+    deadline = time.monotonic() + max(0.0, timeout)
+    try:
+        if candidate is not None:
+            request_stop = getattr(candidate, "request_stop", None)
+            if callable(request_stop):
+                request_stop()
+            loop = asyncio.get_running_loop()
+            unload_call = _bind_optional_timeout(
+                candidate.unload,
+                max(0.0, deadline - time.monotonic()),
+            )
+            unload_future = asyncio.ensure_future(
+                loop.run_in_executor(None, unload_call)
+            )
+            cancellation_count += await _await_owned_future(unload_future)
+            if unload_future.cancelled():
+                cleanup_complete = False
+            else:
+                try:
+                    cleanup_complete = unload_future.result() is not False
+                except BaseException as exc:
+                    unload_error = exc
+                    cleanup_complete = False
+            if cleanup_complete:
+                handles.candidate_generator = None
+        elif handles.sequential is not None:
+            stop_health_monitor = getattr(
+                handles.sequential,
+                "stop_health_monitor",
+                None,
+            )
+            if callable(stop_health_monitor):
+                loop = asyncio.get_running_loop()
+                monitor_future = asyncio.ensure_future(
+                    loop.run_in_executor(
+                        None,
+                        lambda: _call_with_optional_timeout(
+                            stop_health_monitor,
+                            max(0.0, deadline - time.monotonic()),
+                        ),
+                    )
+                )
+                cancellation_count += await _await_owned_future(monitor_future)
+                if monitor_future.cancelled():
+                    cleanup_complete = False
+                else:
+                    try:
+                        cleanup_complete = monitor_future.result() is not False
+                    except BaseException as exc:
+                        unload_error = exc
+                        cleanup_complete = False
+            if cleanup_complete:
+                handles.sequential = None
+
+        if cleanup_complete and handles.dht is not None:
+            dht = handles.dht
+            loop = asyncio.get_running_loop()
+            dht_future = asyncio.ensure_future(
+                loop.run_in_executor(
+                    None,
+                    lambda: _close_generator_dht(
+                        dht,
+                        timeout=max(0.0, deadline - time.monotonic()),
+                    ),
+                )
+            )
+            cancellation_count += await _await_owned_future(dht_future)
+            if dht_future.cancelled():
+                cleanup_complete = False
+            else:
+                try:
+                    network = dht_future.result()
+                    cleanup_complete = network.get("status") == "stopped"
+                except BaseException as exc:
+                    unload_error = unload_error or exc
+                    cleanup_complete = False
+            if cleanup_complete:
+                handles.dht = None
+    finally:
+        with _generator_lifecycle_lock:
+            cleanup_finished = bool(
+                cleanup_complete
+                and handles.candidate_generator is None
+                and handles.sequential is None
+                and handles.dht is None
+            )
+            if cleanup_finished and _pending_generator_cleanup is handles:
+                _pending_generator_cleanup = None
+            try:
+                if unload_error is not None:
+                    _runtime_state.transition_generator(
+                        "failed",
+                        model_name=getattr(candidate, "model_name", None),
+                        components_loaded=False,
+                        route_ready=False,
+                        reasons=[str(unload_error)],
+                    )
+                elif not cleanup_finished:
+                    _runtime_state.transition_generator(
+                        "stopping",
+                        model_name=getattr(candidate, "model_name", None),
+                        components_loaded=bool(
+                            handles.candidate_generator is not None
+                            and getattr(
+                                handles.candidate_generator,
+                                "is_loaded",
+                                lambda: False,
+                            )()
+                        ),
+                        route_ready=False,
+                        reasons=[
+                            "Generator cleanup exceeded its deadline; the exact "
+                            "runtime handles were retained for a retry."
+                        ],
+                    )
+                elif generator is None and client_dht is None:
+                    _runtime_state.transition_generator(
+                        "stopped",
+                        model_name=None,
+                        components_loaded=False,
+                        route_ready=False,
+                        reasons=[reason],
+                    )
+            finally:
+                # Admission and the terminal cleanup state are committed while
+                # holding the same owner lock. A replacement cannot publish its
+                # startup state between these two changes.
+                _generator_cleanup_in_progress = False
+
+    if unload_error is not None:
+        raise unload_error
+    if not cleanup_finished:
+        if cancellation_count:
+            raise asyncio.CancelledError
+        return {
+            "status": "cleanup_pending",
+            "network": network,
+            "reason": reason,
+        }
+    if cancellation_count:
+        raise asyncio.CancelledError
     return {"status": "unloaded", "network": network, "reason": reason}
 
 
@@ -657,12 +1150,20 @@ def _generator_initial_peers(
 
 def _generator_dht_kwargs(initial_peers: list[str]) -> dict:
     """Build a dialing-only client that can reach workers through circuit addresses."""
+    identity_path = get_role_identity_path("generator")
+    identity_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    identity_path.parent.chmod(0o700)
+    if identity_path.exists():
+        if not identity_path.is_file():
+            raise RuntimeError("Generator P2P identity target is not a file")
+        identity_path.chmod(0o600)
     return {
         "initial_peers": initial_peers,
         "start": True,
         "use_ipfs": False,
         "use_relay": True,
         "client_mode": True,
+        "identity_path": str(identity_path),
     }
 
 
@@ -670,84 +1171,989 @@ def _shutdown_local_nodes(
     timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
 ) -> list[dict]:
     results: list[dict] = []
+    deadline = time.monotonic() + max(0.0, timeout)
     for local_node in list(_local_node_list()):
-        node_id = getattr(local_node, "node_id", None)
+        node_id = str(getattr(local_node, "node_id", None) or id(local_node))
+        with _generator_lifecycle_lock:
+            attempt = _local_node_shutdown_attempts.get(node_id)
+            if attempt is not None and attempt.node is not local_node:
+                results.append(
+                    {"node_id": node_id, "status": "ownership_conflict"}
+                )
+                continue
+            if attempt is None:
+                outcome: dict[str, object] = {
+                    "complete": False,
+                    "error": None,
+                }
 
-        def _stop_node() -> None:
-            try:
-                local_node.stop(timeout=timeout)
-            except TypeError:
-                local_node.stop()
+                attempt_holder: dict[str, _LocalNodeShutdownAttempt] = {}
 
-        finished = _run_with_timeout(
-            f"local-node-stop-{node_id or 'unknown'}",
-            _stop_node,
-            timeout,
+                def _stop_node(
+                    owned_node=local_node,
+                    owned_outcome=outcome,
+                    owned_node_id=node_id,
+                ) -> None:
+                    try:
+                        try:
+                            stopped = owned_node.stop(
+                                timeout=max(0.0, deadline - time.monotonic())
+                            )
+                        except TypeError:
+                            stopped = owned_node.stop()
+                        owned_outcome["complete"] = stopped is not False
+                    except BaseException as exc:
+                        owned_outcome["error"] = exc
+                    finally:
+                        owned_attempt = attempt_holder.get("attempt")
+                        should_unregister = False
+                        if (
+                            owned_attempt is not None
+                            and owned_outcome.get("complete")
+                            and owned_outcome.get("error") is None
+                        ):
+                            with _generator_lifecycle_lock:
+                                if (
+                                    _local_node_shutdown_attempts.get(owned_node_id)
+                                    is owned_attempt
+                                ):
+                                    _local_node_shutdown_attempts.pop(
+                                        owned_node_id,
+                                        None,
+                                    )
+                                    should_unregister = True
+                        if should_unregister:
+                            _unregister_local_node(owned_node)
+
+                thread = threading.Thread(
+                    target=_stop_node,
+                    daemon=True,
+                    name=f"local-node-stop-{node_id}",
+                )
+                attempt = _LocalNodeShutdownAttempt(local_node, thread, outcome)
+                attempt_holder["attempt"] = attempt
+                _local_node_shutdown_attempts[node_id] = attempt
+                thread.start()
+
+        attempt.thread.join(max(0.0, deadline - time.monotonic()))
+        finished = not attempt.thread.is_alive()
+        cleanup_complete = bool(
+            finished
+            and attempt.outcome.get("complete")
+            and attempt.outcome.get("error") is None
         )
-        if finished:
+        if cleanup_complete:
+            with _generator_lifecycle_lock:
+                if _local_node_shutdown_attempts.get(node_id) is attempt:
+                    _local_node_shutdown_attempts.pop(node_id, None)
             _unregister_local_node(local_node)
+        elif finished:
+            with _generator_lifecycle_lock:
+                if _local_node_shutdown_attempts.get(node_id) is attempt:
+                    _local_node_shutdown_attempts.pop(node_id, None)
         results.append(
             {
                 "node_id": node_id,
-                "status": "stopped" if finished else "timeout",
+                "status": "stopped" if cleanup_complete else "cleanup_pending",
             }
         )
-    local_nodes.clear()
-    _sync_primary_node()
     return results
+
+
+def _generator_dht_shutdown_attempt(
+    dht: object,
+    *,
+    name: str,
+) -> _GeneratorDHTShutdownAttempt | _GeneratorDHTShutdownTombstone:
+    """Start or recover the one retained shutdown attempt for ``dht``."""
+    attempt_key = id(dht)
+    with _generator_lifecycle_lock:
+        existing = _generator_dht_shutdown_attempts.get(attempt_key)
+        if existing is not None:
+            existing_dht = (
+                existing.dht_ref()
+                if isinstance(existing, _GeneratorDHTShutdownTombstone)
+                else existing.dht
+            )
+            if existing_dht is None:
+                _generator_dht_shutdown_attempts.pop(attempt_key, None)
+            elif existing_dht is not dht:
+                raise RuntimeError(
+                    "Generator DHT shutdown ownership collided with another object"
+                )
+            else:
+                return existing
+
+        attempt = _GeneratorDHTShutdownAttempt(dht=dht, name=name)
+        _generator_dht_shutdown_attempts[attempt_key] = attempt
+
+        def _shutdown() -> None:
+            try:
+                try:
+                    remote_stopped = shutdown_remote_expert_p2p(dht)
+                except BaseException as exc:
+                    remote_stopped = False
+                    with _generator_lifecycle_lock:
+                        attempt.errors.append(
+                            "Remote expert P2P shutdown raised "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    logger.warning(
+                        "%s remote expert P2P cleanup raised: %s",
+                        name,
+                        exc,
+                        exc_info=True,
+                    )
+                with _generator_lifecycle_lock:
+                    attempt.remote_expert_p2p = (
+                        "stopped" if remote_stopped else "error"
+                    )
+                    if not remote_stopped and not attempt.errors:
+                        attempt.errors.append(
+                            "Remote expert P2P shutdown did not complete successfully"
+                        )
+
+                try:
+                    dht.shutdown()
+                except BaseException as exc:
+                    with _generator_lifecycle_lock:
+                        attempt.errors.append(
+                            f"DHT shutdown raised {type(exc).__name__}: {exc}"
+                        )
+                    logger.warning(
+                        "%s raised during shutdown: %s",
+                        name,
+                        exc,
+                        exc_info=True,
+                    )
+                else:
+                    is_alive = getattr(dht, "is_alive", None)
+                    join = getattr(dht, "join", None)
+                    if callable(is_alive):
+                        try:
+                            while is_alive():
+                                if not callable(join):
+                                    raise RuntimeError(
+                                        "DHT shutdown returned while its process was "
+                                        "still alive and no join method is available"
+                                    )
+                                join(0.1)
+                        except BaseException as exc:
+                            with _generator_lifecycle_lock:
+                                attempt.errors.append(
+                                    "DHT process liveness verification raised "
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+                            logger.warning(
+                                "%s could not verify DHT process exit: %s",
+                                name,
+                                exc,
+                                exc_info=True,
+                            )
+            finally:
+                attempt.done.set()
+
+        thread = threading.Thread(target=_shutdown, daemon=True, name=name)
+        attempt.thread = thread
+        try:
+            thread.start()
+        except BaseException as exc:
+            attempt.errors.append(
+                f"Shutdown thread failed to start: {type(exc).__name__}: {exc}"
+            )
+            attempt.done.set()
+        return attempt
+
+
+def _finalize_successful_generator_dht_shutdown(
+    attempt: _GeneratorDHTShutdownAttempt,
+    result: dict,
+) -> None:
+    """Replace a successful strong owner with an exact weak tombstone."""
+    dht = attempt.dht
+    if dht is None:
+        return
+    attempt_key = id(dht)
+
+    def _discard_tombstone(dht_ref: weakref.ReferenceType) -> None:
+        with _generator_lifecycle_lock:
+            current = _generator_dht_shutdown_attempts.get(attempt_key)
+            if (
+                isinstance(current, _GeneratorDHTShutdownTombstone)
+                and current.dht_ref is dht_ref
+            ):
+                _generator_dht_shutdown_attempts.pop(attempt_key, None)
+
+    try:
+        dht_ref = weakref.ref(dht, _discard_tombstone)
+    except TypeError:
+        try:
+            setattr(
+                dht,
+                _GENERATOR_DHT_TOMBSTONE_ATTRIBUTE,
+                dict(result),
+            )
+        except (AttributeError, TypeError):
+            # An unusual non-weak-referenceable, slot-only object must retain
+            # its exact attempt to keep shutdown idempotent.
+            return
+        with _generator_lifecycle_lock:
+            if _generator_dht_shutdown_attempts.get(attempt_key) is attempt:
+                _generator_dht_shutdown_attempts.pop(attempt_key, None)
+                attempt.dht = None
+        return
+
+    tombstone = _GeneratorDHTShutdownTombstone(
+        dht_ref=dht_ref,
+        result=dict(result),
+    )
+    with _generator_lifecycle_lock:
+        if _generator_dht_shutdown_attempts.get(attempt_key) is attempt:
+            _generator_dht_shutdown_attempts[attempt_key] = tombstone
+            attempt.dht = None
+
+
+def _join_generator_dht_shutdown(
+    dht: object,
+    *,
+    timeout: float,
+    name: str,
+) -> tuple[Optional[_GeneratorDHTShutdownAttempt], dict]:
+    attached_result = getattr(
+        dht,
+        _GENERATOR_DHT_TOMBSTONE_ATTRIBUTE,
+        None,
+    )
+    if (
+        isinstance(attached_result, dict)
+        and attached_result.get("status") == "stopped"
+    ):
+        return None, dict(attached_result)
+
+    entry = _generator_dht_shutdown_attempt(dht, name=name)
+    if isinstance(entry, _GeneratorDHTShutdownTombstone):
+        return None, dict(entry.result)
+    attempt = entry
+    thread = attempt.thread
+    if thread is not None:
+        thread.join(max(0.0, timeout))
+
+    with _generator_lifecycle_lock:
+        pending = bool(thread is not None and thread.is_alive())
+        errors = list(attempt.errors)
+        remote_expert_p2p = attempt.remote_expert_p2p
+    if pending:
+        status = "pending"
+    elif errors:
+        status = "error"
+    else:
+        status = "stopped"
+    result = {
+        "status": status,
+        "remote_expert_p2p": remote_expert_p2p,
+    }
+    if errors:
+        result["error"] = "; ".join(errors)
+    return attempt, result
+
+
+def _shutdown_dht_instance(
+    dht: object,
+    *,
+    timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+    name: str = "client-dht-shutdown",
+) -> dict:
+    attempt, result = _join_generator_dht_shutdown(
+        dht,
+        timeout=timeout,
+        name=name,
+    )
+    if attempt is not None and result["status"] == "stopped":
+        _finalize_successful_generator_dht_shutdown(attempt, result)
+    return result
+
+
+def _close_generator_dht(
+    dht: object,
+    *,
+    timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+    name: str = "client-dht-shutdown",
+) -> dict:
+    global _generator_identity_quarantine
+    attempt, result = _join_generator_dht_shutdown(
+        dht,
+        timeout=timeout,
+        name=name,
+    )
+    if attempt is None:
+        return result
+    with _generator_lifecycle_lock:
+        previously_quarantined = attempt.quarantines_identity
+        attempt.quarantines_identity = result["status"] != "stopped"
+        any_quarantined = any(
+            isinstance(candidate, _GeneratorDHTShutdownAttempt)
+            and candidate.quarantines_identity
+            for candidate in _generator_dht_shutdown_attempts.values()
+        )
+        if attempt.quarantines_identity:
+            _generator_identity_quarantine = _GENERATOR_DHT_QUARANTINE_REASON
+        elif (
+            previously_quarantined
+            and not any_quarantined
+            and _generator_identity_quarantine
+            == _GENERATOR_DHT_QUARANTINE_REASON
+        ):
+            _generator_identity_quarantine = None
+    if result["status"] == "stopped":
+        _finalize_successful_generator_dht_shutdown(attempt, result)
+    return result
 
 
 def _shutdown_client_dht(
     timeout: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
 ) -> Optional[dict]:
-    global client_dht
-    if client_dht is None:
-        return None
-    dht = client_dht
-    client_dht = None
-    cleanup = {"remote_expert_p2p": "not_started"}
+    global client_dht, _pending_generator_cleanup
+    with _generator_lifecycle_lock:
+        if client_dht is None:
+            return None
+        if _pending_generator_cleanup is not None:
+            raise RuntimeError(
+                "Cannot detach another generator DHT while exact cleanup is pending"
+            )
+        dht = client_dht
+        client_dht = None
+    network_supervisor.unregister_role("generator")
+    result = _close_generator_dht(dht, timeout=timeout)
+    if result["status"] != "stopped":
+        with _generator_lifecycle_lock:
+            pending = _pending_generator_cleanup
+            if pending is None:
+                _pending_generator_cleanup = _GeneratorCleanupHandles(
+                    candidate_generator=None,
+                    sequential=None,
+                    dht=dht,
+                    reason=(
+                        "Detached generator DHT cleanup did not complete within "
+                        "its deadline."
+                    ),
+                )
+            elif pending.dht is not dht:
+                logger.error(
+                    "Could not retain detached generator DHT cleanup because "
+                    "another exact cleanup owner is already pending"
+                )
+    return result
 
-    def _shutdown() -> None:
-        cleanup["remote_expert_p2p"] = (
-            "stopped" if shutdown_remote_expert_p2p(dht) else "error"
+
+class _GeneratorStartupCancelled(RuntimeError):
+    pass
+
+
+class _NodeStartupCancelled(RuntimeError):
+    pass
+
+
+def _raise_if_generator_start_cancelled(
+    transaction: _GeneratorStartTransaction,
+    external_cancel: Optional[threading.Event],
+) -> None:
+    if external_cancel is not None and external_cancel.is_set():
+        transaction.cancel_event.set()
+    with _generator_lifecycle_lock:
+        backend_closing = _backend_closing
+    if transaction.cancel_event.is_set():
+        raise _GeneratorStartupCancelled("Generator startup was cancelled.")
+    if backend_closing or not network_supervisor.accepting_roles:
+        transaction.cancel_event.set()
+        raise _GeneratorStartupCancelled(
+            "Generator startup was cancelled because backend shutdown began."
         )
-        dht.shutdown()
 
-    finished = _run_with_timeout("client-dht-shutdown", _shutdown, timeout)
-    return {
-        "status": "stopped" if finished else "timeout",
-        **cleanup,
-    }
+
+async def _await_owned_future(future: asyncio.Future) -> int:
+    """Wait for owned executor work even if the caller is cancelled again."""
+    cancellation_count = 0
+    while not future.done():
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            cancellation_count += 1
+        except BaseException:
+            break
+    if future.done() and not future.cancelled():
+        try:
+            future.result()
+        except BaseException:
+            pass
+    return cancellation_count
+
+
+async def _run_owned_cleanup(target) -> int:
+    loop = asyncio.get_running_loop()
+    future = asyncio.ensure_future(loop.run_in_executor(None, target))
+    return await _await_owned_future(future)
+
+
+def _begin_node_lifecycle_operation(
+    local_node: Node,
+    action: str,
+) -> tuple[Optional[_NodeLifecycleOperation], Optional[dict]]:
+    """Claim one registered node until its method and API state update finish."""
+    node_id = str(local_node.node_id)
+    with _generator_lifecycle_lock:
+        if (
+            local_nodes.get(node_id) is not local_node
+            and not (node is local_node and getattr(node, "node_id", None) == node_id)
+        ):
+            return None, {
+                "status": "not_found",
+                "message": "The selected node was removed before the action began.",
+            }
+        if _backend_closing or not getattr(
+            network_supervisor,
+            "accepting_roles",
+            True,
+        ):
+            return None, {
+                "status": "error",
+                "error": "backend_shutting_down",
+                "message": "The backend network lifecycle is shutting down.",
+            }
+        if action in {"turn_off", "delete"} and _active_generator_start is not None:
+            return None, {
+                "status": "error",
+                "error": "generator_start_in_progress",
+                "message": (
+                    "A generator startup is validating its selected provider route. "
+                    f"Wait for it to finish before {action}."
+                ),
+            }
+        existing = _active_node_operations.get(node_id)
+        shutdown = _local_node_shutdown_attempts.get(node_id)
+        if existing is not None or shutdown is not None:
+            current_action = (
+                existing.action if existing is not None else "backend_shutdown"
+            )
+            return None, {
+                "status": "error",
+                "error": "node_lifecycle_operation_in_progress",
+                "message": (
+                    f"Node {node_id} is already running lifecycle action "
+                    f"{current_action}. Wait for it to finish before {action}."
+                ),
+            }
+        operation = _NodeLifecycleOperation(local_node, action)
+        _active_node_operations[node_id] = operation
+        return operation, None
+
+
+async def _run_node_lifecycle_operation(
+    operation: _NodeLifecycleOperation,
+    target,
+):
+    """Run one exact blocking node action and finish it despite caller cancellation."""
+    loop = asyncio.get_running_loop()
+    future = asyncio.ensure_future(loop.run_in_executor(None, target))
+    operation.future = future
+    cancellation_count = 0
+    try:
+        await asyncio.shield(future)
+    except asyncio.CancelledError:
+        cancellation_count = 1 + await _await_owned_future(future)
+    result = future.result()
+    return result, cancellation_count
+
+
+def _finish_node_lifecycle_operation(
+    operation: _NodeLifecycleOperation,
+) -> None:
+    node_id = str(getattr(operation.node, "node_id", ""))
+    with _generator_lifecycle_lock:
+        if _active_node_operations.get(node_id) is operation:
+            _active_node_operations.pop(node_id, None)
+    operation.done_event.set()
+
+
+async def _run_generator_start_executor_work(
+    transaction: _GeneratorStartTransaction,
+    future_attribute: str,
+    target,
+    *args,
+):
+    """Retain and shield one exact executor future owned by startup."""
+    if getattr(transaction, future_attribute) is not None:
+        raise RuntimeError(
+            f"Generator startup executor work {future_attribute!r} already exists"
+        )
+    loop = asyncio.get_running_loop()
+    future = asyncio.ensure_future(
+        loop.run_in_executor(None, target, *args)
+    )
+    setattr(transaction, future_attribute, future)
+    return await asyncio.shield(future)
+
+
+def _call_with_optional_timeout(target, timeout: float):
+    """Call a lifecycle method with a shared deadline when it supports one."""
+    try:
+        parameters = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "timeout" in parameters:
+        return target(timeout=max(0.0, timeout))
+    return target()
+
+
+def _bind_optional_timeout(target, timeout: float):
+    """Keep legacy no-timeout bound methods visible to executor test/control hooks."""
+    try:
+        parameters = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "timeout" not in parameters:
+        return target
+    return lambda: target(timeout=max(0.0, timeout))
+
+
+async def _rollback_generator_start(
+    transaction: _GeneratorStartTransaction,
+) -> bool:
+    """Release only resources still owned by one uncommitted startup."""
+    global _pending_generator_cleanup
+    cancellation_count = 0
+    cleanup_complete = True
+    for owned_future in (
+        transaction.dht_future,
+        transaction.route_validation_future,
+        transaction.tensor_canary_future,
+        transaction.load_future,
+    ):
+        if owned_future is not None:
+            cancellation_count += await _await_owned_future(owned_future)
+
+    # Cancellation can arrive while DHT construction is still in the executor,
+    # before the startup coroutine records its result. Recover that exact result
+    # after joining so rollback can close the instance it created.
+    dht_future = transaction.dht_future
+    if transaction.candidate_dht is None and dht_future is not None:
+        if dht_future.done() and not dht_future.cancelled():
+            try:
+                transaction.candidate_dht = dht_future.result()
+            except BaseException:
+                # Construction failed without yielding a resource to close.
+                pass
+
+    sequential = transaction.sequential
+    candidate_generator = transaction.candidate_generator
+    if sequential is not None:
+        stop_health_monitor = getattr(sequential, "stop_health_monitor", None)
+        if callable(stop_health_monitor):
+            loop = asyncio.get_running_loop()
+            monitor_future = asyncio.ensure_future(
+                loop.run_in_executor(
+                    None,
+                    lambda: _call_with_optional_timeout(
+                        stop_health_monitor,
+                        DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+                    ),
+                )
+            )
+            cancellation_count += await _await_owned_future(monitor_future)
+            if monitor_future.cancelled():
+                cleanup_complete = False
+            else:
+                try:
+                    cleanup_complete = monitor_future.result() is not False
+                except BaseException as exc:
+                    logger.warning("Failed to stop candidate health monitor: %s", exc)
+                    cleanup_complete = False
+        if cleanup_complete:
+            transaction.sequential = None
+            sequential = None
+
+    if cleanup_complete and candidate_generator is not None:
+        loop = asyncio.get_running_loop()
+        unload_future = asyncio.ensure_future(
+            loop.run_in_executor(
+                None,
+                lambda: _call_with_optional_timeout(
+                    candidate_generator.unload,
+                    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+                ),
+            )
+        )
+        cancellation_count += await _await_owned_future(unload_future)
+        if unload_future.cancelled():
+            cleanup_complete = False
+        else:
+            try:
+                cleanup_complete = unload_future.result() is not False
+            except BaseException as exc:
+                logger.warning("Failed to roll back candidate generator: %s", exc)
+                cleanup_complete = False
+        if cleanup_complete:
+            transaction.candidate_generator = None
+            candidate_generator = None
+
+    candidate_dht = transaction.candidate_dht
+    if cleanup_complete and candidate_dht is not None:
+        loop = asyncio.get_running_loop()
+        dht_future = asyncio.ensure_future(
+            loop.run_in_executor(
+                None,
+                lambda: _close_generator_dht(
+                    candidate_dht,
+                    name="candidate-generator-dht-shutdown",
+                ),
+            )
+        )
+        cancellation_count += await _await_owned_future(dht_future)
+        if dht_future.cancelled():
+            cleanup_complete = False
+        else:
+            try:
+                cleanup_complete = dht_future.result().get("status") == "stopped"
+            except BaseException as exc:
+                logger.warning("Failed to close candidate generator DHT: %s", exc)
+                cleanup_complete = False
+        if cleanup_complete:
+            transaction.candidate_dht = None
+            candidate_dht = None
+
+    if transaction.role_registered:
+        try:
+            network_supervisor.unregister_role("generator")
+        except Exception as exc:
+            logger.warning("Could not unregister candidate generator role: %s", exc)
+        transaction.role_registered = False
+
+    if not cleanup_complete:
+        handles = _GeneratorCleanupHandles(
+            candidate_generator=candidate_generator,
+            sequential=None if candidate_generator is not None else sequential,
+            dht=candidate_dht,
+            reason="Generator startup rollback did not complete within its deadline.",
+        )
+        with _generator_lifecycle_lock:
+            if _pending_generator_cleanup is not None:
+                raise RuntimeError(
+                    "Multiple generator cleanup owners would overlap"
+                )
+            _pending_generator_cleanup = handles
+        transaction.candidate_generator = None
+        transaction.sequential = None
+        transaction.candidate_dht = None
+
+    if cancellation_count:
+        raise asyncio.CancelledError
+    return cleanup_complete
+
+
+def _raise_if_node_start_cancelled(
+    transaction: _NodeStartTransaction,
+    external_cancel: Optional[threading.Event],
+) -> None:
+    if external_cancel is not None and external_cancel.is_set():
+        transaction.cancel_event.set()
+    with _generator_lifecycle_lock:
+        backend_closing = _backend_closing
+    if transaction.cancel_event.is_set():
+        raise _NodeStartupCancelled("Node startup was cancelled.")
+    if backend_closing or not network_supervisor.accepting_roles:
+        transaction.cancel_event.set()
+        raise _NodeStartupCancelled(
+            "Node startup was cancelled because backend shutdown began."
+        )
+
+
+async def _rollback_node_start(transaction: _NodeStartTransaction) -> bool:
+    cancellation_count = 0
+    cleanup_complete = True
+    start_future = transaction.start_future
+    if start_future is not None:
+        cancellation_count += await _await_owned_future(start_future)
+    candidate = transaction.candidate
+    if candidate is not None:
+        loop = asyncio.get_running_loop()
+        cleanup_future = asyncio.ensure_future(
+            loop.run_in_executor(None, lambda: _cleanup_failed_node(candidate))
+        )
+        cancellation_count += await _await_owned_future(cleanup_future)
+        if cleanup_future.cancelled():
+            cleanup_complete = False
+        else:
+            try:
+                cleanup_complete = bool(cleanup_future.result())
+            except BaseException as exc:
+                logger.warning("Failed to clean up candidate node: %s", exc)
+                cleanup_complete = False
+        if cleanup_complete:
+            transaction.candidate = None
+        else:
+            _register_local_node(candidate)
+            try:
+                _runtime_state.record_event(
+                    kind="node",
+                    phase="cleanup_pending",
+                    status="error",
+                    message=(
+                        f"Node {getattr(candidate, 'node_id', 'unknown')} retained "
+                        "runtime handles after bounded startup rollback."
+                    ),
+                    operation_id=transaction.operation_id,
+                )
+            except Exception as exc:
+                logger.warning("Could not record pending node cleanup: %s", exc)
+    if transaction.role_registered:
+        node_id = getattr(candidate, "node_id", None)
+        if node_id is not None:
+            network_supervisor.unregister_role("worker", role_id=node_id)
+        transaction.role_registered = False
+    if cancellation_count:
+        raise asyncio.CancelledError
+    return cleanup_complete
+
+
+async def _cancel_discovery_refresh_tasks() -> None:
+    """Cancel legacy request tasks before network resources are torn down."""
+    global _nodes_refresh_task
+    with _serving_plan_cache_lock:
+        tasks = [
+            task
+            for task in [
+                _nodes_refresh_task,
+                *_serving_plan_refresh_tasks.values(),
+            ]
+            if task is not None and not task.done()
+        ]
+        _nodes_refresh_task = None
+        _serving_plan_refresh_tasks.clear()
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global gpu_monitor, generator
+    global gpu_monitor, _backend_closing
     _validate_environment()
-    gpu_monitor = GPUMonitor(interval=2.0)
-    gpu_monitor.start()
-    logger.info("GPU monitor started.")
-    yield
-    logger.info("Shutting down...")
-    _lifecycle_jobs.cancel_all()
-    if gpu_monitor is not None: gpu_monitor.stop()
-    node_shutdown_results = _shutdown_local_nodes()
-    _cleanup_failed_generator(generator)
-    generator = None
-    client_shutdown_result = _shutdown_client_dht()
-    _runtime_state.transition_generator(
-        "stopped",
-        model_name=None,
-        components_loaded=False,
-        route_ready=False,
-        reasons=["Backend shutdown completed."],
-    )
-    logger.info(
-        "Shutdown cleanup status | local_nodes=%s client_dht=%s",
-        node_shutdown_results,
-        client_shutdown_result,
-    )
-    logger.info("Shutdown complete.")
+    with _generator_lifecycle_lock:
+        if (
+            _active_generator_start is not None
+            or _active_node_starts
+            or _active_node_operations
+            or _local_node_shutdown_attempts
+            or _generator_cleanup_in_progress
+            or _pending_generator_cleanup is not None
+            or generator is not None
+            or client_dht is not None
+            or _local_node_list()
+        ):
+            raise RuntimeError(
+                "Cannot start the backend while runtime cleanup is still active"
+            )
+        _backend_closing = False
+    reopen_admission = getattr(_lifecycle_jobs, "reopen_admission", None)
+    if callable(reopen_admission):
+        reopen_admission()
+    network_supervisor.start()
+    try:
+        gpu_monitor = GPUMonitor(interval=2.0)
+        gpu_monitor.start()
+        logger.info("GPU monitor started.")
+        yield
+    finally:
+        logger.info("Shutting down...")
+        shutdown_deadline = time.monotonic() + DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
+        shutdown_failures: list[str] = []
+
+        def record_shutdown_failure(stage: str, exc: BaseException) -> dict:
+            message = f"{stage} failed during backend shutdown: {exc}"
+            shutdown_failures.append(message)
+            logger.error(message, exc_info=True)
+            return {"status": "error", "error": str(exc)}
+
+        with _generator_lifecycle_lock:
+            _backend_closing = True
+            active_generator_start = _active_generator_start
+            if active_generator_start is not None:
+                active_generator_start.cancel_event.set()
+            active_node_starts = list(_active_node_starts.values())
+            for active_node_start in active_node_starts:
+                active_node_start.cancel_event.set()
+            active_node_operations = list(_active_node_operations.values())
+
+        try:
+            network_supervisor.begin_shutdown()
+        except BaseException as exc:
+            record_shutdown_failure("Network admission closure", exc)
+
+        try:
+            await _cancel_discovery_refresh_tasks()
+        except BaseException as exc:
+            record_shutdown_failure("Discovery refresh cancellation", exc)
+
+        lifecycle_jobs_stopped = False
+        try:
+            cancel_and_wait = getattr(_lifecycle_jobs, "cancel_all_and_wait", None)
+            lifecycle_jobs_stopped = (
+                cancel_and_wait(max(0.0, shutdown_deadline - time.monotonic()))
+                if callable(cancel_and_wait)
+                else (_lifecycle_jobs.cancel_all() or True)
+            )
+        except BaseException as exc:
+            record_shutdown_failure("Lifecycle job cleanup", exc)
+
+        generator_start_stopped = bool(
+            active_generator_start is None
+            or active_generator_start.done_event.wait(
+                max(0.0, shutdown_deadline - time.monotonic())
+            )
+        )
+        node_starts_stopped = True
+        for active_node_start in active_node_starts:
+            if not active_node_start.done_event.wait(
+                max(0.0, shutdown_deadline - time.monotonic())
+            ):
+                node_starts_stopped = False
+
+        node_operations_stopped = True
+        for active_node_operation in active_node_operations:
+            if not active_node_operation.done_event.wait(
+                max(0.0, shutdown_deadline - time.monotonic())
+            ):
+                node_operations_stopped = False
+
+        try:
+            generator_shutdown_result = await _unload_generator_runtime(
+                "Backend shutdown began.",
+                timeout=max(0.0, shutdown_deadline - time.monotonic()),
+            )
+        except BaseException as exc:
+            generator_shutdown_result = record_shutdown_failure(
+                "Generator cleanup",
+                exc,
+            )
+
+        try:
+            node_shutdown_results = _shutdown_local_nodes(
+                max(0.0, shutdown_deadline - time.monotonic())
+            )
+        except BaseException as exc:
+            node_shutdown_results = [record_shutdown_failure("Local node cleanup", exc)]
+
+        try:
+            supervisor_shutdown_result = network_supervisor.stop(
+                max(0.0, shutdown_deadline - time.monotonic())
+            )
+        except BaseException as exc:
+            supervisor_shutdown_result = record_shutdown_failure(
+                "Network supervisor cleanup",
+                exc,
+            )
+
+        if gpu_monitor is not None:
+            try:
+                gpu_monitor.stop()
+            except BaseException as exc:
+                record_shutdown_failure("GPU monitor cleanup", exc)
+
+        with _generator_lifecycle_lock:
+            current_generator_start = _active_generator_start
+            cleanup_in_progress = _generator_cleanup_in_progress
+            cleanup_handles = _pending_generator_cleanup
+            live_generator = generator
+            live_client_dht = client_dht
+            identity_quarantine = _generator_identity_quarantine
+
+        tracked_generator = None
+        if cleanup_handles is not None:
+            tracked_generator = cleanup_handles.candidate_generator
+        if tracked_generator is None:
+            tracked_generator = live_generator
+        if tracked_generator is None and current_generator_start is not None:
+            tracked_generator = current_generator_start.candidate_generator
+
+        previous_generator = _runtime_state.generator_snapshot()
+        tracked_model_name = getattr(
+            tracked_generator,
+            "model_name",
+            previous_generator.get("model_name"),
+        )
+        components_loaded = bool(previous_generator.get("components_loaded"))
+        if tracked_generator is not None:
+            is_loaded = getattr(tracked_generator, "is_loaded", None)
+            try:
+                components_loaded = (
+                    bool(is_loaded()) if callable(is_loaded) else components_loaded
+                )
+            except BaseException as exc:
+                record_shutdown_failure("Generator loaded-state inspection", exc)
+                components_loaded = True
+
+        generator_cleanup_unresolved = bool(
+            current_generator_start is not None
+            or cleanup_in_progress
+            or cleanup_handles is not None
+            or live_generator is not None
+            or live_client_dht is not None
+            or identity_quarantine is not None
+        )
+        generator_cleanup_failed = (
+            isinstance(generator_shutdown_result, dict)
+            and generator_shutdown_result.get("status") == "error"
+        )
+        if generator_cleanup_unresolved:
+            unresolved_reasons = [
+                "Backend shutdown still owns an exact generator startup or cleanup "
+                "handle; cleanup must finish before the runtime can be called stopped."
+            ]
+            unresolved_reasons.extend(shutdown_failures)
+            _runtime_state.transition_generator(
+                "stopping",
+                model_name=tracked_model_name,
+                components_loaded=components_loaded,
+                route_ready=False,
+                reasons=unresolved_reasons,
+            )
+        elif generator_cleanup_failed:
+            _runtime_state.transition_generator(
+                "failed",
+                model_name=tracked_model_name,
+                components_loaded=False,
+                route_ready=False,
+                reasons=shutdown_failures
+                or ["Generator cleanup failed during backend shutdown."],
+            )
+        else:
+            _runtime_state.transition_generator(
+                "stopped",
+                model_name=None,
+                components_loaded=False,
+                route_ready=False,
+                reasons=["Backend shutdown completed."],
+            )
+        logger.info(
+            "Shutdown cleanup status | lifecycle_jobs=%s generator_start=%s "
+            "node_starts=%s node_operations=%s generator=%s local_nodes=%s "
+            "supervisor=%s failures=%s",
+            lifecycle_jobs_stopped,
+            generator_start_stopped,
+            node_starts_stopped,
+            node_operations_stopped,
+            generator_shutdown_result,
+            node_shutdown_results,
+            supervisor_shutdown_result,
+            shutdown_failures,
+        )
+        if generator_cleanup_unresolved or shutdown_failures:
+            logger.warning(
+                "Shutdown finished with unresolved or failed cleanup; retained "
+                "state remains visible in runtime diagnostics."
+            )
+        else:
+            logger.info("Shutdown complete.")
 
 
 app = FastAPI(
@@ -1159,6 +2565,7 @@ async def get_status() -> dict:
         "generator_reasons": generator_status["reasons"],
         "token_set":       token_is_set(),
         "local_models":    list_local_models(),
+        "network":         _network_snapshot(),
     }
 
 
@@ -1172,6 +2579,8 @@ async def get_stats() -> dict:
 @app.get("/nodes")
 async def get_nodes() -> dict:
     global _nodes_refresh_task
+    if _supervisor_active():
+        return _get_nodes_sync()
     now = time.monotonic()
     with _serving_plan_cache_lock:
         cached = _nodes_cache
@@ -1213,6 +2622,22 @@ async def _refresh_nodes_cache() -> None:
 
 
 def _get_nodes_sync() -> dict:
+    supervisor_snapshot = _network_snapshot()
+    if _supervisor_active(supervisor_snapshot):
+        discovered_nodes = _merge_supervisor_and_local_nodes(
+            list(supervisor_snapshot.get("nodes", []))
+        )
+        result = {
+            "nodes": discovered_nodes,
+            **_network_response_fields(supervisor_snapshot),
+        }
+        if supervisor_snapshot.get("state") != "ready":
+            result["warning"] = (
+                "Network discovery is not current; the last-good and local "
+                "provider records are shown."
+            )
+        return result
+
     dht = _active_local_dht() or client_dht
     if dht is None:
         local_infos = _local_node_infos()
@@ -1306,7 +2731,15 @@ def _get_models_sync() -> dict:
         for record in list_local_models()
         if record.get("model_name")
     }
-    dht = _active_local_dht() or client_dht
+    supervisor_snapshot = _network_snapshot()
+    supervisor_nodes = (
+        _merge_supervisor_and_local_nodes(
+            list(supervisor_snapshot.get("nodes", []))
+        )
+        if _supervisor_active(supervisor_snapshot)
+        else None
+    )
+    dht = None if supervisor_nodes is not None else (_active_local_dht() or client_dht)
     active_prefix = _active_dht_prefix()
     models = []
     for model_id, info in SUPPORTED_MODELS.items():
@@ -1315,6 +2748,11 @@ def _get_models_sync() -> dict:
             model_info=info,
             dht=dht,
             dht_prefix=active_prefix,
+            nodes=(
+                [node for node in supervisor_nodes if node.get("model_name") == model_id]
+                if supervisor_nodes is not None
+                else None
+            ),
         )
         models.append({
             "id":           model_id,
@@ -1337,18 +2775,32 @@ def _get_models_sync() -> dict:
             "compatible_nodes": route_status["compatible_nodes"],
             "route_trace": route_status["route_trace"],
         })
-    return {
+    result = {
         "models":          models,
         "token_available": token_available,
         "default_peers":   get_initial_peers(),
     }
+    if supervisor_nodes is not None:
+        result["network"] = supervisor_snapshot
+    return result
 
 
-def _active_serving_nodes(model_id: str, dht_prefix: Optional[str] = None) -> list[dict]:
+def _active_serving_nodes(
+    model_id: str,
+    dht_prefix: Optional[str] = None,
+    *,
+    supervisor_snapshot: Optional[dict] = None,
+) -> list[dict]:
     model_info = SUPPORTED_MODELS[model_id]
     total_layers = int(model_info["num_layers"])
     active_prefix = dht_prefix or _active_dht_prefix()
-    dht = _active_local_dht() or client_dht
+    topology_snapshot = (
+        supervisor_snapshot
+        if supervisor_snapshot is not None
+        else _network_snapshot()
+    )
+    use_supervisor = _supervisor_active(topology_snapshot)
+    dht = None if use_supervisor else (_active_local_dht() or client_dht)
     discovered: list[dict] = []
     sequential = RemoteSequential(
         dht=dht if dht is not None else object(),
@@ -1356,20 +2808,25 @@ def _active_serving_nodes(model_id: str, dht_prefix: Optional[str] = None) -> li
         num_layers=total_layers,
         model_name=model_id,
     )
-    if dht is not None:
+    if use_supervisor:
+        discovered = _merge_supervisor_and_local_nodes(
+            list(topology_snapshot.get("nodes", [])),
+            model_name=model_id,
+        )
+    elif dht is not None:
         try:
             discovered = sequential.get_network_status()["nodes"]
         except Exception as exc:
             logger.warning("Coverage discovery failed for %s: %s", model_id, exc)
 
-    discovered_keys = {_local_node_key(info) for info in discovered}
-    local_infos = [
-        info
-        for info in _local_node_infos()
-        if info.get("model_name") == model_id
-        and _local_node_key(info) not in discovered_keys
-    ]
-    candidates = [*discovered, *local_infos]
+    candidates = (
+        discovered
+        if use_supervisor
+        else _merge_supervisor_and_local_nodes(
+            discovered,
+            model_name=model_id,
+        )
+    )
     valid: list[dict] = []
     for candidate in candidates:
         try:
@@ -1417,6 +2874,23 @@ async def get_model_serving_plan(
 ) -> dict:
     key = (model_id, layer_count)
     now = time.monotonic()
+    supervisor_snapshot = _network_snapshot()
+    if _supervisor_active(supervisor_snapshot):
+        serving_nodes = _active_serving_nodes(
+            model_id,
+            supervisor_snapshot=supervisor_snapshot,
+        )
+        plan = _build_model_serving_plan(
+            model_id,
+            layer_count,
+            serving_nodes=serving_nodes,
+        )
+        with _serving_plan_cache_lock:
+            _serving_plan_cache[key] = (now, plan)
+        return {
+            **plan,
+            **_network_response_fields(supervisor_snapshot),
+        }
     with _serving_plan_cache_lock:
         cached = _serving_plan_cache.get(key)
         refresh_task = _serving_plan_refresh_tasks.get(key)
@@ -1518,6 +2992,7 @@ def _get_model_route_status(
     model_info: dict,
     dht: Optional[hivemind.DHT],
     dht_prefix: str,
+    nodes: Optional[list[dict]] = None,
 ) -> dict:
     total_layers = int(model_info["num_layers"])
     empty_status = {
@@ -1531,22 +3006,39 @@ def _get_model_route_status(
         "route_trace": [],
     }
 
-    if dht is None:
+    if dht is None and nodes is None:
         return {
             **empty_status,
             "reasons": ["No DHT connection yet."],
         }
 
     seq = RemoteSequential(
-        dht=dht,
+        dht=dht if dht is not None else object(),
         dht_prefix=dht_prefix,
         num_layers=total_layers,
         model_name=model_id,
     )
     try:
-        network_status = seq.get_network_status()
-        nodes = network_status["nodes"]
-        route = seq.validate_route(nodes)
+        if nodes is None:
+            network_status = seq.get_network_status()
+            route_nodes = network_status["nodes"]
+        else:
+            route_nodes = [
+                seq._validate_node_metadata(
+                    node,
+                    str(node.get("peer_id", "unknown")),
+                )
+                for node in nodes
+            ]
+            serving_nodes = [node for node in route_nodes if seq._is_serving_node(node)]
+            network_status = {
+                "nodes": route_nodes,
+                **seq._check_coverage(serving_nodes),
+            }
+            network_status["covered_layers"] = len(network_status["covered"])
+            network_status["missing_layers"] = network_status["missing"]
+            route_nodes = serving_nodes
+        route = seq.validate_route(route_nodes)
         return {
             "runnable": True,
             "route_ready": True,
@@ -1559,14 +3051,27 @@ def _get_model_route_status(
         }
     except Exception as e:
         try:
-            network_status = seq.get_network_status()
-            nodes = network_status["nodes"]
+            if nodes is None:
+                network_status = seq.get_network_status()
+                status_nodes = network_status["nodes"]
+            else:
+                status_nodes = [
+                    node for node in nodes if node.get("model_name") == model_id
+                ]
+                serving_nodes = [
+                    node for node in status_nodes if seq._is_serving_node(node)
+                ]
+                coverage = seq._check_coverage(serving_nodes)
+                network_status = {
+                    "covered_layers": len(coverage["covered"]),
+                    "missing_layers": coverage["missing"],
+                }
             return {
                 **empty_status,
                 "reasons": [str(e)],
                 "covered_layers": network_status["covered_layers"],
                 "missing_layers": network_status["missing_layers"],
-                "compatible_nodes": len(nodes),
+                "compatible_nodes": len(status_nodes),
             }
         except Exception as status_error:
             return {
@@ -1987,6 +3492,36 @@ async def validate_token(req: TokenValidationRequest) -> dict:
 
 @app.post("/node/start")
 async def start_node(req: NodeStartRequest) -> dict:
+    return await _start_node_runtime(req)
+
+
+async def _start_node_runtime(
+    req: NodeStartRequest,
+    *,
+    external_cancel: Optional[threading.Event] = None,
+) -> dict:
+    global _active_node_starts
+    supervisor_snapshot = _network_snapshot()
+    with _generator_lifecycle_lock:
+        backend_closing = _backend_closing
+    if backend_closing or not network_supervisor.accepting_roles:
+        return {
+            "status": "error",
+            "error": "backend_shutting_down",
+            "message": "The backend network lifecycle is shutting down.",
+        }
+    if (
+        _supervisor_active(supervisor_snapshot)
+        and req.dht_prefix != network_supervisor.dht_prefix
+    ):
+        return {
+            "status": "error",
+            "error": "network_prefix_mismatch",
+            "message": (
+                f"This backend supervises DHT prefix {network_supervisor.dht_prefix!r}; "
+                f"the request used {req.dht_prefix!r}."
+            ),
+        }
     existing_prefixes = {local_node.dht_prefix for local_node in _local_node_list()}
     if existing_prefixes and req.dht_prefix not in existing_prefixes:
         return {
@@ -2014,29 +3549,40 @@ async def start_node(req: NodeStartRequest) -> dict:
             },
         )
 
-    serving_nodes = _active_serving_nodes(req.model_name, req.dht_prefix)
-    fresh_plan = {
+    serving_nodes = _active_serving_nodes(
+        req.model_name,
+        req.dht_prefix,
+        supervisor_snapshot=supervisor_snapshot,
+    )
+    plan_network_fields = (
+        _network_response_fields(supervisor_snapshot)
+        if _supervisor_active(supervisor_snapshot)
+        else {
+            "snapshot_stale": False,
+            "refreshing": False,
+            "snapshot_source": "validated_dht",
+            "snapshot_age_seconds": 0.0,
+        }
+    )
+    current_plan = {
         **_build_model_serving_plan(
             req.model_name,
             req.layer_end - req.layer_start,
             req.dht_prefix,
             serving_nodes,
         ),
-        "snapshot_stale": False,
-        "refreshing": False,
-        "snapshot_source": "validated_dht",
-        "snapshot_age_seconds": 0.0,
+        **plan_network_fields,
     }
     if (
         req.coverage_revision is not None
-        and req.coverage_revision != fresh_plan["coverage_revision"]
+        and req.coverage_revision != current_plan["coverage_revision"]
     ):
         raise HTTPException(
             status_code=409,
             detail={
                 "error": "coverage_revision_stale",
-                "message": "Layer coverage changed. Review the fresh serving plan.",
-                "plan": fresh_plan,
+                "message": "Layer coverage changed. Review the current serving plan.",
+                "plan": current_plan,
             },
         )
 
@@ -2047,7 +3593,7 @@ async def start_node(req: NodeStartRequest) -> dict:
         req.layer_end,
     )
     if (
-        fresh_plan["missing_ranges"]
+        current_plan["missing_ranges"]
         and candidate["newly_covered_layers"] == 0
         and not candidate["completes_route"]
         and not req.confirm_redundancy
@@ -2060,7 +3606,7 @@ async def start_node(req: NodeStartRequest) -> dict:
                     f"Layers {req.layer_start}-{req.layer_end} add redundancy while "
                     "the model still has route gaps. Confirm to continue."
                 ),
-                "plan": fresh_plan,
+                "plan": current_plan,
             },
         )
 
@@ -2102,9 +3648,11 @@ async def start_node(req: NodeStartRequest) -> dict:
         }
 
     # Use default peers if none provided
-    peers = req.initial_peers or get_initial_peers()
-    rpc_uid_suffix = _next_rpc_uid_suffix(req)
+    peers = _role_initial_peers(req.initial_peers)
+    rpc_uid_suffix = None
     local_node = None
+    operation_id = str(uuid4())
+    transaction: Optional[_NodeStartTransaction] = None
 
     try:
         local_node = Node(
@@ -2116,32 +3664,180 @@ async def start_node(req: NodeStartRequest) -> dict:
             device=req.device,
             hf_token=None,
             local_model_path=local_model_path,
+            publication_verifier=network_supervisor.verify_publication,
         )
-        local_node.rpc_uid_suffix = rpc_uid_suffix
+
+        with _generator_lifecycle_lock:
+            if _backend_closing or not network_supervisor.accepting_roles:
+                return {
+                    "status": "error",
+                    "error": "backend_shutting_down",
+                    "message": "The backend network lifecycle is shutting down.",
+                }
+            for active_start in _active_node_starts.values():
+                active_candidate = active_start.candidate
+                if active_candidate is None:
+                    continue
+                if (
+                    getattr(active_candidate, "model_name", None) == req.model_name
+                    and getattr(active_candidate, "dht_prefix", None) == req.dht_prefix
+                    and req.layer_start
+                    < int(getattr(active_candidate, "layer_end", req.layer_start))
+                    and req.layer_end
+                    > int(getattr(active_candidate, "layer_start", req.layer_end))
+                ):
+                    return {
+                        "status": "error",
+                        "error": "node_start_in_progress",
+                        "message": (
+                            "Another local node startup already owns an overlapping "
+                            "layer range. Wait for it to finish before retrying."
+                        ),
+                    }
+            committed_overlap = _has_overlapping_local_node(req)
+            if committed_overlap is not None:
+                return {
+                    "status": "error",
+                    "error": "overlapping_layer_range",
+                    "message": (
+                        f"Requested layers {req.layer_start}-{req.layer_end} overlap "
+                        f"existing local node {committed_overlap.layer_start}-"
+                        f"{committed_overlap.layer_end}. Use a non-overlapping slice."
+                    ),
+                }
+            committed_replicas = _matching_local_replicas(req)
+            if committed_replicas and not req.confirm_local_replica:
+                return {
+                    "status": "error",
+                    "error": "local_replica_confirmation_required",
+                    "message": (
+                        "A matching local replica committed while this request was "
+                        "being validated. Confirm the additional replica and retry."
+                    ),
+                }
+            rpc_uid_suffix = _next_rpc_uid_suffix(req)
+            local_node.rpc_uid_suffix = rpc_uid_suffix
+            transaction = _NodeStartTransaction(
+                operation_id=operation_id,
+                candidate=local_node,
+            )
+            _active_node_starts[operation_id] = transaction
+
+        _raise_if_node_start_cancelled(transaction, external_cancel)
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, local_node.start)
+        start_future = asyncio.ensure_future(
+            loop.run_in_executor(None, local_node.start)
+        )
+        transaction.start_future = start_future
+        await asyncio.shield(start_future)
+        _raise_if_node_start_cancelled(transaction, external_cancel)
         if not local_node.is_running():
             raise RuntimeError("node.start() completed but is_running() is False")
-        _register_local_node(local_node)
+
+        with _generator_lifecycle_lock:
+            if external_cancel is not None and external_cancel.is_set():
+                transaction.cancel_event.set()
+            if (
+                _backend_closing
+                or transaction.cancel_event.is_set()
+                or not network_supervisor.accepting_roles
+            ):
+                raise _NodeStartupCancelled(
+                    "Node startup was cancelled before runtime commit."
+                )
+            committed_overlap = _has_overlapping_local_node(req)
+            if committed_overlap is not None:
+                raise RuntimeError(
+                    f"Requested layers {req.layer_start}-{req.layer_end} now overlap "
+                    f"local node {committed_overlap.layer_start}-"
+                    f"{committed_overlap.layer_end}; startup was rolled back."
+                )
+            if _matching_local_replicas(req) and not req.confirm_local_replica:
+                raise RuntimeError(
+                    "A matching local replica committed during startup; confirm the "
+                    "additional replica and retry."
+                )
+            transaction.role_registered = True
+            _register_network_worker(local_node, "ready")
+            _register_local_node(local_node)
+            transaction.committed = True
+            transaction.candidate = None
+            transaction.role_registered = False
+
         _invalidate_serving_plan_cache(req.model_name)
-        _runtime_state.record_event(
-            kind="node",
-            phase="ready",
-            status="info",
-            message=(
-                f"Node {local_node.node_id} is serving {req.model_name} "
-                f"layers {req.layer_start}-{req.layer_end}."
-            ),
-            details=local_node.get_info(),
-        )
+        try:
+            _runtime_state.record_event(
+                kind="node",
+                phase="ready",
+                status="info",
+                message=(
+                    f"Node {local_node.node_id} is serving {req.model_name} "
+                    f"layers {req.layer_start}-{req.layer_end}."
+                ),
+                operation_id=operation_id,
+                details=local_node.get_info(),
+            )
+        except Exception as exc:
+            logger.warning("Could not record node-ready event: %s", exc)
         return {"status": "started", "info": local_node.get_info()}
 
+    except _NodeStartupCancelled as e:
+        cleanup_complete = True
+        if transaction is not None and not transaction.committed:
+            cleanup_complete = await _rollback_node_start(transaction)
+        try:
+            _runtime_state.record_event(
+                kind="node",
+                phase="cancelled" if cleanup_complete else "cleanup_pending",
+                status="info" if cleanup_complete else "error",
+                message=str(e),
+                operation_id=operation_id,
+            )
+        except Exception as exc:
+            logger.warning("Could not record node cancellation: %s", exc)
+        if not cleanup_complete:
+            return {
+                "status": "cleanup_pending",
+                "message": (
+                    f"{e} The candidate still owns runtime handles; retry Delete."
+                ),
+            }
+        return {"status": "cancelled", "message": str(e)}
+    except asyncio.CancelledError:
+        if transaction is not None:
+            transaction.cancel_event.set()
+            if not transaction.committed:
+                try:
+                    await _rollback_node_start(transaction)
+                except asyncio.CancelledError:
+                    pass
+        raise
     except AssertionError as e:
-        _cleanup_failed_node(local_node)
+        cleanup_complete = True
+        if transaction is not None and not transaction.committed:
+            cleanup_complete = await _rollback_node_start(transaction)
+        elif transaction is None:
+            cleanup_complete = _cleanup_failed_node(local_node)
+        if not cleanup_complete:
+            return {
+                "status": "cleanup_pending",
+                "error": str(e),
+                "message": "Node startup failed and cleanup is still pending.",
+            }
         return {"status": "error", "error": str(e)}
     except Exception as e:
         logger.error(f"Node start failed: {e}", exc_info=True)
-        _cleanup_failed_node(local_node)
+        cleanup_complete = True
+        if transaction is not None and not transaction.committed:
+            cleanup_complete = await _rollback_node_start(transaction)
+        elif transaction is None:
+            cleanup_complete = _cleanup_failed_node(local_node)
+        if not cleanup_complete:
+            return {
+                "status": "cleanup_pending",
+                "error": str(e),
+                "message": "Node startup failed and cleanup is still pending.",
+            }
         if _is_cuda_out_of_memory(e):
             return _cuda_memory_error_response(
                 req.model_name,
@@ -2151,6 +3847,12 @@ async def start_node(req: NodeStartRequest) -> dict:
         if _is_huggingface_auth_expired(e):
             return _huggingface_reconnect_response(req.model_name)
         return {"status": "error", "error": str(e)}
+    finally:
+        if transaction is not None:
+            with _generator_lifecycle_lock:
+                if _active_node_starts.get(operation_id) is transaction:
+                    _active_node_starts.pop(operation_id, None)
+            transaction.done_event.set()
 
 
 @app.post("/node/start-async", status_code=202)
@@ -2165,14 +3867,21 @@ async def start_node_async(req: NodeStartRequest) -> dict:
             return {"status": "cancelled"}
         progress("loading", "Establishing transport and loading model layers.")
         try:
-            result = asyncio.run(start_node(req))
+            result = asyncio.run(
+                _start_node_runtime(req, external_cancel=cancelled)
+            )
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
             result = {"status": "error", **detail}
         if cancelled.is_set() and result.get("status") == "started":
-            node_id = (result.get("info") or {}).get("node_id")
-            asyncio.run(delete_node(node_id))
-            return {"status": "cancelled"}
+            return {
+                **result,
+                "cancel_requested": True,
+                "message": (
+                    "Cancellation arrived after the node committed. The node remains "
+                    "registered; use Turn Off or Delete explicitly if it is unwanted."
+                ),
+            }
         return result
 
     return _lifecycle_jobs.submit("node_start", resource_key, target)
@@ -2186,12 +3895,21 @@ async def turn_on_node(node_id: Optional[str] = None) -> dict:
         return {"status": "error", "error": str(e)}
     if local_node is None:
         return {"status": "not_found"}
-    if local_node.is_running():
-        return {"status": "already_running", "info": local_node.get_info()}
+    operation, conflict = _begin_node_lifecycle_operation(local_node, "turn_on")
+    if conflict is not None:
+        return conflict
+    assert operation is not None
     try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, local_node.start)
+        if local_node.is_running():
+            return {"status": "already_running", "info": local_node.get_info()}
+        _result, cancellation_count = await _run_node_lifecycle_operation(
+            operation,
+            local_node.start,
+        )
+        _register_network_worker(local_node, "ready")
         _invalidate_serving_plan_cache(local_node.model_name)
+        if cancellation_count:
+            raise asyncio.CancelledError
         return {"status": "turned_on", "info": local_node.get_info()}
     except Exception as e:
         logger.error(f"Node turn-on failed: {e}", exc_info=True)
@@ -2202,6 +3920,8 @@ async def turn_on_node(node_id: Optional[str] = None) -> dict:
                 layer_end=local_node.layer_end,
             )
         return {"status": "error", "error": str(e)}
+    finally:
+        _finish_node_lifecycle_operation(operation)
 
 
 @app.post("/node/turn-off")
@@ -2212,25 +3932,75 @@ async def turn_off_node(node_id: Optional[str] = None) -> dict:
         return {"status": "error", "error": str(e)}
     if local_node is None:
         return {"status": "not_found"}
-    if not local_node.is_running():
-        return {"status": "already_off", "info": local_node.get_info()}
+    operation, conflict = _begin_node_lifecycle_operation(local_node, "turn_off")
+    if conflict is not None:
+        return conflict
+    assert operation is not None
     try:
-        dependency = _generator_dependency(local_node)
-        if dependency.get("required") and generator is not None:
-            generator.request_stop()
-            _runtime_state.transition_generator(
-                "suspended",
-                model_name=generator.model_name,
-                components_loaded=True,
-                route_ready=False,
-                reasons=[
-                    "A required local serving node was turned off. "
-                    "Restore complete RPC-healthy coverage before generating."
-                ],
-                health=dependency.get("health"),
+        requires_turn_off_getter = getattr(
+            local_node,
+            "requires_turn_off",
+            None,
+        )
+        if callable(requires_turn_off_getter):
+            requires_turn_off = bool(requires_turn_off_getter())
+        else:
+            pending_cleanup_getter = getattr(
+                local_node,
+                "has_pending_serving_cleanup",
+                None,
             )
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, local_node.turn_off)
+            pending_cleanup = bool(
+                pending_cleanup_getter()
+                if callable(pending_cleanup_getter)
+                else False
+            )
+            requires_turn_off = bool(
+                local_node.is_running() or pending_cleanup
+            )
+        if not requires_turn_off:
+            return {"status": "already_off", "info": local_node.get_info()}
+        dependency = _generator_dependency(local_node)
+        generator_owner = dependency.get("generator_owner")
+        if dependency.get("required") and generator_owner is not None:
+            with _generator_lifecycle_lock:
+                if (
+                    generator is generator_owner
+                    and not _generator_cleanup_in_progress
+                    and _pending_generator_cleanup is None
+                ):
+                    generator_owner.request_stop()
+                    _runtime_state.transition_generator(
+                        "suspended",
+                        model_name=generator_owner.model_name,
+                        components_loaded=True,
+                        route_ready=False,
+                        reasons=[
+                            "A required local serving node was turned off. "
+                            "Restore complete RPC-healthy coverage before generating."
+                        ],
+                        health=dependency.get("health"),
+                    )
+        stopped, cancellation_count = await _run_node_lifecycle_operation(
+            operation,
+            local_node.turn_off,
+        )
+        if stopped is False:
+            try:
+                _register_network_worker(local_node, "cleanup_pending")
+            except Exception as exc:
+                logger.warning("Could not synchronize pending node cleanup: %s", exc)
+            if cancellation_count:
+                raise asyncio.CancelledError
+            return {
+                "status": "cleanup_pending",
+                "message": (
+                    "The node stopped accepting work, but one owned network "
+                    "handle is still shutting down. Retry Turn Off or Delete."
+                ),
+                "info": local_node.get_info(),
+            }
+        _register_network_worker(local_node, "stopped")
         _invalidate_serving_plan_cache(local_node.model_name)
         _runtime_state.record_event(
             kind="node",
@@ -2239,10 +4009,14 @@ async def turn_off_node(node_id: Optional[str] = None) -> dict:
             message=f"Node {local_node.node_id} stopped serving.",
             details={"generator_suspended": bool(dependency.get("required"))},
         )
+        if cancellation_count:
+            raise asyncio.CancelledError
         return {"status": "turned_off", "info": local_node.get_info()}
     except Exception as e:
         logger.error(f"Node turn-off failed: {e}", exc_info=True)
         return {"status": "error", "error": str(e)}
+    finally:
+        _finish_node_lifecycle_operation(operation)
 
 
 @app.delete("/node")
@@ -2256,6 +4030,10 @@ async def delete_node(
         return {"status": "error", "error": str(e)}
     if local_node is None:
         return {"status": "not_found"}
+    operation, conflict = _begin_node_lifecycle_operation(local_node, "delete")
+    if conflict is not None:
+        return conflict
+    assert operation is not None
     try:
         dependency = _generator_dependency(local_node)
         if dependency.get("required") and not confirm_generator_stop:
@@ -2273,7 +4051,26 @@ async def delete_node(
             generator_result = await _unload_generator_runtime(
                 "A required local serving node was deleted."
             )
-        await asyncio.to_thread(local_node.stop)
+        stopped, cancellation_count = await _run_node_lifecycle_operation(
+            operation,
+            local_node.stop,
+        )
+        if stopped is False:
+            try:
+                _register_network_worker(local_node, "cleanup_pending")
+            except Exception as exc:
+                logger.warning("Could not synchronize pending node cleanup: %s", exc)
+            if cancellation_count:
+                raise asyncio.CancelledError
+            return {
+                "status": "cleanup_pending",
+                "message": (
+                    "The node stopped accepting work, but cleanup is still in "
+                    "progress. Retry Delete before starting a replacement."
+                ),
+                "info": local_node.get_info(),
+                "generator": generator_result,
+            }
         _unregister_local_node(local_node)
         _invalidate_serving_plan_cache(local_node.model_name)
         _runtime_state.record_event(
@@ -2283,10 +4080,14 @@ async def delete_node(
             message=f"Node {local_node.node_id} was deleted.",
             details={"generator": generator_result},
         )
+        if cancellation_count:
+            raise asyncio.CancelledError
         return {"status": "deleted", "generator": generator_result}
     except Exception as e:
         logger.error(f"Node delete failed: {e}", exc_info=True)
         return {"status": "error", "error": str(e)}
+    finally:
+        _finish_node_lifecycle_operation(operation)
 
 
 @app.post("/node/stop")
@@ -2306,8 +4107,59 @@ async def stop_node(node_id: Optional[str] = None) -> dict:
 
 @app.post("/generator/start")
 async def start_generator(req: GeneratorStartRequest) -> dict:
-    global generator, client_dht, client_dht_prefix
+    return await _start_generator_runtime(req)
+
+
+async def _start_generator_runtime(
+    req: GeneratorStartRequest,
+    *,
+    external_cancel: Optional[threading.Event] = None,
+) -> dict:
+    global generator, client_dht, client_dht_prefix, _active_generator_start
     startup_started_at = time.perf_counter()
+    supervisor_snapshot = _network_snapshot()
+    with _generator_lifecycle_lock:
+        backend_closing = _backend_closing
+        cleanup_in_progress = _generator_cleanup_in_progress
+        cleanup_pending = _pending_generator_cleanup is not None
+        quarantine_reason = _generator_identity_quarantine
+    if backend_closing or not network_supervisor.accepting_roles:
+        return {
+            "status": "error",
+            "error": "backend_shutting_down",
+            "message": "The backend network lifecycle is shutting down.",
+        }
+    if (
+        _supervisor_active(supervisor_snapshot)
+        and req.dht_prefix != network_supervisor.dht_prefix
+    ):
+        return {
+            "status": "error",
+            "error": "network_prefix_mismatch",
+            "message": (
+                f"This backend supervises DHT prefix {network_supervisor.dht_prefix!r}; "
+                f"the request used {req.dht_prefix!r}."
+            ),
+        }
+    if cleanup_in_progress or cleanup_pending:
+        return {
+            "status": "error",
+            "error": (
+                "generator_cleanup_in_progress"
+                if cleanup_in_progress
+                else "generator_cleanup_pending"
+            ),
+            "message": (
+                "The previous generator runtime still owns resources. Retry "
+                "Unload before starting a replacement."
+            ),
+        }
+    if quarantine_reason is not None:
+        return {
+            "status": "error",
+            "error": "generator_identity_quarantined",
+            "message": quarantine_reason,
+        }
 
     model_info = SUPPORTED_MODELS[req.model_name]
     try:
@@ -2335,51 +4187,167 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         }
 
     peers = _generator_initial_peers(
-        req.initial_peers or get_initial_peers(),
+        _role_initial_peers(req.initial_peers),
         req.model_name,
         req.dht_prefix,
     )
-    if generator is not None and generator.is_loaded():
-        status = await get_generator_status()
+    if not _generator_start_lock.acquire(blocking=False):
         return {
-            "status": "already_ready" if status["ready"] else "suspended",
-            "message": (
-                "Unload the current generator before starting another model."
-                if generator.model_name != req.model_name
-                else "The generator is already loaded."
-            ),
-            "generator": status,
+            "status": "error",
+            "error": "generator_start_in_progress",
+            "message": "Another generator startup is already in progress.",
         }
 
     operation_id = str(uuid4())
-    _runtime_state.transition_generator(
-        "starting",
-        model_name=req.model_name,
-        components_loaded=False,
-        route_ready=False,
-        reasons=["Starting the generator network client."],
-    )
-    sequential: Optional[RemoteSequential] = None
+    transaction: Optional[_GeneratorStartTransaction] = None
     try:
+        with _generator_lifecycle_lock:
+            if _backend_closing or not network_supervisor.accepting_roles:
+                return {
+                    "status": "error",
+                    "error": "backend_shutting_down",
+                    "message": "The backend network lifecycle is shutting down.",
+                }
+            if (
+                _generator_cleanup_in_progress
+                or _pending_generator_cleanup is not None
+            ):
+                return {
+                    "status": "error",
+                    "error": (
+                        "generator_cleanup_in_progress"
+                        if _generator_cleanup_in_progress
+                        else "generator_cleanup_pending"
+                    ),
+                    "message": (
+                        "The previous generator runtime still owns resources. "
+                        "Retry Unload before starting a replacement."
+                    ),
+                }
+            if _generator_identity_quarantine is not None:
+                return {
+                    "status": "error",
+                    "error": "generator_identity_quarantined",
+                    "message": _generator_identity_quarantine,
+                }
+            if _active_generator_start is not None:
+                return {
+                    "status": "error",
+                    "error": "generator_start_in_progress",
+                    "message": "Another generator startup is already in progress.",
+                }
+            destructive_node_operation = next(
+                (
+                    operation
+                    for operation in _active_node_operations.values()
+                    if operation.action in {"turn_off", "delete"}
+                ),
+                None,
+            )
+            if destructive_node_operation is not None:
+                return {
+                    "status": "error",
+                    "error": "node_lifecycle_operation_in_progress",
+                    "message": (
+                        "A local provider is being turned off or deleted. Wait for "
+                        "that exact lifecycle operation before starting the generator."
+                    ),
+                }
+            existing_generator = (
+                generator
+                if generator is not None and generator.is_loaded()
+                else None
+            )
+            if existing_generator is None:
+                transaction = _GeneratorStartTransaction(operation_id)
+                _active_generator_start = transaction
+
+        if existing_generator is not None:
+            status = await get_generator_status()
+            return {
+                "status": "already_ready" if status["ready"] else "suspended",
+                "message": (
+                    "Unload the current generator before starting another model."
+                    if existing_generator.model_name != req.model_name
+                    else "The generator is already loaded."
+                ),
+                "generator": status,
+            }
+
+        assert transaction is not None
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
+        _runtime_state.transition_generator(
+            "starting",
+            model_name=req.model_name,
+            components_loaded=False,
+            route_ready=False,
+            reasons=["Starting the generator network client."],
+        )
         _cleanup_failed_generator(generator)
         generator = None
         _shutdown_client_dht()
 
-        client_dht = hivemind.DHT(**_generator_dht_kwargs(peers))
-        if client_dht.peer_id is None:
-            raise RuntimeError("Generator DHT started but peer_id is None")
-        client_dht_prefix = req.dht_prefix
+        if _generator_identity_quarantine is not None:
+            raise RuntimeError(_generator_identity_quarantine)
+        dht_kwargs = _generator_dht_kwargs(peers)
 
+        def construct_candidate_dht():
+            return hivemind.DHT(**dht_kwargs)
+
+        candidate_dht = await _run_generator_start_executor_work(
+            transaction,
+            "dht_future",
+            construct_candidate_dht,
+        )
+        transaction.candidate_dht = candidate_dht
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
+        if candidate_dht.peer_id is None:
+            raise RuntimeError("Generator DHT started but peer_id is None")
+        generator_peer_id = str(candidate_dht.peer_id)
+        role_peer_ids = {
+            str(peer_id)
+            for peer_id in [
+                supervisor_snapshot.get("control_peer_id"),
+                *(local_node.get_peer_id() for local_node in _local_node_list()),
+            ]
+            if peer_id
+        }
+        if generator_peer_id in role_peer_ids:
+            raise RuntimeError(
+                "Generator P2P identity collides with a control-plane or worker peer"
+            )
+        if _supervisor_active():
+            transaction.role_registered = True
+            network_supervisor.register_role(
+                "generator",
+                peer_id=generator_peer_id,
+                state="starting",
+            )
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
+
+        sequential_kwargs = {}
+        try:
+            sequential_parameters = inspect.signature(RemoteSequential).parameters
+        except (TypeError, ValueError):
+            sequential_parameters = {}
+        if "topology_provider" in sequential_parameters and _supervisor_active():
+            sequential_kwargs["topology_provider"] = (
+                lambda: _generator_topology_nodes(req.model_name)
+            )
         sequential = RemoteSequential(
-            dht=client_dht,
+            dht=candidate_dht,
             dht_prefix=req.dht_prefix,
             num_layers=model_info["num_layers"],
             model_name=req.model_name,
+            **sequential_kwargs,
         )
+        transaction.sequential = sequential
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
 
         start_health_monitor = getattr(sequential, "start_health_monitor", None)
         if callable(start_health_monitor):
             start_health_monitor()
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
 
         _runtime_state.transition_generator(
             "validating_route",
@@ -2395,6 +4363,7 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         deadline = time.monotonic() + route_timeout
         readiness: Optional[dict] = None
         while True:
+            _raise_if_generator_start_cancelled(transaction, external_cancel)
             health_getter = getattr(sequential, "get_health_readiness", None)
             if callable(health_getter):
                 readiness = health_getter()
@@ -2412,7 +4381,11 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
                 continue
             route_validator = getattr(sequential, "validate_reachable_route", None)
             if callable(route_validator):
-                route = await asyncio.to_thread(route_validator)
+                route = await _run_generator_start_executor_work(
+                    transaction,
+                    "route_validation_future",
+                    route_validator,
+                )
                 readiness = {"route_ready": True, "selected_route": route}
             else:
                 readiness = {
@@ -2422,9 +4395,12 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
                 }
             break
 
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
         canary_validator = getattr(sequential, "validate_tensor_route", None)
         if callable(canary_validator):
-            canary = await asyncio.to_thread(
+            canary = await _run_generator_start_executor_work(
+                transaction,
+                "tensor_canary_future",
                 canary_validator,
                 int(model_info["hidden_size"]),
             )
@@ -2434,6 +4410,7 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
                 "skipped": True,
                 "reason": "Legacy sequential implementation has no tensor canary.",
             }
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
 
         _runtime_state.transition_generator(
             "loading",
@@ -2446,7 +4423,7 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
             canary=canary,
         )
 
-        generator = DistributedGenerator(
+        candidate_generator = DistributedGenerator(
             model_name=req.model_name,
             sequential=sequential,
             hf_token=None,
@@ -2454,10 +4431,17 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
             device="cuda"if torch.cuda.is_available() else "cpu",
             dtype= torch.float16 if torch.cuda.is_available() else torch.float32,
         )
+        transaction.candidate_generator = candidate_generator
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, generator.load)
-        if not generator.is_loaded():
+        load_future = asyncio.ensure_future(
+            loop.run_in_executor(None, candidate_generator.load)
+        )
+        transaction.load_future = load_future
+        await asyncio.shield(load_future)
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
+        if not candidate_generator.is_loaded():
             raise RuntimeError("generator.load() completed but is_loaded() is False")
 
         final_readiness = readiness
@@ -2471,48 +4455,195 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
                         str(reason) for reason in final_readiness.get("reasons", [])
                     )
                 )
+        selected_local_route_nodes = [
+            local_node
+            for local_node in _local_node_list()
+            if _route_contains_local_node(
+                final_readiness.get("selected_route", []),
+                local_node,
+            )
+        ]
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
 
         startup_duration_ms = (time.perf_counter() - startup_started_at) * 1000
-        set_startup_duration = getattr(generator, "set_startup_duration_ms", None)
+        set_startup_duration = getattr(
+            candidate_generator,
+            "set_startup_duration_ms",
+            None,
+        )
         if callable(set_startup_duration):
             set_startup_duration(startup_duration_ms)
-        _runtime_state.transition_generator(
-            "ready",
-            model_name=req.model_name,
-            components_loaded=True,
-            route_ready=True,
-            reasons=[],
-            node_trace=_format_route_trace(final_readiness.get("selected_route", [])),
-            health=final_readiness,
-            canary=canary,
+        performance = (
+            candidate_generator.get_performance_snapshot()
+            if hasattr(candidate_generator, "get_performance_snapshot")
+            else {"startup_duration_ms": startup_duration_ms}
         )
-        _runtime_state.record_event(
-            kind="generator",
-            phase="ready",
-            status="info",
-            message=f"Generator for {req.model_name} passed route and tensor validation.",
-            operation_id=operation_id,
-            details={"startup_duration_ms": startup_duration_ms, "canary": canary},
-        )
+        _raise_if_generator_start_cancelled(transaction, external_cancel)
+
+        with _generator_lifecycle_lock:
+            if external_cancel is not None and external_cancel.is_set():
+                transaction.cancel_event.set()
+            if (
+                _backend_closing
+                or transaction.cancel_event.is_set()
+                or not network_supervisor.accepting_roles
+            ):
+                raise _GeneratorStartupCancelled(
+                    "Generator startup was cancelled before runtime commit."
+                )
+            if any(
+                operation.action in {"turn_off", "delete"}
+                for operation in _active_node_operations.values()
+            ):
+                raise _GeneratorStartupCancelled(
+                    "A selected provider lifecycle changed before generator commit."
+                )
+            unavailable_local_nodes = [
+                local_node.node_id
+                for local_node in selected_local_route_nodes
+                if (
+                    local_nodes.get(local_node.node_id) is not local_node
+                    and not (node is local_node and node.node_id == local_node.node_id)
+                )
+                or not local_node.is_running()
+            ]
+            if unavailable_local_nodes:
+                raise _GeneratorStartupCancelled(
+                    "Selected local provider(s) became unavailable before generator "
+                    f"commit: {', '.join(unavailable_local_nodes)}"
+                )
+            if transaction.role_registered:
+                network_supervisor.register_role(
+                    "generator",
+                    peer_id=generator_peer_id,
+                    state="ready",
+                )
+                if (
+                    _backend_closing
+                    or transaction.cancel_event.is_set()
+                    or not network_supervisor.accepting_roles
+                ):
+                    raise _GeneratorStartupCancelled(
+                        "Generator startup was cancelled during runtime commit."
+                    )
+            try:
+                generator = candidate_generator
+                client_dht = candidate_dht
+                client_dht_prefix = req.dht_prefix
+                _runtime_state.transition_generator(
+                    "ready",
+                    model_name=req.model_name,
+                    components_loaded=True,
+                    route_ready=True,
+                    reasons=[],
+                    node_trace=_format_route_trace(
+                        final_readiness.get("selected_route", [])
+                    ),
+                    health=final_readiness,
+                    canary=canary,
+                )
+            except BaseException:
+                if generator is candidate_generator:
+                    generator = None
+                if client_dht is candidate_dht:
+                    client_dht = None
+                raise
+            transaction.committed = True
+            transaction.candidate_generator = None
+            transaction.candidate_dht = None
+            transaction.sequential = None
+            transaction.role_registered = False
+
+        try:
+            _runtime_state.record_event(
+                kind="generator",
+                phase="ready",
+                status="info",
+                message=(
+                    f"Generator for {req.model_name} passed route and tensor validation."
+                ),
+                operation_id=operation_id,
+                details={"startup_duration_ms": startup_duration_ms, "canary": canary},
+            )
+        except Exception as exc:
+            logger.warning("Could not record generator-ready event: %s", exc)
         return {
             "status": "ready",
             "route_ready": True,
             "canary": canary,
-            "performance": (
-                generator.get_performance_snapshot()
-                if hasattr(generator, "get_performance_snapshot")
-                else {"startup_duration_ms": startup_duration_ms}
-            ),
+            "performance": performance,
         }
 
+    except _GeneratorStartupCancelled as e:
+        cleanup_complete = True
+        if transaction is not None and not transaction.committed:
+            cleanup_complete = await _rollback_generator_start(transaction)
+        if not cleanup_complete:
+            _runtime_state.transition_generator(
+                "stopping",
+                model_name=req.model_name,
+                route_ready=False,
+                reasons=[
+                    str(e),
+                    "Generator startup cleanup is pending.",
+                ],
+            )
+            return {
+                "status": "cleanup_pending",
+                "message": str(e),
+            }
+        _runtime_state.transition_generator(
+            "stopped",
+            model_name=None,
+            components_loaded=False,
+            route_ready=False,
+            reasons=[str(e)],
+        )
+        try:
+            _runtime_state.record_event(
+                kind="generator",
+                phase="cancelled",
+                status="info",
+                message=str(e),
+                operation_id=operation_id,
+            )
+        except Exception as exc:
+            logger.warning("Could not record generator cancellation: %s", exc)
+        return {"status": "cancelled", "message": str(e)}
+    except asyncio.CancelledError:
+        cleanup_complete = True
+        if transaction is not None:
+            transaction.cancel_event.set()
+            if not transaction.committed:
+                try:
+                    cleanup_complete = await _rollback_generator_start(transaction)
+                except asyncio.CancelledError:
+                    pass
+        _runtime_state.transition_generator(
+            "stopped" if cleanup_complete else "stopping",
+            model_name=None if cleanup_complete else req.model_name,
+            components_loaded=False if cleanup_complete else None,
+            route_ready=False,
+            reasons=[
+                "Generator startup task was cancelled."
+                + (
+                    " Cleanup is still pending."
+                    if not cleanup_complete
+                    else ""
+                )
+            ],
+        )
+        raise
     except AssertionError as e:
-        if sequential is not None:
-            stop_health_monitor = getattr(sequential, "stop_health_monitor", None)
-            if callable(stop_health_monitor):
-                stop_health_monitor()
-        _cleanup_failed_generator(generator)
-        generator = None
-        _shutdown_client_dht()
+        cleanup_complete = True
+        if transaction is not None and not transaction.committed:
+            cleanup_complete = await _rollback_generator_start(transaction)
+        if not cleanup_complete:
+            return {
+                "status": "cleanup_pending",
+                "error": str(e),
+                "message": "Generator startup failed and cleanup is still pending.",
+            }
         _runtime_state.transition_generator(
             "failed",
             model_name=req.model_name,
@@ -2523,13 +4654,21 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         return {"status": "error", "error": str(e)}
     except Exception as e:
         logger.error(f"Generator start failed: {e}", exc_info=True)
-        if sequential is not None:
-            stop_health_monitor = getattr(sequential, "stop_health_monitor", None)
-            if callable(stop_health_monitor):
-                stop_health_monitor()
-        _cleanup_failed_generator(generator)
-        generator = None
-        _shutdown_client_dht()
+        cleanup_complete = True
+        if transaction is not None and not transaction.committed:
+            cleanup_complete = await _rollback_generator_start(transaction)
+        if not cleanup_complete:
+            _runtime_state.transition_generator(
+                "stopping",
+                model_name=req.model_name,
+                route_ready=False,
+                reasons=[str(e), "Generator startup cleanup is pending."],
+            )
+            return {
+                "status": "cleanup_pending",
+                "error": str(e),
+                "message": "Generator startup failed and cleanup is still pending.",
+            }
         _runtime_state.transition_generator(
             "failed",
             model_name=req.model_name,
@@ -2549,6 +4688,13 @@ async def start_generator(req: GeneratorStartRequest) -> dict:
         if _is_huggingface_auth_expired(e):
             return _huggingface_reconnect_response(req.model_name)
         return {"status": "error", "error": str(e)}
+    finally:
+        if transaction is not None:
+            with _generator_lifecycle_lock:
+                if _active_generator_start is transaction:
+                    _active_generator_start = None
+            transaction.done_event.set()
+        _generator_start_lock.release()
 
 
 @app.post("/generator/start-async", status_code=202)
@@ -2561,13 +4707,21 @@ async def start_generator_async(req: GeneratorStartRequest) -> dict:
             return {"status": "cancelled"}
         progress("validating_route", "Proving a complete RPC-healthy tensor route.")
         try:
-            result = asyncio.run(start_generator(req))
+            result = asyncio.run(
+                _start_generator_runtime(req, external_cancel=cancelled)
+            )
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
             result = {"status": "error", **detail}
         if cancelled.is_set() and result.get("status") == "ready":
-            asyncio.run(_unload_generator_runtime("Generator startup was cancelled."))
-            return {"status": "cancelled"}
+            return {
+                **result,
+                "cancel_requested": True,
+                "message": (
+                    "Cancellation arrived after the generator committed. The ready "
+                    "runtime remains loaded; unload it explicitly if it is unwanted."
+                ),
+            }
         return result
 
     return _lifecycle_jobs.submit("generator_start", resource_key, target)
@@ -2591,23 +4745,53 @@ async def cancel_lifecycle_job(job_id: str) -> dict:
 
 @app.get("/generator/status")
 async def get_generator_status() -> dict:
-    if generator is None or not generator.is_loaded():
+    with _generator_lifecycle_lock:
+        cleanup_active = _generator_cleanup_in_progress
+        cleanup_handles = _pending_generator_cleanup
+        active_generator = generator
+    if cleanup_active or cleanup_handles is not None:
+        pending_generator = (
+            cleanup_handles.candidate_generator
+            if cleanup_handles is not None
+            else None
+        )
+        components_loaded = bool(
+            pending_generator is not None
+            and getattr(pending_generator, "is_loaded", lambda: False)()
+        )
         snapshot = _runtime_state.generator_snapshot()
-        if snapshot["state"] not in {"starting", "validating_route", "loading", "failed"}:
-            snapshot = _runtime_state.transition_generator(
-                "stopped",
-                model_name=None,
-                components_loaded=False,
-                route_ready=False,
-                reasons=["Generator not loaded."],
-            )
+        cleanup_reasons = [
+            "Generator cleanup is in progress; a replacement cannot start "
+            "until all owned handles have stopped."
+        ]
         return {
             "ready": False,
-            "state": snapshot["state"],
+            "state": "stopping",
+            "components_loaded": components_loaded,
+            "model_name": (
+                getattr(pending_generator, "model_name", None)
+                or snapshot.get("model_name")
+            ),
+            "route_ready": False,
+            "reasons": cleanup_reasons,
+            "node_trace": snapshot["node_trace"],
+            "performance": None,
+            "health": snapshot["health"],
+            "canary": snapshot["canary"],
+        }
+    if active_generator is None or not active_generator.is_loaded():
+        snapshot = _runtime_state.generator_snapshot()
+        state = snapshot["state"]
+        if state not in {"starting", "validating_route", "loading", "failed"}:
+            state = "stopped"
+        reasons = snapshot["reasons"] or ["Generator not loaded."]
+        return {
+            "ready": False,
+            "state": state,
             "components_loaded": False,
             "model_name": snapshot.get("model_name"),
             "route_ready": False,
-            "reasons": snapshot["reasons"],
+            "reasons": reasons,
             "node_trace": snapshot["node_trace"],
             "performance": None,
             "health": snapshot["health"],
@@ -2621,23 +4805,36 @@ async def get_generator_status() -> dict:
 
     route_validation_started_at = time.perf_counter()
     try:
-        health_getter = getattr(generator.sequential, "get_health_readiness", None)
+        health_getter = getattr(
+            active_generator.sequential,
+            "get_health_readiness",
+            None,
+        )
         if callable(health_getter):
             health = health_getter()
-        if health is not None and health.get("enabled"):
+        if isinstance(health, dict):
             route = health.get("selected_route", [])
             route_ready = bool(health.get("route_ready"))
             reasons.extend(str(reason) for reason in health.get("reasons", []))
         else:
-            route = await asyncio.to_thread(generator.sequential.validate_reachable_route)
-            route_ready = True
+            route = []
+            health = {
+                "enabled": False,
+                "route_ready": False,
+                "selected_route": [],
+                "reasons": [
+                    "Provider health snapshot is unavailable; status reads do not "
+                    "start an unowned network probe."
+                ],
+            }
+            reasons.extend(health["reasons"])
         node_trace = _format_route_trace(route)
     except Exception as e:
         reasons.append(str(e))
     route_validation_ms = (
         time.perf_counter() - route_validation_started_at
     ) * 1000
-    performance_getter = getattr(generator, "get_performance_snapshot", None)
+    performance_getter = getattr(active_generator, "get_performance_snapshot", None)
     performance = (
         performance_getter()
         if callable(performance_getter)
@@ -2649,22 +4846,47 @@ async def get_generator_status() -> dict:
     )
     performance["route_validation_ms"] = route_validation_ms
 
-    state = "ready" if route_ready else "suspended"
-    snapshot = _runtime_state.transition_generator(
-        state,
-        model_name=generator.model_name,
-        components_loaded=True,
-        route_ready=route_ready,
-        reasons=reasons,
-        node_trace=node_trace,
-        health=health,
-    )
+    with _generator_lifecycle_lock:
+        lifecycle_changed = bool(
+            generator is not active_generator
+            or _generator_cleanup_in_progress
+            or _pending_generator_cleanup is not None
+            or not active_generator.is_loaded()
+        )
+        if not lifecycle_changed:
+            state = "ready" if route_ready else "suspended"
+            snapshot = _runtime_state.transition_generator(
+                state,
+                model_name=active_generator.model_name,
+                components_loaded=True,
+                route_ready=route_ready,
+                reasons=reasons,
+                node_trace=node_trace,
+                health=health,
+            )
+            generator_ready = active_generator.is_loaded() and route_ready
+    if lifecycle_changed:
+        snapshot = _runtime_state.generator_snapshot()
+        return {
+            "ready": False,
+            "state": snapshot["state"],
+            "components_loaded": bool(snapshot.get("components_loaded")),
+            "model_name": snapshot.get("model_name"),
+            "route_ready": False,
+            "reasons": [
+                "Generator lifecycle changed while route readiness was being checked."
+            ],
+            "node_trace": snapshot.get("node_trace", []),
+            "performance": performance,
+            "health": snapshot.get("health"),
+            "canary": snapshot.get("canary"),
+        }
 
     return {
-        "ready": generator.is_loaded() and route_ready,
+        "ready": generator_ready,
         "state": state,
         "components_loaded": True,
-        "model_name": generator.model_name,
+        "model_name": active_generator.model_name,
         "route_ready": route_ready,
         "reasons": reasons,
         "node_trace": node_trace,
@@ -2683,14 +4905,29 @@ async def get_runtime_snapshot() -> dict:
             "generator": generator_status,
             "local_nodes": _local_node_infos(),
             "lifecycle_jobs": _lifecycle_jobs.list_recent(),
+            "lifecycle": (
+                _lifecycle_jobs.diagnostics()
+                if hasattr(_lifecycle_jobs, "diagnostics")
+                else None
+            ),
+            "network": _network_snapshot(),
         }
     )
     return snapshot
 
 
 async def _require_generator_ready() -> DistributedGenerator:
+    with _generator_lifecycle_lock:
+        expected_generator = generator
     status = await get_generator_status()
-    if not status["ready"] or generator is None:
+    with _generator_lifecycle_lock:
+        lifecycle_changed = bool(
+            expected_generator is None
+            or generator is not expected_generator
+            or _generator_cleanup_in_progress
+            or _pending_generator_cleanup is not None
+        )
+    if not status["ready"] or lifecycle_changed:
         raise HTTPException(
             status_code=503,
             detail={
@@ -2701,14 +4938,16 @@ async def _require_generator_ready() -> DistributedGenerator:
                 "components_loaded": status["components_loaded"],
             },
         )
-    return generator
+    return expected_generator
 
 
 @app.post("/generator/stop")
 async def stop_generator() -> dict:
-    if generator is None or not generator.is_loaded():
+    with _generator_lifecycle_lock:
+        active_generator = generator
+    if active_generator is None or not active_generator.is_loaded():
         return {"status": "not_running"}
-    generator.request_stop()
+    active_generator.request_stop()
     return {"status": "stop_requested"}
 
 
@@ -2907,64 +5146,77 @@ async def openai_chat_completions(
         async def event_stream():
             settled = False
             try:
-                async for chunk in active_generator.generate_stream(
+                stream = active_generator.generate_stream(
                     prompt=prompt,
                     max_new_tokens=req.max_tokens,
                     temperature=req.temperature,
                     top_p=req.top_p,
-                ):
-                    if "token" in chunk:
-                        event = {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created_at,
-                            "model": req.model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"content": chunk["token"]},
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                        yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
-                    elif "error" in chunk:
-                        manager.store.release(reservation["request_id"])
-                        settled = True
-                        yield f"data: {json.dumps({'error': chunk['error']})}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-                    elif chunk.get("done"):
-                        metrics = chunk.get("metrics") or {}
-                        if metrics.get("stopped"):
+                )
+                async with aclosing(stream):
+                    async for chunk in stream:
+                        if "token" in chunk:
+                            event = {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_at,
+                                "model": req.model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": chunk["token"]},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                            yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                        elif "error" in chunk:
                             manager.store.release(reservation["request_id"])
-                        else:
-                            manager.store.complete(
-                                reservation["request_id"],
-                                actual_positions=(
-                                    prompt_positions + int(metrics.get("generated_tokens", 0))
-                                ),
-                                price_scale=manager.config.price_scale,
-                            )
-                        settled = True
-                        event = {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created_at,
-                            "model": req.model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": "stop",
-                                }
-                            ],
-                        }
-                        yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
-                        yield "data: [DONE]\n\n"
+                            settled = True
+                            yield f"data: {json.dumps({'error': chunk['error']})}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
+                        elif chunk.get("done"):
+                            metrics = chunk.get("metrics") or {}
+                            if metrics.get("stopped"):
+                                manager.store.release(reservation["request_id"])
+                            else:
+                                manager.store.complete(
+                                    reservation["request_id"],
+                                    actual_positions=(
+                                        prompt_positions + int(metrics.get("generated_tokens", 0))
+                                    ),
+                                    price_scale=manager.config.price_scale,
+                                )
+                            settled = True
+                            event = {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_at,
+                                "model": req.model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "stop",
+                                    }
+                                ],
+                            }
+                            yield f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                            yield "data: [DONE]\n\n"
+            except GeneratorOperationBusyError as exc:
+                manager.store.release(reservation["request_id"])
+                settled = True
+                error = {
+                    "error": {
+                        "code": "generator_busy",
+                        "message": str(exc),
+                        "type": "conflict_error",
+                    }
+                }
+                yield f"data: {json.dumps(error, separators=(',', ':'))}\n\n"
+                yield "data: [DONE]\n\n"
             finally:
                 if not settled:
-                    active_generator.request_stop()
                     manager.store.release(reservation["request_id"])
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -2972,18 +5224,20 @@ async def openai_chat_completions(
     response_text = ""
     metrics: dict = {}
     try:
-        async for chunk in active_generator.generate_stream(
+        stream = active_generator.generate_stream(
             prompt=prompt,
             max_new_tokens=req.max_tokens,
             temperature=req.temperature,
             top_p=req.top_p,
-        ):
-            if "token" in chunk:
-                response_text += str(chunk["token"])
-            elif "error" in chunk:
-                raise RuntimeError(str(chunk["error"]))
-            elif chunk.get("done"):
-                metrics = dict(chunk.get("metrics") or {})
+        )
+        async with aclosing(stream):
+            async for chunk in stream:
+                if "token" in chunk:
+                    response_text += str(chunk["token"])
+                elif "error" in chunk:
+                    raise RuntimeError(str(chunk["error"]))
+                elif chunk.get("done"):
+                    metrics = dict(chunk.get("metrics") or {})
         if metrics.get("stopped"):
             raise RuntimeError("Generation was cancelled before completion.")
         generated_tokens = int(metrics.get("generated_tokens", 0))
@@ -3039,7 +5293,7 @@ async def chat(req: ChatRequest) -> dict:
     node_trace: list[str] = []
     generation_metrics: Optional[dict] = None
 
-    async for chunk in active_generator.generate_stream(
+    stream = active_generator.generate_stream(
         prompt=req.message,
         max_new_tokens=req.max_new_tokens,
         temperature=req.temperature,
@@ -3047,21 +5301,23 @@ async def chat(req: ChatRequest) -> dict:
         top_k=req.top_k,
         repetition_penalty=req.repetition_penalty,
         do_sample=req.do_sample,
-    ):
-        if "token"  in chunk: full_response += chunk["token"]
-        elif "done" in chunk:
-            node_trace = chunk.get("node_trace", [])
-            generation_metrics = chunk.get("metrics")
-        elif "error" in chunk:
-            diagnostic = _record_generation_failure(active_generator, str(chunk["error"]))
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "error": "generation_failed",
-                    "message": chunk["error"],
-                    "diagnostic": diagnostic,
-                },
-            )
+    )
+    async with aclosing(stream):
+        async for chunk in stream:
+            if "token"  in chunk: full_response += chunk["token"]
+            elif "done" in chunk:
+                node_trace = chunk.get("node_trace", [])
+                generation_metrics = chunk.get("metrics")
+            elif "error" in chunk:
+                diagnostic = _record_generation_failure(active_generator, str(chunk["error"]))
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "generation_failed",
+                        "message": chunk["error"],
+                        "diagnostic": diagnostic,
+                    },
+                )
 
     return {
         "response":         full_response,
@@ -3174,45 +5430,51 @@ async def stream(websocket: WebSocket) -> None:
                 await websocket.send_json({"error": "do_sample must be a boolean"})
                 continue
 
-            generator_status = await get_generator_status()
-            if generator_status["ready"] and generator is not None:
-                try:
-                    _authorize_free_chat(
-                        generator,
-                        prompt=message,
-                        max_new_tokens=max_new_tokens,
-                    )
-                except AccessError as exc:
-                    await websocket.send_json(
-                        {"error": exc.code, "message": exc.message}
-                    )
-                    continue
-                async for chunk in generator.generate_stream(
+            try:
+                active_generator = await _require_generator_ready()
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                await websocket.send_json(
+                    {
+                        "error": "generator_route_not_ready",
+                        "state": detail.get("state", "stopped"),
+                        "message": detail.get(
+                            "message",
+                            "Generator route is not ready.",
+                        ),
+                    }
+                )
+                continue
+            try:
+                _authorize_free_chat(
+                    active_generator,
                     prompt=message,
                     max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                    repetition_penalty=repetition_penalty,
-                    do_sample=do_sample,
-                ):
+                )
+            except AccessError as exc:
+                await websocket.send_json(
+                    {"error": exc.code, "message": exc.message}
+                )
+                continue
+            stream = active_generator.generate_stream(
+                prompt=message,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                do_sample=do_sample,
+            )
+            async with aclosing(stream):
+                async for chunk in stream:
                     if "error" in chunk:
                         diagnostic = _record_generation_failure(
-                            generator,
+                            active_generator,
                             str(chunk["error"]),
                         )
                         await websocket.send_json({**chunk, "diagnostic": diagnostic})
                     else:
                         await websocket.send_json(chunk)
-            else:
-                await websocket.send_json(
-                    {
-                        "error": "generator_route_not_ready",
-                        "state": generator_status["state"],
-                        "message": "; ".join(generator_status["reasons"])
-                        or "Generator route is not ready.",
-                    }
-                )
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected: {websocket.client}")

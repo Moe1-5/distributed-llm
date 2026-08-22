@@ -179,6 +179,56 @@ export interface ServingPlan {
   refreshing: boolean
   snapshot_source: 'dht_cache' | 'local_only' | 'validated_dht'
   snapshot_age_seconds: number
+  network_state?: NetworkLifecycleState
+  network_revision?: number
+  network_topology_revision?: string | null
+  network_failure?: NetworkFailure | null
+}
+
+export type NetworkLifecycleState = 'disconnected' | 'syncing' | 'ready' | 'degraded'
+
+export interface NetworkFailure {
+  stage: string
+  code: string
+  message: string
+  observed_at: string
+  retryable: boolean
+}
+
+export interface NetworkRuntimeSnapshot {
+  schema_version: 1
+  state: NetworkLifecycleState
+  revision: number
+  topology_revision: string | null
+  control_peer_id: string | null
+  started_at: string | null
+  updated_at: string
+  last_refresh_attempt_at: string | null
+  last_refresh_success_at: string | null
+  snapshot_captured_at: string | null
+  snapshot_age_seconds: number | null
+  stale: boolean
+  provider_count: number
+  retained_provider_count: number
+  failure: NetworkFailure | null
+  validation_errors: Array<Record<string, unknown>>
+  nodes: NodeInfo[]
+  roles: {
+    workers: Array<{ node_id: string; peer_id: string | null; state: string }>
+    generator: { peer_id: string | null; state: string } | null
+  }
+  resources: {
+    control_dht: boolean
+    control_dht_operation_pending: boolean
+    control_dht_operation_uncertain: boolean
+    control_dht_shutdown_pending: boolean
+    control_dht_shutdown_failed: boolean
+    discovery_task: boolean
+    registered_workers: number
+    publication_tasks: number
+    health_monitors: number
+  }
+  accepting_roles: boolean
 }
 
 export interface RuntimeDiagnosticEvent {
@@ -199,6 +249,7 @@ export interface RuntimeSnapshot {
   local_nodes: NodeInfo[]
   lifecycle_jobs: LifecycleJob[]
   events: RuntimeDiagnosticEvent[]
+  network?: NetworkRuntimeSnapshot
 }
 
 export interface Stats {
@@ -242,6 +293,7 @@ export interface NetworkStatus {
   generator_reasons: string[]
   token_set: boolean
   local_models?: LocalModelImport[]
+  network?: NetworkRuntimeSnapshot
 }
 
 export interface IncentivesStatus {
@@ -796,7 +848,20 @@ export const api = {
   // Status
   getStatus: () => get<NetworkStatus>('/status', STATUS_REQUEST_TIMEOUT_MS),
   getStats: () => get<Stats>('/stats', FAST_REQUEST_TIMEOUT_MS),
-  getNodes: () => get<{ nodes: NodeInfo[]; error?: string; warning?: string }>('/nodes'),
+  getNodes: () =>
+    get<{
+      nodes: NodeInfo[]
+      error?: string
+      warning?: string
+      snapshot_stale?: boolean
+      refreshing?: boolean
+      snapshot_source?: 'dht_cache' | 'local_only' | 'validated_dht'
+      snapshot_age_seconds?: number
+      network_state?: NetworkLifecycleState
+      network_revision?: number
+      network_topology_revision?: string | null
+      network_failure?: NetworkFailure | null
+    }>('/nodes'),
   getLocalNodes: () => get<{ nodes: NodeInfo[] }>('/nodes/local'),
   getIncentives: () => get<IncentivesStatus>('/incentives/accounting'),
   getDeveloperAccess: () => get<DeveloperAccessStatus>('/developer/access'),
@@ -811,6 +876,7 @@ export const api = {
       models: ModelInfo[]
       token_available: boolean
       default_peers: string[]
+      network?: NetworkRuntimeSnapshot
     }>('/models'),
   getModelCatalog: () =>
     get<{

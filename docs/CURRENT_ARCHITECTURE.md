@@ -2,13 +2,14 @@
 
 ## System Shape
 
-DistribLLM is an Electron desktop client backed by a local FastAPI process. The backend can host one or more non-overlapping layer slices for the same model and DHT prefix, run one generator, expose monitoring/status APIs, and manage local Hugging Face authentication and model imports.
+DistribLLM is an Electron desktop client backed by a local FastAPI process. The backend owns one persistent network control plane, can host one or more non-overlapping layer slices for the same model and DHT prefix, run one generator, expose monitoring/status APIs, and manage local Hugging Face authentication and model imports.
 
 The target network is a project-owned public/discoverable swarm. External devices join through DistribLLM bootstrap peers, but `use_ipfs=False` keeps the system isolated from public Petals/IPFS infrastructure.
 
 ## Runtime Roles
 
 - Bootstrap node: stable discovery entry point only; never serves transformer layers.
+- Network supervisor: owns the backend's persistent discovery-only DHT, last-good topology snapshot, role registry, publication verification, and exact-handle network shutdown/quarantine.
 - Serving node: owns a contiguous model layer range and exposes it through Hivemind RPC.
 - Generator client: keeps tokenizer, embeddings, final normalization, and LM head locally, then routes hidden states through serving nodes.
 - Electron/FastAPI client: controls local serving, generator startup, inference, monitoring, settings, OAuth, and managed model downloads.
@@ -41,11 +42,18 @@ local_nodes: dict[str, Node]
 generator: Optional[DistributedGenerator]
 client_dht: Optional[hivemind.DHT]
 client_dht_prefix: str
+network_supervisor: NetworkSupervisor
+_lifecycle_jobs: LifecycleJobStore
+_runtime_state: RuntimeStateStore
 ```
 
-Long node and generator starts run as lifecycle jobs with queued, running, ready, failed, cancelling, and cancelled state. The initiating request returns immediately, progress is polled by job ID, duplicate active resource starts are deduplicated, and cancellation cleans up resources after the owned startup call returns. Existing synchronous endpoints remain for compatible clients.
+The supervisor starts with the FastAPI lifespan before any worker or generator. It exposes `disconnected`, `syncing`, `ready`, and `degraded` states, keeps immutable validated topology snapshots, and retains the last-good snapshot with its real age and failure stage when refresh fails. Production node, model, route, and serving-plan APIs read this state passively instead of starting request-owned DHT discovery.
+
+Long node and generator starts run as lifecycle jobs with queued, running, ready, failed, cancelling, and cancelled state. The initiating request returns immediately, progress is polled by job ID, duplicate active resource starts are deduplicated, and cancellation joins each exact executor future before cleanup. Node pause, resume, and delete actions have per-node admission, while generator generation, parity, and trace operations retain their component owner until they finish. Shutdown closes admission, requests cancellation, waits to one shared bounded deadline, and retains unresolved handles instead of reporting them as stopped. Existing synchronous endpoints remain for compatible clients.
 
 One backend can serve multiple non-overlapping slices, but all local slices must use one model-compatible DHT prefix. Only one generator is active per backend process. True multi-machine testing uses separate backend/worker processes.
+
+The control plane, every worker, and the generator use distinct stable identity files. The supervisor records those roles but does not share a P2P handle between them; this preserves exact route ownership and prevents a co-located generator from self-dialing its own peer identity.
 
 ## Bootstrap Configuration
 
@@ -80,6 +88,10 @@ OAuth credentials are stored outside the repository by default under the user co
 
 Nodes support pause, resume, and delete/unload as distinct operations. Failed startup calls cleanup so partial DHT, RPC, handler, and CUDA state are released.
 
+The Hivemind server is the sole publisher of expert UID leases. DistribLLM does not run a competing manual writer for the same expert keys; its worker heartbeat owns only project metadata and membership records. When a project-record store is ambiguous, the supervisor independently reads it back without local DHT caching and classifies accepted, equivalent-newer, conflicting, short-horizon, unverified, and local-transport-failed outcomes. Because Hivemind 1.1.12 defines `DHT.store(False)` as either no acknowledgement or a newer existing record, that boolean alone never restarts a healthy worker.
+
+Transport recovery requires a typed, independently verified local transport failure. A justified repair keeps the stable worker identity and loaded model handler, while publication conflicts or missing acknowledgements leave serving online and surface degraded publication diagnostics for bounded repair. The server borrows the worker DHT without owning its shutdown, so the worker remains the single lifecycle owner of that transport.
+
 `DISTRIBLLM_NETWORK_MODE`, `DISTRIBLLM_P2P_PORT`, `DISTRIBLLM_ANNOUNCE_MADDRS`, and the relay settings control transport. Direct Windows/WSL operation requires a fixed port, a Windows LAN/public announce address, and mirrored networking or Windows port forwarding. Auto mode falls back to an outbound relay reservation and does not require the ordinary participant to expose a public router port.
 
 Workers use architecture-aware selective loading for indexed or single-file safetensors checkpoints from OPT, Llama, and Mistral families. Decoder blocks are created on the meta device, only keys for the requested half-open range are read, and tensors are materialized directly at the configured dtype/device. Node metadata reports strategy, selected shards, loaded parameter bytes, elapsed time, and measured RSS growth without exposing local paths. PyTorch binary or unsupported checkpoints use an explicitly reported full-model compatibility fallback by default; operators can reject that path with `DISTRIBLLM_ALLOW_FULL_MODEL_FALLBACK=false`.
@@ -88,7 +100,7 @@ On the cached TinyLlama checkpoint, a measured one-layer CPU float32 load comple
 
 ## Routing and Generation
 
-`RemoteSequential` validates DHT metadata, filters by model, builds a contiguous non-overlapping route, rejects gaps/incompatible ranges, and calls selected RPC experts in layer order. Version-two workers advertise peer-scoped normal and receipt UIDs plus explicit ownership. The generator constructs each Hivemind remote expert from the route-selected peer and UID, so another provider publishing the same layer range cannot redirect an in-flight or cached route. Legacy advertisements remain readable but are pinned to their advertised peer at execution time.
+`RemoteSequential` validates topology metadata, filters by model, builds a contiguous non-overlapping route, rejects gaps/incompatible ranges, and calls selected RPC experts in layer order. In production its discovery input merges the supervisor's last-good remote topology with authoritative co-located worker state, with the local state winning over a cached copy of the same node. The generator keeps a separate DHT/P2P identity for exact RPC transport. Version-two workers advertise peer-scoped normal and receipt UIDs plus explicit ownership. The generator constructs each Hivemind remote expert from the route-selected peer and UID, so another provider publishing the same layer range cannot redirect an in-flight or cached route. Legacy advertisements remain readable but are pinned to their advertised peer at execution time.
 
 When incentives are in shadow or credit mode, selected nodes may advertise a separate receipt expert with signed Ed25519 presence. The generator signs the complete route and BLAKE3 input commitment, validates the worker's signed response commitment, and countersigns accepted output. Legacy fallback is allowed only when the advertised receipt expert is absent before execution; ambiguous failures stop without duplicate work or credit. A project-owned FastAPI service validates pairs and stores an append-only SQLite WAL ledger; credits remain read-only and non-transferable.
 
@@ -114,12 +126,13 @@ token ids
   -> token selection
 ```
 
-There is no distributed KV cache, health-aware failover, or concurrent generator registry yet. Continuous health invalidates a degraded selected route but deliberately does not choose a standby; Sprint 21 owns that behavior. The selected route is stable for a generation session, but each token still processes the full sequence, so compute throughput remains prototype-grade.
+There is no distributed KV cache or multi-generator registry yet. Health-aware failover can restart a complete route only after a classified pre-execution failure; ambiguous execution still stops without failover. The selected route is stable for a generation session, but each token still processes the full sequence, so compute throughput remains prototype-grade.
 
 ## Current Validation State
 
-- Backend regression suite: 233 tests and 54 subtests passing as of 2026-08-13, including adversarial RPC admission, cancellable provider-health probes, selective layer parity, and an independent-peer Hivemind receipt RPC with an activation larger than 128 KiB and a shadow-settlement round trip.
-- Frontend TypeScript checks, production build, 17 managed-launcher tests, Python compilation, and Windows package audit pass.
+- Sprint 29 implementation is complete in source: tests cover asynchronous clean start, last-good retention, authoritative local overlays, role identity separation, publication-result classification, passive supervisor-backed APIs, admission closure, cancellation races, exact streaming-request ownership, atomic Turn Off admission, delayed reachability startup, bounded shutdown responses, and idempotent exact-handle cleanup/quarantine. Physical packaged two-device validation is still pending.
+- Backend regression suite: 400 tests passing as of 2026-08-23, including adversarial RPC admission, deterministic stream-disconnect cleanup, cancellable provider-health probes, supervisor/DHT ownership races, selective layer parity, and independent-peer Hivemind normal and receipt RPC integration.
+- Frontend TypeScript checks, 20 managed-launcher tests, four renderer-flow tests, production build, and lint with zero errors pass. The repository still has 78 formatting warnings in pre-existing frontend files.
 - Local OPT-125M and OPT-1.3B smoke/parity evidence exists.
 - Hugging Face device OAuth and real gated Llama 2 download have been exercised.
 - A Windows/WSL participant obtained a complete circuit address through the public VPS relay in 1.63 seconds, and a second same-host Hivemind peer completed an OPT-125M expert metadata RPC using only that circuit address. Tensor forwarding, direct two-device routing, and relayed two-device inference remain to be validated live.
@@ -131,4 +144,7 @@ There is no distributed KV cache, health-aware failover, or concurrent generator
 - Workers using selective safetensors need memory for their requested blocks and transient tensors. Binary-checkpoint compatibility fallback still needs enough RAM for full-model construction.
 - Python 3.12 is the supported runtime; Hivemind/Pydantic compatibility is unreliable on Python 3.14.
 - Bootstrap reachability proves discovery transport only, not model-worker RPC reachability.
+- The persistent supervisor removes request-owned discovery and protects last-good topology, but clean packaged startup, role identity separation, identity-preserving recovery, and deterministic shutdown still require two-device physical evidence.
+- The default serial Hivemind topology scan has no safe application-level cancellation deadline. A slow scan may outlive the supervisor stop deadline; the exact DHT and refresh owner remain retained and block identity reuse until the scan actually quiesces, rather than being reported as stopped.
+- Worker RPC startup captures Hivemind 1.1.12's private P2P daemon address in the owning process so force-terminated connection-handler children never share its DHT command pipe or lock. This is deliberately coupled to the pinned dependency, and a wedged parent DHT can still delay that synchronous startup capture.
 - Useful-work receipts and shadow/credit settlement are implemented locally, but credit approval still requires live two-device shadow evidence. API keys, route failover, stronger collusion/Sybil resistance, and distributed training remain future work.

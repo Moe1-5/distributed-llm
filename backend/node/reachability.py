@@ -16,7 +16,6 @@ import asyncio
 import threading
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
-from functools import partial
 from typing import Optional
 
 from hivemind import DHT
@@ -37,6 +36,8 @@ _PROBE_P2P_OPTIONS = {
     "startup_timeout": 60,
 }
 
+_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
 
 class ReachabilityProtocol(ServicerBase):
     """Let DHT peers ask each other to test a peer's direct dialability."""
@@ -44,6 +45,11 @@ class ReachabilityProtocol(ServicerBase):
     def __init__(self, *, probe: Optional[P2P] = None, wait_timeout: float = 5.0):
         self.probe = probe
         self.wait_timeout = wait_timeout
+        self._state_lock = threading.Lock()
+        self._shutdown_requested = threading.Event()
+        self._stopped = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._shutdown_error: Optional[BaseException] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop: Optional[asyncio.Event] = None
 
@@ -110,10 +116,25 @@ class ReachabilityProtocol(ServicerBase):
         ready: Future[bool] = Future()
 
         async def _serve_with_probe() -> None:
+            event_loop: Optional[asyncio.AbstractEventLoop] = None
+            stop_event: Optional[asyncio.Event] = None
+            owned_probe: Optional[P2P] = None
+            service_error: Optional[BaseException] = None
             try:
+                if protocol._shutdown_requested.is_set():
+                    return
                 common_p2p = await dht.replicate_p2p()
-                protocol._event_loop = asyncio.get_running_loop()
-                protocol._stop = asyncio.Event()
+                if protocol._shutdown_requested.is_set():
+                    return
+                event_loop = asyncio.get_running_loop()
+                stop_event = asyncio.Event()
+                with protocol._state_lock:
+                    protocol._event_loop = event_loop
+                    protocol._stop = stop_event
+                    shutdown_requested = protocol._shutdown_requested.is_set()
+                if shutdown_requested:
+                    stop_event.set()
+                    return
 
                 initial_peers = [
                     str(address)
@@ -127,37 +148,109 @@ class ReachabilityProtocol(ServicerBase):
                         for address in peer.addrs
                     )
 
-                protocol.probe = await P2P.create(
+                owned_probe = await P2P.create(
                     initial_peers,
                     **_PROBE_P2P_OPTIONS,
                 )
+                protocol.probe = owned_probe
+                if protocol._shutdown_requested.is_set():
+                    return
                 ready.set_result(True)
                 async with protocol.serve(common_p2p):
-                    await protocol._stop.wait()
+                    await stop_event.wait()
             except Exception as e:
-                logger.warning(
-                    "Reachability service stopped unexpectedly: %s",
-                    e,
-                    exc_info=True,
-                )
-                if not ready.done():
-                    ready.set_exception(e)
+                service_error = e
+                if protocol._shutdown_requested.is_set():
+                    logger.debug(
+                        "Reachability service stopped during shutdown: %s",
+                        e,
+                        exc_info=True,
+                    )
+                else:
+                    logger.warning(
+                        "Reachability service stopped unexpectedly: %s",
+                        e,
+                        exc_info=True,
+                    )
             finally:
-                if protocol.probe is not None:
-                    await protocol.probe.shutdown()
+                if owned_probe is not None:
+                    try:
+                        await owned_probe.shutdown()
+                    except BaseException as exc:
+                        protocol._shutdown_error = exc
+                        logger.warning(
+                            "Reachability probe shutdown failed: %s",
+                            exc,
+                            exc_info=True,
+                        )
+                    else:
+                        if protocol.probe is owned_probe:
+                            protocol.probe = None
+                with protocol._state_lock:
+                    if protocol._event_loop is event_loop:
+                        protocol._event_loop = None
+                    if protocol._stop is stop_event:
+                        protocol._stop = None
+                protocol._stopped.set()
+                if not ready.done():
+                    ready.set_exception(
+                        service_error
+                        or RuntimeError(
+                            "Reachability service stopped before startup completed"
+                        )
+                    )
 
-        threading.Thread(
-            target=partial(asyncio.run, _serve_with_probe()),
+        def _run() -> None:
+            asyncio.run(_serve_with_probe())
+
+        thread = threading.Thread(
+            target=_run,
             daemon=True,
             name="reachability-protocol",
-        ).start()
+        )
+        protocol._thread = thread
+        thread.start()
         if await_ready:
             ready.result()
         return protocol
 
-    def shutdown(self) -> None:
-        if self._event_loop is not None and self._stop is not None:
-            self._event_loop.call_soon_threadsafe(self._stop.set)
+    def shutdown(
+        self,
+        timeout: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Request shutdown once and prove that the owned thread has exited."""
+        self._shutdown_requested.set()
+        with self._state_lock:
+            event_loop = self._event_loop
+            stop_event = self._stop
+            thread = self._thread
+        if event_loop is not None and stop_event is not None:
+            try:
+                event_loop.call_soon_threadsafe(stop_event.set)
+            except RuntimeError:
+                logger.debug(
+                    "Reachability event loop closed while shutdown was requested",
+                    exc_info=True,
+                )
+        if thread is None:
+            return True
+        if thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, timeout))
+        stopped = self._stopped.is_set() and not thread.is_alive()
+        if not stopped:
+            logger.warning(
+                "Reachability service did not stop within %.3g seconds; "
+                "retaining its exact startup handle",
+                timeout,
+            )
+            return False
+        if self._shutdown_error is not None:
+            logger.warning(
+                "Reachability service stopped with incomplete probe cleanup: %s",
+                self._shutdown_error,
+            )
+            return False
+        return True
 
 
 def check_direct_reachability(

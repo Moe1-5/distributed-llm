@@ -2,9 +2,11 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,10 +26,12 @@ from client.rpc_policy import (
 from client.sequential import RemoteSequential
 from hivemind.compression import deserialize_torch_tensor, serialize_torch_tensor
 from models.architecture_adapter import get_architecture_adapter
+from network.publication import classify_publication
 from node.handler import InferenceHandler
 from node.node import Node
+from node.reachability import ReachabilityProtocol
 from node.relay_compat import _static_relay_process_args
-from node.rpc_server import ACTIVATION_COMPRESSION, RPCServer
+from node.rpc_server import ACTIVATION_COMPRESSION, RPCServer, _BorrowedDHT
 from relay_probe import _relay_dht_kwargs, run_relay_probe
 from api.local_models import (
     LocalModelValidationError,
@@ -767,6 +771,10 @@ class LocalModelImportTests(unittest.TestCase):
             def is_loaded(self) -> bool:
                 return self.loaded
 
+        class InlineExecutorLoop:
+            async def run_in_executor(self, _executor, function):
+                return function()
+
         original_generator_cls = api_server.DistributedGenerator
         original_dht_cls = api_server.hivemind.DHT
         original_sequential_cls = api_server.RemoteSequential
@@ -782,13 +790,21 @@ class LocalModelImportTests(unittest.TestCase):
         api_server.generator = None
         api_server.client_dht = None
         try:
-            result = asyncio.run(
-                api_server.start_generator(
-                    api_server.GeneratorStartRequest(
-                        model_name="meta-llama/Llama-3.2-1B",
+            with tempfile.TemporaryDirectory() as identity_dir, patch.dict(
+                os.environ,
+                {"DISTRIBLLM_P2P_IDENTITY_DIR": identity_dir},
+            ), patch.object(
+                api_server.asyncio,
+                "get_running_loop",
+                return_value=InlineExecutorLoop(),
+            ):
+                result = asyncio.run(
+                    api_server.start_generator(
+                        api_server.GeneratorStartRequest(
+                            model_name="meta-llama/Llama-3.2-1B",
+                        )
                     )
                 )
-            )
         finally:
             api_server.DistributedGenerator = original_generator_cls
             api_server.hivemind.DHT = original_dht_cls
@@ -1698,6 +1714,29 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertTrue(replica.stopped)
         self.assertIsNone(dht._p2p_replica)
 
+    def test_remote_expert_p2p_cleanup_retains_failed_exact_replica(self) -> None:
+        import client.sequential as sequential_module
+
+        class Replica:
+            async def shutdown(self) -> None:
+                raise RuntimeError("shutdown failed")
+
+        class DHTWithReplica:
+            def __init__(self) -> None:
+                self._p2p_replica = Replica()
+
+        dht = DHTWithReplica()
+        replica = dht._p2p_replica
+        with patch.object(
+            sequential_module.RemoteExpertWorker,
+            "run_coroutine",
+            side_effect=asyncio.run,
+        ):
+            result = sequential_module.shutdown_remote_expert_p2p(dht)
+
+        self.assertFalse(result)
+        self.assertIs(dht._p2p_replica, replica)
+
     def test_rpc_uid_includes_layer_slice_for_uniqueness(self) -> None:
         uid_a = RPCServer.build_rpc_uid("test-prefix", layer_start=0, layer_end=4)
         uid_b = RPCServer.build_rpc_uid("test-prefix", layer_start=4, layer_end=8)
@@ -1776,23 +1815,72 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
     def test_rpc_stop_is_bounded_when_hivemind_shutdown_hangs(self) -> None:
         class BlockingServer:
+            def __init__(self) -> None:
+                self.release = __import__("threading").Event()
+                self.shutdown_calls = 0
+
             def shutdown(self) -> None:
-                time.sleep(1.0)
+                self.shutdown_calls += 1
+                self.release.wait()
 
         rpc = RPCServer.__new__(RPCServer)
-        rpc._server = BlockingServer()
+        server = BlockingServer()
+        rpc._server = server
         rpc._running = True
+        rpc._receipt_uid = "receipt-uid"
         rpc._lock = __import__("threading").Lock()
 
-        started = time.perf_counter()
-        rpc.stop(timeout=0.01)
-        elapsed = time.perf_counter() - started
+        try:
+            started = time.perf_counter()
+            self.assertFalse(rpc.stop(timeout=0.01))
+            elapsed = time.perf_counter() - started
 
-        self.assertLess(elapsed, 0.5)
-        self.assertFalse(rpc.is_running())
-        self.assertIsNone(rpc._server)
+            self.assertLess(elapsed, 0.5)
+            self.assertIs(rpc._server, server)
+            self.assertTrue(rpc._running)
+            self.assertEqual(rpc._receipt_uid, "receipt-uid")
+            self.assertEqual(server.shutdown_calls, 1)
+            self.assertTrue(rpc._shutdown_thread.is_alive())
 
-    def test_rpc_publication_refreshes_all_uids_and_reports_freshness(self) -> None:
+            server.release.set()
+            self.assertTrue(rpc.stop(timeout=1.0))
+            self.assertFalse(rpc._running)
+            self.assertIsNone(rpc._server)
+            self.assertIsNone(rpc._receipt_uid)
+            self.assertIsNone(rpc._shutdown_thread)
+            self.assertEqual(server.shutdown_calls, 1)
+        finally:
+            server.release.set()
+            shutdown_thread = getattr(rpc, "_shutdown_thread", None)
+            if shutdown_thread is not None:
+                shutdown_thread.join(timeout=1.0)
+
+    def test_rpc_shutdown_error_is_terminal_and_not_reinvoked(self) -> None:
+        class FailingServer:
+            def __init__(self) -> None:
+                self.shutdown_calls = 0
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+                raise RuntimeError("shutdown failed")
+
+        rpc = RPCServer.__new__(RPCServer)
+        server = FailingServer()
+        rpc._server = server
+        rpc._running = True
+        rpc._receipt_uid = "receipt-uid"
+        rpc._lock = __import__("threading").Lock()
+
+        self.assertFalse(rpc.stop(timeout=1.0))
+        self.assertFalse(rpc.stop(timeout=1.0))
+
+        self.assertEqual(server.shutdown_calls, 1)
+        self.assertIs(rpc._server, server)
+        self.assertTrue(rpc._running)
+        self.assertIs(rpc._shutdown_server, server)
+        self.assertIsInstance(rpc._shutdown_error, RuntimeError)
+
+    def test_rpc_publication_is_observed_without_competing_uid_writes(self) -> None:
         class Ready:
             def is_set(self) -> bool:
                 return True
@@ -1804,17 +1892,6 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         class FakeServer(Alive):
             ready = Ready()
             dht_handler_thread = Alive()
-
-        class CompletedFuture:
-            def __init__(self, result: bool) -> None:
-                self.result_value = result
-
-            def result(self, timeout: float) -> dict[str, bool]:
-                self.timeout = timeout
-                return self.result_value
-
-            def cancel(self) -> None:
-                raise AssertionError("completed publication must not be cancelled")
 
         class DHT:
             peer_id = "peer"
@@ -1824,7 +1901,9 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
             def store(self, **kwargs):
                 self.stores.append(kwargs)
-                return CompletedFuture(True)
+                raise AssertionError(
+                    "DistribLLM must not compete with Hivemind's UID publisher"
+                )
 
         rpc = RPCServer.__new__(RPCServer)
         rpc.dht = DHT()
@@ -1832,7 +1911,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         rpc._running = True
         rpc._uid = "test-prefix.0.1"
         rpc._receipt_uid = "test-prefix.999999.0.1"
-        rpc._publication_lock = __import__("threading").Lock()
+        rpc._publication_lock = __import__("threading").RLock()
         rpc._last_publication_attempt_at = None
         rpc._last_publication_success_at = None
         rpc._last_publication_expiration_time = None
@@ -1842,51 +1921,41 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         status = rpc.refresh_publication(expiration_time=123.0)
 
-        self.assertEqual(
-            [store["key"] for store in rpc.dht.stores],
-            ["test-prefix.0.1", "test-prefix.999999.0.1"],
-        )
-        self.assertTrue(all(store["exclude_self"] for store in rpc.dht.stores))
-        self.assertTrue(all(store["return_future"] for store in rpc.dht.stores))
-        self.assertTrue(
-            all(store["value"] == "peer" for store in rpc.dht.stores)
-        )
-        self.assertTrue(
-            all(store["expiration_time"] > 123.0 for store in rpc.dht.stores)
-        )
+        self.assertEqual(rpc.dht.stores, [])
         self.assertTrue(status["fresh"])
         self.assertTrue(status["server_alive"])
         self.assertTrue(status["runtime_ready"])
         self.assertTrue(status["hivemind_publisher_alive"])
         self.assertEqual(status["consecutive_failures"], 0)
         self.assertIsNone(status["last_error"])
-        self.assertTrue(status["remote_store_required"])
+        self.assertFalse(status["remote_store_required"])
+        self.assertEqual(status["publication_owner"], "hivemind_server")
+        self.assertFalse(status["manual_store_enabled"])
+        self.assertFalse(status["independent_remote_verified"])
 
-    def test_rpc_publication_rejects_local_only_or_unacknowledged_lease(self) -> None:
+    def test_rpc_publication_reports_dependency_publisher_failure(self) -> None:
         class Ready:
             def is_set(self) -> bool:
                 return True
 
-        class Alive:
+        class Dead:
             def is_alive(self) -> bool:
-                return True
-
-        class FakeServer(Alive):
-            ready = Ready()
-            dht_handler_thread = Alive()
-
-        class CompletedFuture:
-            def result(self, timeout: float) -> bool:
                 return False
 
-            def cancel(self) -> None:
-                raise AssertionError("completed publication must not be cancelled")
+        class FakeServer:
+            ready = Ready()
+            dht_handler_thread = Dead()
+
+            def is_alive(self) -> bool:
+                return True
 
         class DHT:
             peer_id = "peer"
 
             def store(self, **kwargs):
-                return CompletedFuture()
+                raise AssertionError(
+                    "DistribLLM must not write Hivemind-owned UID keys"
+                )
 
         rpc = RPCServer.__new__(RPCServer)
         rpc.dht = DHT()
@@ -1894,7 +1963,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         rpc._running = True
         rpc._uid = "test-prefix.0.1"
         rpc._receipt_uid = None
-        rpc._publication_lock = __import__("threading").Lock()
+        rpc._publication_lock = __import__("threading").RLock()
         rpc._last_publication_attempt_at = None
         rpc._last_publication_success_at = None
         rpc._last_publication_expiration_time = None
@@ -1902,12 +1971,14 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         rpc._consecutive_publication_failures = 0
         rpc.require_remote_publication = True
 
-        with self.assertRaisesRegex(RuntimeError, "did not acknowledge"):
+        with self.assertRaisesRegex(RuntimeError, "publisher is not running"):
             rpc.refresh_publication(expiration_time=123.0)
 
         status = rpc.get_publication_status()
         self.assertFalse(status["fresh"])
         self.assertEqual(status["consecutive_failures"], 1)
+        self.assertEqual(status["publication_owner"], "hivemind_server")
+        self.assertFalse(status["manual_store_enabled"])
 
     def test_node_stop_is_bounded_when_dht_shutdown_hangs(self) -> None:
         class FakeRPC:
@@ -1933,8 +2004,18 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         class BlockingDHT:
             peer_id = "peer"
 
+            def __init__(self) -> None:
+                self.release = __import__("threading").Event()
+                self.shutdown_calls = 0
+                self.alive = True
+
             def shutdown(self) -> None:
-                time.sleep(1.0)
+                self.shutdown_calls += 1
+                self.release.wait(1.0)
+                self.alive = False
+
+            def is_alive(self) -> bool:
+                return self.alive
 
         node = Node(
             model_name="facebook/opt-125m",
@@ -1947,22 +2028,398 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         fake_handler = FakeHandler()
         node.rpc = fake_rpc
         node.handler = fake_handler
-        node.dht = BlockingDHT()
+        blocking_dht = BlockingDHT()
+        node.dht = blocking_dht
         node._running = True
 
         started = time.perf_counter()
-        node.stop(timeout=0.01)
+        stopped = node.stop(timeout=0.01)
         elapsed = time.perf_counter() - started
 
         self.assertLess(elapsed, 0.5)
-        self.assertEqual(fake_rpc.timeout, 0.01)
+        self.assertFalse(stopped)
+        self.assertLessEqual(fake_rpc.timeout, 0.01)
         self.assertTrue(fake_handler.unloaded)
         self.assertIsNone(node.rpc)
         self.assertIsNone(node.handler)
+        self.assertIs(node.dht, blocking_dht)
+        self.assertEqual(blocking_dht.shutdown_calls, 1)
+        blocking_dht.release.set()
+        self.assertTrue(node.stop(timeout=1.0))
+        self.assertEqual(blocking_dht.shutdown_calls, 1)
         self.assertIsNone(node.dht)
         self.assertFalse(node.is_running())
 
+    def test_node_dht_shutdown_error_is_terminal_and_not_reinvoked(self) -> None:
+        class FailingDHT:
+            peer_id = "peer"
+
+            def __init__(self) -> None:
+                self.shutdown_calls = 0
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+                raise RuntimeError("shutdown failed")
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        failing_dht = FailingDHT()
+        node.dht = failing_dht
+
+        self.assertFalse(node._shutdown_dht_runtime("test-dht-shutdown", 1.0))
+        self.assertFalse(node._shutdown_dht_runtime("test-dht-shutdown", 1.0))
+
+        self.assertEqual(failing_dht.shutdown_calls, 1)
+        self.assertIs(node.dht, failing_dht)
+        self.assertIs(node._dht_shutdown_target, failing_dht)
+        self.assertIsInstance(node._dht_shutdown_error, RuntimeError)
+
+    def test_node_dht_shutdown_waits_for_process_liveness_before_release(self) -> None:
+        class LingeringDHT:
+            peer_id = "peer"
+
+            def __init__(self) -> None:
+                self.shutdown_calls = 0
+                self.alive = True
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        lingering_dht = LingeringDHT()
+        node.dht = lingering_dht
+
+        self.assertFalse(
+            node._shutdown_dht_runtime("test-dht-shutdown", 1.0)
+        )
+        self.assertIs(node.dht, lingering_dht)
+        self.assertIs(node._dht_shutdown_target, lingering_dht)
+        self.assertEqual(lingering_dht.shutdown_calls, 1)
+        self.assertTrue(node.has_pending_serving_cleanup())
+
+        lingering_dht.alive = False
+        self.assertTrue(
+            node._shutdown_dht_runtime("test-dht-shutdown", 1.0)
+        )
+        self.assertEqual(lingering_dht.shutdown_calls, 1)
+        self.assertIsNone(node.dht)
+        self.assertFalse(node.has_pending_serving_cleanup())
+
+    def test_borrowed_server_and_node_share_one_dht_command_lock(self) -> None:
+        class ContendedDHT:
+            peer_id = "peer"
+
+            def __init__(self) -> None:
+                self.project_entered = __import__("threading").Event()
+                self.borrowed_entered = __import__("threading").Event()
+                self.release_project = __import__("threading").Event()
+                self.state_lock = __import__("threading").Lock()
+                self.active_calls = 0
+                self.max_active_calls = 0
+
+            def command(self, owner: str) -> str:
+                with self.state_lock:
+                    self.active_calls += 1
+                    self.max_active_calls = max(
+                        self.max_active_calls,
+                        self.active_calls,
+                    )
+                try:
+                    if owner == "project":
+                        self.project_entered.set()
+                        self.release_project.wait(1.0)
+                    else:
+                        self.borrowed_entered.set()
+                    return owner
+                finally:
+                    with self.state_lock:
+                        self.active_calls -= 1
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        dht = ContendedDHT()
+        borrowed = _BorrowedDHT(
+            dht,
+            node._dht_command_lock,
+            p2p_daemon_listen_maddr="/unix/test-p2pd.sock",
+        )
+        project_result: list[str] = []
+        borrowed_result: list[str] = []
+        project_thread = __import__("threading").Thread(
+            target=lambda: project_result.append(
+                node._dht_call("project command", dht.command, "project")
+            )
+        )
+        borrowed_thread = __import__("threading").Thread(
+            target=lambda: borrowed_result.append(borrowed.command("borrowed"))
+        )
+
+        project_thread.start()
+        self.assertTrue(dht.project_entered.wait(1.0))
+        borrowed_thread.start()
+        self.assertFalse(dht.borrowed_entered.wait(0.05))
+        dht.release_project.set()
+        project_thread.join(1.0)
+        borrowed_thread.join(1.0)
+
+        self.assertFalse(project_thread.is_alive())
+        self.assertFalse(borrowed_thread.is_alive())
+        self.assertEqual(project_result, ["project"])
+        self.assertEqual(borrowed_result, ["borrowed"])
+        self.assertEqual(dht.max_active_calls, 1)
+
+    def test_borrowed_dht_child_replication_never_touches_pipe_or_lock(self) -> None:
+        class RejectingLock:
+            def __enter__(self):
+                raise AssertionError("child must not acquire the parent command lock")
+
+            def __exit__(self, *args) -> None:
+                return None
+
+        class RejectingDHT:
+            async def replicate_p2p(self):
+                raise AssertionError("child must not call the raw worker DHT")
+
+        class FakeP2P:
+            captured_addresses: list[object] = []
+
+            @staticmethod
+            async def replicate(address):
+                FakeP2P.captured_addresses.append(address)
+                return "replicated-p2p"
+
+        borrowed = _BorrowedDHT(
+            RejectingDHT(),
+            RejectingLock(),
+            p2p_daemon_listen_maddr="/unix/captured-p2pd.sock",
+        )
+        borrowed._owner_pid = os.getpid() + 1
+
+        with patch("node.rpc_server.P2P", FakeP2P):
+            result = asyncio.run(borrowed.replicate_p2p())
+
+        self.assertEqual(result, "replicated-p2p")
+        self.assertEqual(
+            FakeP2P.captured_addresses,
+            ["/unix/captured-p2pd.sock"],
+        )
+
+    def test_borrowed_dht_rejects_other_child_pipe_access(self) -> None:
+        class RejectingLock:
+            def __enter__(self):
+                raise AssertionError("child must not acquire the parent command lock")
+
+            def __exit__(self, *args) -> None:
+                return None
+
+        class DHT:
+            def command(self) -> str:
+                return "unexpected"
+
+        borrowed = _BorrowedDHT(
+            DHT(),
+            RejectingLock(),
+            p2p_daemon_listen_maddr="/unix/captured-p2pd.sock",
+        )
+        borrowed._owner_pid = os.getpid() + 1
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "child processes may only call replicate_p2p",
+        ):
+            borrowed.command()
+
+    def test_reachability_protocol_borrows_the_worker_dht_lock(self) -> None:
+        class FakeDHT:
+            def run_coroutine(self, coroutine):
+                self.captured_coroutine = coroutine
+                return "/unix/reachability-p2pd.sock"
+
+        captured: dict[str, object] = {}
+
+        class FakeReachabilityProtocol:
+            @classmethod
+            def attach_to_dht(cls, dht):
+                captured["dht"] = dht
+                return cls()
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        node.dht = FakeDHT()
+        node.initial_peers = ["/ip4/127.0.0.1/tcp/1/p2p/test"]
+
+        with patch(
+            "node.node.ReachabilityProtocol",
+            FakeReachabilityProtocol,
+        ):
+            node._start_reachability_protocol()
+
+        borrowed = captured["dht"]
+        self.assertIsInstance(borrowed, _BorrowedDHT)
+        self.assertIs(borrowed._dht, node.dht)
+        self.assertIs(borrowed._command_lock, node._dht_command_lock)
+        self.assertEqual(
+            borrowed._p2p_daemon_listen_maddr,
+            "/unix/reachability-p2pd.sock",
+        )
+
+    def test_reachability_stop_before_replicate_completes_is_not_lost(self) -> None:
+        replicate_entered = threading.Event()
+        release_replicate = threading.Event()
+        service_entered = threading.Event()
+        create_calls: list[list[str]] = []
+
+        class FakeCommonP2P:
+            async def get_visible_maddrs(self, *, latest: bool):
+                return []
+
+            async def list_peers(self):
+                return []
+
+        class DelayedDHT:
+            async def replicate_p2p(self):
+                replicate_entered.set()
+                while not release_replicate.is_set():
+                    await asyncio.sleep(0.001)
+                return FakeCommonP2P()
+
+        class FakeProbe:
+            async def shutdown(self) -> None:
+                return None
+
+        class TestReachabilityProtocol(ReachabilityProtocol):
+            @asynccontextmanager
+            async def serve(self, p2p):
+                service_entered.set()
+                yield self
+
+        async def create_probe(initial_peers, **kwargs):
+            create_calls.append(list(initial_peers))
+            return FakeProbe()
+
+        protocol = None
+        with patch("node.reachability.P2P.create", new=create_probe):
+            protocol = TestReachabilityProtocol.attach_to_dht(DelayedDHT())
+            replicate_started = replicate_entered.wait(1.0)
+            first_shutdown_completed = protocol.shutdown(timeout=0.01)
+            release_replicate.set()
+            stopped_without_second_signal = protocol._stopped.wait(1.0)
+            protocol_stopped = protocol.shutdown(timeout=0.1)
+
+        self.assertTrue(replicate_started)
+        self.assertFalse(first_shutdown_completed)
+        self.assertTrue(stopped_without_second_signal)
+        self.assertTrue(protocol_stopped)
+        self.assertFalse(service_entered.is_set())
+        self.assertEqual(create_calls, [])
+
+    def test_node_retains_reachability_owner_until_shutdown_finishes(self) -> None:
+        class PendingReachabilityProtocol:
+            def __init__(self) -> None:
+                self.complete = False
+                self.shutdown_timeouts: list[float] = []
+
+            def shutdown(self, timeout: float) -> bool:
+                self.shutdown_timeouts.append(timeout)
+                return self.complete
+
+        class FakeDHT:
+            peer_id = "peer"
+
+            def __init__(self) -> None:
+                self.shutdown_calls = 0
+                self.alive = True
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+                self.alive = False
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        protocol = PendingReachabilityProtocol()
+        dht = FakeDHT()
+        node.reachability_protocol = protocol
+        node.dht = dht
+        node._offline_published = True
+
+        self.assertFalse(node.turn_off(timeout=0.0))
+        self.assertIs(node.reachability_protocol, protocol)
+        self.assertEqual(dht.shutdown_calls, 0)
+        self.assertTrue(node.has_pending_serving_cleanup())
+
+        protocol.complete = True
+        self.assertTrue(node.turn_off(timeout=1.0))
+        self.assertIsNone(node.reachability_protocol)
+        self.assertEqual(dht.shutdown_calls, 1)
+        self.assertFalse(node.has_pending_serving_cleanup())
+
+    def test_node_start_rejects_pending_reachability_shutdown(self) -> None:
+        class PendingReachabilityProtocol:
+            def shutdown(self, timeout: float) -> bool:
+                return False
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        protocol = PendingReachabilityProtocol()
+        node.reachability_protocol = protocol
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "previous reachability service shutdown is still in progress",
+        ):
+            node.start()
+
+        self.assertIs(node.reachability_protocol, protocol)
+
     def test_node_reannounce_refreshes_members_index_expiration(self) -> None:
+        verification_calls: list[dict[str, object]] = []
+
+        def verify_publication(**kwargs):
+            verification_calls.append(kwargs)
+            return classify_publication(
+                **kwargs,
+                observed_value=kwargs["expected_value"],
+                observed_expiration=kwargs["attempted_expiration"],
+                minimum_safe_expiration=kwargs["attempted_expiration"] - 1,
+            )
+
         class FakeRPC:
             def __init__(self) -> None:
                 self.publication_expirations: list[float] = []
@@ -1971,7 +2428,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 return True
 
             def get_uid(self) -> str:
-                return "test-prefix.0.1"
+                return "test-prefix-peer.0.0.1.0"
 
             def refresh_publication(self, expiration_time: float) -> None:
                 self.publication_expirations.append(expiration_time)
@@ -2014,7 +2471,9 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 self.expirations.setdefault(f"{key}:exclude_self", []).append(
                     float(exclude_self)
                 )
-                return True
+                # Hivemind documents False as either no acknowledgement or a
+                # newer record. The independent verifier determines which.
+                return False
 
             def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
                 value = self.values.get(key)
@@ -2030,6 +2489,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             dht_prefix="test-prefix",
             initial_peers=["/ip4/127.0.0.1/tcp/7001/p2p/bootstrap"],
             device="cpu",
+            publication_verifier=verify_publication,
         )
         node.rpc = FakeRPC()
         node.handler = FakeHandler()
@@ -2066,6 +2526,17 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         announced = node.dht.values["test-prefix.node_info.peer"]
         self.assertTrue(announced["rpc_publication"]["fresh"])
         self.assertTrue(node.get_announcement_status()["fresh"])
+        self.assertEqual(len(verification_calls), 4)
+        announcement = node.get_announcement_status()
+        self.assertEqual(announcement["publication_state"], "healthy")
+        self.assertEqual(announcement["consecutive_publication_failures"], 0)
+        self.assertTrue(
+            all(
+                outcome["disposition"] == "superseded_equivalent"
+                for outcome in announcement["publication_outcomes"].values()
+            )
+        )
+        self.assertFalse(announcement["transport_recovery_eligible"])
 
         class FakeAnnounceThread:
             def is_alive(self) -> bool:
@@ -2074,7 +2545,8 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         node._announce_thread = FakeAnnounceThread()
         self.assertTrue(node.is_running())
         node._last_announce_success_at = time.time() - DHT_EXPIRY_TIME - 1
-        self.assertFalse(node.is_running())
+        self.assertFalse(node.get_announcement_status()["fresh"])
+        self.assertTrue(node.is_running())
 
     def test_remote_member_and_metadata_leases_survive_repeated_expiry_windows(self) -> None:
         class FakeRPC:
@@ -2082,7 +2554,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 return True
 
             def get_uid(self) -> str:
-                return "test-prefix.0.1"
+                return "test-prefix-peer.0.0.12.0"
 
             def refresh_publication(self, expiration_time: float) -> None:
                 return None
@@ -2151,7 +2623,10 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         )
 
         dht_times = [100.0 + index * (DHT_EXPIRY_TIME + 1) for index in range(11)]
-        with patch("node.node.get_dht_time", side_effect=dht_times):
+        with patch(
+            "node.node.get_dht_time",
+            side_effect=[value for value in dht_times for _ in range(3)],
+        ):
             for _ in dht_times:
                 node._announce()
                 nodes, errors = sequential._scan_node_metadata()
@@ -2160,6 +2635,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         self.assertTrue(node.dht.assert_remote)
         self.assertEqual(node._consecutive_announce_failures, 0)
+        self.assertEqual(node._consecutive_publication_failures, 0)
 
     def test_node_transport_recovery_preserves_loaded_layers(self) -> None:
         class FakeRPC:
@@ -2169,6 +2645,9 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             def stop(self) -> None:
                 self.stopped = True
 
+            def is_running(self) -> bool:
+                return not self.stopped
+
         class FakeDHT:
             peer_id = "peer-stable"
 
@@ -2177,6 +2656,9 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
             def shutdown(self) -> None:
                 self.stopped = True
+
+            def is_alive(self) -> bool:
+                return not self.stopped
 
         node = Node(
             model_name="facebook/opt-125m",
@@ -2196,25 +2678,52 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         node._consecutive_announce_failures = 2
         node._last_announce_error = "remote member lease refresh timed out"
 
+        ambiguous = node._classify_publication(
+            key="test-prefix.node_info.peer-stable",
+            subkey=None,
+            store_returned=False,
+            expected_value={"peer_id": "peer-stable"},
+            attempted_expiration=123.0,
+            equivalent=lambda expected, observed: expected == observed,
+        )
+        self.assertEqual(ambiguous.disposition.value, "unverified")
+        self.assertFalse(ambiguous.permits_transport_recovery)
+
+        replacement_rpc = FakeRPC()
+
+        def restart_with_same_identity(*, expected_peer_id: str) -> None:
+            self.assertEqual(expected_peer_id, "peer-stable")
+            node.dht = FakeDHT()
+            node.rpc = replacement_rpc
+            node._running = True
+
         with (
             patch("node.node.DHT_RECOVERY_FAILURE_THRESHOLD", 2),
-            patch.object(node, "start") as restart,
+            patch.object(
+                node,
+                "start",
+                side_effect=restart_with_same_identity,
+            ) as restart,
         ):
+            self.assertFalse(node._should_recover_network())
+            node.mark_transport_failure_verified(
+                "independent worker transport probe failed"
+            )
             self.assertTrue(node._should_recover_network())
             node._recover_network_transport()
 
         self.assertTrue(rpc.stopped)
         self.assertTrue(dht.stopped)
         self.assertIs(node.handler, handler)
-        self.assertIsNone(node.rpc)
-        self.assertIsNone(node.dht)
+        self.assertIs(node.rpc, replacement_rpc)
+        self.assertEqual(node.get_peer_id(), "peer-stable")
         self.assertEqual(node._network_recovery_count, 1)
         restart.assert_called_once_with(expected_peer_id="peer-stable")
         status = node.get_announcement_status()
         self.assertTrue(status["persistent_peer_identity"])
         self.assertEqual(
             status["last_network_recovery_trigger"],
-            "remote member lease refresh timed out",
+            "independent worker transport probe failed",
         )
         self.assertEqual(status["last_network_recovery_failure_count"], 2)
         self.assertEqual(
@@ -2226,6 +2735,312 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             "peer-stable",
         )
         self.assertTrue(status["last_network_recovery_identity_preserved"])
+
+    def test_dead_rpc_runtime_becomes_recovery_eligible_after_repeated_heartbeats(self) -> None:
+        class DeadRPC:
+            def refresh_publication(self, expiration_time: float) -> None:
+                raise RuntimeError("RPC runtime is not running")
+
+            def get_publication_status(self) -> dict:
+                return {"fresh": False, "hivemind_publisher_alive": False}
+
+            def get_receipt_capability(self, peer_id: str):
+                return None
+
+            def get_safety_snapshot(self):
+                return None
+
+            def get_uid(self) -> str:
+                return "test-prefix.0.1"
+
+            def is_running(self) -> bool:
+                return False
+
+        class LoadedHandler:
+            load_diagnostics = None
+
+            def is_loaded(self) -> bool:
+                return True
+
+        class HealthyDHT:
+            peer_id = "peer-stable"
+
+            def store(
+                self,
+                *,
+                key: str,
+                value,
+                expiration_time: float,
+                subkey: str | None = None,
+                exclude_self: bool = False,
+            ) -> bool:
+                return True
+
+            def get(self, key: str, latest: bool = True):
+                return None
+
+            def get_visible_maddrs(self) -> list[str]:
+                return []
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        node.dht = HealthyDHT()
+        node.rpc = DeadRPC()
+        node.handler = LoadedHandler()
+        node._running = True
+        node._announce_enabled = True
+
+        with (
+            patch("node.node.DHT_RECOVERY_FAILURE_THRESHOLD", 2),
+            patch("node.node.get_dht_time", return_value=100.0),
+            patch.object(node, "_recover_network_transport") as recover,
+        ):
+            node._run_announce_heartbeat()
+            self.assertEqual(node._consecutive_announce_failures, 1)
+            self.assertFalse(node._should_recover_network())
+            recover.assert_not_called()
+
+            node._run_announce_heartbeat()
+            self.assertEqual(node._consecutive_announce_failures, 2)
+            self.assertTrue(node._should_recover_network())
+            recover.assert_called_once_with()
+
+        status = node.get_announcement_status()
+        self.assertTrue(status["transport_recovery_eligible"])
+        self.assertIn("worker_rpc_runtime_not_alive", status["last_error"])
+
+    def test_pending_serving_cleanup_remains_retryable_after_partial_turn_off(self) -> None:
+        class RetryRPC:
+            def __init__(self) -> None:
+                self.stop_calls = 0
+
+            def stop(self, timeout: float = 5.0) -> bool:
+                self.stop_calls += 1
+                return self.stop_calls >= 2
+
+            def is_running(self) -> bool:
+                return self.stop_calls == 0
+
+        class LoadedHandler:
+            def is_loaded(self) -> bool:
+                return True
+
+        class FakeDHT:
+            peer_id = "peer"
+
+            def __init__(self) -> None:
+                self.shutdown_calls = 0
+                self.alive = True
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+                self.alive = False
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        rpc = RetryRPC()
+        dht = FakeDHT()
+        node.rpc = rpc
+        node.handler = LoadedHandler()
+        node.dht = dht
+        node._running = True
+        node._offline_published = True
+
+        self.assertFalse(node.turn_off(timeout=0.01))
+        self.assertTrue(node.has_pending_serving_cleanup())
+        self.assertIs(node.rpc, rpc)
+        self.assertIs(node.dht, dht)
+        self.assertEqual(dht.shutdown_calls, 0)
+
+        self.assertTrue(node.turn_off(timeout=1.0))
+        self.assertEqual(rpc.stop_calls, 2)
+        self.assertEqual(dht.shutdown_calls, 1)
+        self.assertIsNone(node.rpc)
+        self.assertIsNone(node.dht)
+        self.assertFalse(node.has_pending_serving_cleanup())
+
+    def test_failed_recovery_remains_owned_until_turn_off_finishes_cleanup(
+        self,
+    ) -> None:
+        shutdown_entered = threading.Event()
+        release_shutdown = threading.Event()
+        self.addCleanup(release_shutdown.set)
+
+        class ReadyRPC:
+            def __init__(self) -> None:
+                self.stop_calls = 0
+
+            def stop(self, timeout: float = 5.0) -> bool:
+                self.stop_calls += 1
+                return True
+
+            def is_running(self) -> bool:
+                return self.stop_calls == 0
+
+        class LoadedHandler:
+            def is_loaded(self) -> bool:
+                return True
+
+        class BlockingDHT:
+            peer_id = "peer-stable"
+
+            def __init__(self) -> None:
+                self.alive = True
+                self.shutdown_calls = 0
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+                shutdown_entered.set()
+                if not release_shutdown.wait(2.0):
+                    raise TimeoutError("test did not release DHT shutdown")
+                self.alive = False
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        rpc = ReadyRPC()
+        dht = BlockingDHT()
+        node.rpc = rpc
+        node.handler = LoadedHandler()
+        node.dht = dht
+        node._running = True
+        node._announce_enabled = True
+        node._offline_published = True
+        node.mark_transport_failure_verified(
+            "independent worker transport probe failed"
+        )
+
+        with patch("node.node.DEFAULT_SHUTDOWN_TIMEOUT_SECONDS", 0.01):
+            node._recover_network_transport()
+
+        self.assertTrue(shutdown_entered.is_set())
+        self.assertEqual(rpc.stop_calls, 1)
+        self.assertFalse(node._running)
+        self.assertTrue(node._announce_enabled)
+        self.assertTrue(node.requires_turn_off())
+        self.assertTrue(node.has_pending_serving_cleanup())
+        self.assertIs(node._dht_shutdown_target, dht)
+
+        self.assertFalse(node.turn_off(timeout=0.01))
+        self.assertFalse(node._announce_enabled)
+        self.assertTrue(node.requires_turn_off())
+        self.assertTrue(node.has_pending_serving_cleanup())
+
+        release_shutdown.set()
+        self.assertTrue(node.turn_off(timeout=1.0))
+        self.assertFalse(node.requires_turn_off())
+        self.assertFalse(node.has_pending_serving_cleanup())
+        self.assertFalse(node._should_recover_network())
+        self.assertIsNotNone(node.handler)
+        self.assertEqual(dht.shutdown_calls, 1)
+
+        with patch.object(node, "_recover_network_transport") as recover:
+            node._run_announce_heartbeat()
+        recover.assert_not_called()
+
+    def test_cleanly_off_node_does_not_require_turn_off(self) -> None:
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+
+        self.assertFalse(node.requires_turn_off())
+        self.assertFalse(node.has_pending_serving_cleanup())
+
+    def test_get_info_waits_for_one_coherent_node_lifecycle_snapshot(self) -> None:
+        class LoadedHandler:
+            load_diagnostics = None
+
+            def is_loaded(self) -> bool:
+                return True
+
+            def get_accounting_snapshot(self) -> dict:
+                return {}
+
+        class ReadyRPC:
+            def is_running(self) -> bool:
+                return True
+
+            def get_uid(self) -> str:
+                return "test-prefix.0.1"
+
+        class FakeDHT:
+            peer_id = "peer"
+
+            def get_visible_maddrs(self) -> list[str]:
+                return ["/ip4/127.0.0.1/tcp/1234"]
+
+        class AliveThread:
+            def is_alive(self) -> bool:
+                return True
+
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        node.handler = LoadedHandler()
+        node.rpc = ReadyRPC()
+        node.dht = FakeDHT()
+        node._running = True
+        node._announce_thread = AliveThread()
+        reader_started = __import__("threading").Event()
+        reader_finished = __import__("threading").Event()
+        snapshots: list[dict] = []
+
+        def read_info() -> None:
+            reader_started.set()
+            snapshots.append(node.get_info())
+            reader_finished.set()
+
+        with node._lifecycle_lock:
+            reader = __import__("threading").Thread(target=read_info)
+            reader.start()
+            self.assertTrue(reader_started.wait(1.0))
+            self.assertFalse(reader_finished.wait(0.05))
+            node._last_peer_id = "peer"
+            node._running = False
+            node.rpc = None
+            node.dht = None
+            node._announce_thread = None
+
+        reader.join(1.0)
+        self.assertFalse(reader.is_alive())
+        self.assertTrue(reader_finished.is_set())
+        self.assertEqual(len(snapshots), 1)
+        snapshot = snapshots[0]
+        self.assertEqual(snapshot["peer_id"], "peer")
+        self.assertFalse(snapshot["running"])
+        self.assertFalse(snapshot["rpc_running"])
+        self.assertIsNone(snapshot["rpc_uid"])
+        self.assertTrue(snapshot["layers_loaded"])
+        self.assertFalse(snapshot["announcement"]["thread_alive"])
+        self.assertFalse(snapshot["serving_cleanup_pending"])
 
     def test_node_turn_off_stops_rpc_but_keeps_loaded_layers(self) -> None:
         class FakeRPC:
@@ -2286,6 +3101,9 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             def shutdown(self) -> None:
                 self.shutdown_called = True
 
+            def is_alive(self) -> bool:
+                return not self.shutdown_called
+
         node = Node(
             model_name="facebook/opt-125m",
             layer_start=0,
@@ -2304,7 +3122,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
         node.turn_off(timeout=0.01)
 
-        self.assertEqual(fake_rpc.timeout, 0.01)
+        self.assertLessEqual(fake_rpc.timeout, 0.01)
         self.assertFalse(fake_rpc.is_running())
         self.assertTrue(fake_dht.shutdown_called)
         self.assertFalse(fake_handler.unloaded)
@@ -2321,6 +3139,104 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(status["maddrs"], ["/ip4/127.0.0.1/tcp/1234"])
         self.assertTrue(status["layers_loaded"])
         self.assertFalse(status["rpc_running"])
+
+    def test_node_stop_publishes_offline_before_transport_teardown(self) -> None:
+        from hivemind.p2p import PeerID
+
+        events: list[str] = []
+        peer_id = str(PeerID(b"\x12\x20" + b"c" * 32))
+        rpc_uid = RPCServer.build_rpc_uid(
+            "test-prefix",
+            0,
+            1,
+            provider_peer_id=peer_id,
+        )
+
+        class FakeRPC:
+            def is_running(self) -> bool:
+                return True
+
+            def get_uid(self) -> str:
+                return rpc_uid
+
+            def stop(self, timeout: float = 5.0) -> None:
+                events.append("rpc_stop")
+
+        class FakeHandler:
+            def is_loaded(self) -> bool:
+                return True
+
+            def unload(self) -> None:
+                events.append("handler_unload")
+
+        class FakeDHT:
+            def __init__(self) -> None:
+                self.peer_id = peer_id
+                self.values: dict[str, object] = {}
+                self.stopped = False
+
+            def store(
+                self,
+                key: str,
+                value: object,
+                expiration_time: float,
+                subkey: str | None = None,
+                exclude_self: bool = False,
+            ) -> bool:
+                if subkey is None:
+                    self.values[key] = value
+                else:
+                    self.values.setdefault(key, {})[subkey] = value
+                if key.endswith(f".node_info.{peer_id}"):
+                    events.append("offline_metadata")
+                return True
+
+            def get(self, key: str, latest: bool = True) -> DummyDHTResult | None:
+                value = self.values.get(key)
+                return DummyDHTResult(value) if value is not None else None
+
+            def get_visible_maddrs(self) -> list[str]:
+                return ["/ip4/127.0.0.1/tcp/1234"]
+
+            def shutdown(self) -> None:
+                events.append("dht_shutdown")
+                self.stopped = True
+
+            def is_alive(self) -> bool:
+                return not self.stopped
+
+        fake_dht = FakeDHT()
+        node = Node(
+            model_name="facebook/opt-125m",
+            layer_start=0,
+            layer_end=1,
+            dht_prefix="test-prefix",
+            device="cpu",
+        )
+        node.rpc = FakeRPC()
+        node.handler = FakeHandler()
+        node.dht = fake_dht
+        node._running = True
+
+        node.stop(timeout=0.01)
+
+        self.assertLess(events.index("offline_metadata"), events.index("rpc_stop"))
+        self.assertLess(events.index("rpc_stop"), events.index("handler_unload"))
+        self.assertLess(events.index("handler_unload"), events.index("dht_shutdown"))
+        metadata = fake_dht.values[f"test-prefix.node_info.{peer_id}"]
+        self.assertFalse(metadata["running"])
+        self.assertFalse(metadata["rpc_running"])
+
+        scanner = RemoteSequential(
+            fake_dht,
+            "test-prefix",
+            num_layers=1,
+            model_name="facebook/opt-125m",
+        )
+        discovered, errors = scanner._scan_node_metadata()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(discovered), 1)
+        self.assertFalse(scanner._is_serving_node(discovered[0]))
 
     def test_node_start_reuses_loaded_handler_when_resuming(self) -> None:
         import node.node as node_module
@@ -2368,9 +3284,17 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 return ["/ip4/127.0.0.1/tcp/4321"]
 
         class FakeRPC:
-            def __init__(self, handler, dht, dht_prefix, uid_suffix=None) -> None:
+            def __init__(
+                self,
+                handler,
+                dht,
+                dht_prefix,
+                uid_suffix=None,
+                dht_command_lock=None,
+            ) -> None:
                 self.handler = handler
                 self.running = False
+                self.dht_command_lock = dht_command_lock
 
             def start(self) -> None:
                 self.running = True
@@ -2415,6 +3339,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertIs(node.handler, fake_handler)
         self.assertEqual(fake_handler.load_calls, 0)
         self.assertTrue(node.is_running())
+        self.assertIs(node.rpc.dht_command_lock, node._dht_command_lock)
         self.assertEqual(
             dht_kwargs["host_maddrs"],
             ["/ip4/0.0.0.0/tcp/0"],
@@ -2444,6 +3369,9 @@ class RemoteSequentialRouteTests(unittest.TestCase):
 
             def shutdown(self) -> None:
                 self.shutdown_called = True
+
+            def is_alive(self) -> bool:
+                return not self.shutdown_called
 
         config = P2PNetworkConfig(
             mode="direct",
@@ -2530,8 +3458,16 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 return [relay_address]
 
         class FakeRPC:
-            def __init__(self, handler, dht, dht_prefix, uid_suffix=None) -> None:
+            def __init__(
+                self,
+                handler,
+                dht,
+                dht_prefix,
+                uid_suffix=None,
+                dht_command_lock=None,
+            ) -> None:
                 self.running = False
+                self.dht_command_lock = dht_command_lock
 
             def start(self) -> None:
                 self.running = True
@@ -2587,6 +3523,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(node.connection_mode, "relay")
         self.assertFalse(node.direct_reachability)
         self.assertTrue(node.transport_verified)
+        self.assertIs(node.rpc.dht_command_lock, node._dht_command_lock)
         self.assertIn(True, refreshes)
         self.assertEqual(node.get_visible_maddrs(), [relay_address])
         self.assertEqual(
@@ -2787,6 +3724,237 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             second.unload()
 
         DistributedGenerator.clear_component_cache()
+
+    def test_public_generator_operations_hold_exact_component_ownership(self) -> None:
+        generator = DistributedGenerator("facebook/opt-125m", sequential=object())
+        generator._loaded = True
+        observed: list[list[str]] = []
+
+        async def stream_owned(**_kwargs):
+            observed.append(sorted(generator._active_operations.values()))
+            yield {"done": True}
+
+        async def generated_output_owned(**_kwargs):
+            observed.append(sorted(generator._active_operations.values()))
+            return {"status": "compared"}
+
+        def next_token_owned(**_kwargs):
+            observed.append(sorted(generator._active_operations.values()))
+            return {"status": "compared"}
+
+        def trace_owned(**_kwargs):
+            observed.append(sorted(generator._active_operations.values()))
+            return {"status": "traced"}
+
+        generator._generate_stream_owned = stream_owned
+        generator._compare_generated_output_owned = generated_output_owned
+        generator._compare_next_token_logits_owned = next_token_owned
+        generator._trace_generation_owned = trace_owned
+
+        async def run_async_operations() -> None:
+            self.assertEqual(
+                [item async for item in generator.generate_stream("hello")],
+                [{"done": True}],
+            )
+            self.assertEqual(
+                await generator.compare_generated_output("hello"),
+                {"status": "compared"},
+            )
+
+        asyncio.run(run_async_operations())
+        self.assertEqual(
+            generator.compare_next_token_logits("hello"),
+            {"status": "compared"},
+        )
+        self.assertEqual(
+            generator.trace_generation("hello"),
+            {"status": "traced"},
+        )
+
+        self.assertEqual(
+            observed,
+            [
+                ["generate"],
+                ["generated_output_parity"],
+                ["next_token_parity"],
+                ["trace"],
+            ],
+        )
+        self.assertEqual(generator._active_operations, {})
+
+    def test_generator_rejects_concurrent_public_operation_and_reopens_after_release(
+        self,
+    ) -> None:
+        generator = DistributedGenerator("facebook/opt-125m", sequential=object())
+        generator._loaded = True
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        parity_calls: list[str] = []
+
+        async def blocking_stream(**_kwargs):
+            first_started.set()
+            await release_first.wait()
+            yield {"done": True}
+
+        async def parity_owned(**_kwargs):
+            parity_calls.append("called")
+            return {"status": "compared"}
+
+        generator._generate_stream_owned = blocking_stream
+        generator._compare_generated_output_owned = parity_owned
+
+        async def exercise_admission() -> None:
+            stream = generator.generate_stream("first request")
+            first = asyncio.create_task(stream.__anext__())
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "busy with active generate operation.*generated_output_parity",
+            ):
+                await generator.compare_generated_output("second request")
+            self.assertEqual(parity_calls, [])
+            self.assertEqual(list(generator._active_operations.values()), ["generate"])
+
+            release_first.set()
+            self.assertEqual(await asyncio.wait_for(first, timeout=1), {"done": True})
+            await stream.aclose()
+
+            self.assertEqual(
+                await generator.compare_generated_output("third request"),
+                {"status": "compared"},
+            )
+
+        asyncio.run(exercise_admission())
+        self.assertEqual(parity_calls, ["called"])
+        self.assertEqual(generator._active_operations, {})
+
+    def test_busy_rejection_preserves_active_operation_cancellation(self) -> None:
+        generator = DistributedGenerator("facebook/opt-125m", sequential=object())
+        generator._loaded = True
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        trace_called = False
+
+        async def blocking_stream(**_kwargs):
+            first_started.set()
+            await release_first.wait()
+            yield {"done": True}
+
+        def trace_owned(**_kwargs):
+            nonlocal trace_called
+            trace_called = True
+            return {"status": "traced"}
+
+        generator._generate_stream_owned = blocking_stream
+        generator._trace_generation_owned = trace_owned
+
+        async def exercise_cancellation() -> None:
+            stream = generator.generate_stream("first request")
+            first = asyncio.create_task(stream.__anext__())
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+            generator.request_stop()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "busy with active generate operation.*trace",
+            ):
+                generator.trace_generation("diagnostic request")
+            self.assertFalse(trace_called)
+            self.assertTrue(generator._stop_requested)
+            self.assertTrue(generator._stop_event.is_set())
+
+            release_first.set()
+            self.assertEqual(await asyncio.wait_for(first, timeout=1), {"done": True})
+            await stream.aclose()
+
+        asyncio.run(exercise_cancellation())
+        self.assertEqual(generator._active_operations, {})
+
+    def test_unload_retains_components_until_active_trace_releases_ownership(self) -> None:
+        class DummyTokenizer:
+            eos_token_id = 0
+
+            def encode(self, prompt: str, return_tensors: str = "pt") -> torch.Tensor:
+                return torch.tensor([[1, 2]])
+
+            def decode(self, token_ids, skip_special_tokens: bool = True) -> str:
+                return "x"
+
+        class BlockingSequential:
+            def __init__(self) -> None:
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def forward(self, hidden_states, **_kwargs):
+                self.started.set()
+                if not self.release.wait(1):
+                    raise TimeoutError("test did not release trace operation")
+                return hidden_states, ["peer… (layers 0→1)"]
+
+        sequential = BlockingSequential()
+        generator = DistributedGenerator(
+            "facebook/opt-125m",
+            sequential=sequential,
+            device="cpu",
+        )
+        tokenizer = DummyTokenizer()
+        embed_tokens = nn.Embedding(10, 4)
+        generator._loaded = True
+        generator.tokenizer = tokenizer
+        generator.embed_tokens = embed_tokens
+        generator.position_embeddings = nn.Embedding(8, 4)
+        generator.norm = nn.Identity()
+        generator.lm_head = nn.Linear(4, 10)
+
+        trace_result: dict[str, object] = {}
+        trace_error: list[BaseException] = []
+
+        def run_trace() -> None:
+            try:
+                trace_result.update(
+                    generator.trace_generation("hello", max_new_tokens=1)
+                )
+            except BaseException as exc:
+                trace_error.append(exc)
+
+        trace_thread = threading.Thread(target=run_trace, daemon=True)
+        trace_thread.start()
+        self.assertTrue(sequential.started.wait(1))
+
+        try:
+            self.assertFalse(generator.unload(timeout=0.01))
+            self.assertTrue(generator.is_loaded())
+            self.assertIs(generator.tokenizer, tokenizer)
+            self.assertIs(generator.embed_tokens, embed_tokens)
+            self.assertEqual(list(generator._active_operations.values()), ["trace"])
+            self.assertTrue(generator._stop_event.is_set())
+
+            async def rejected_generation() -> list[dict]:
+                return [
+                    item
+                    async for item in generator.generate_stream(
+                        "second request",
+                        max_new_tokens=1,
+                    )
+                ]
+
+            with self.assertRaisesRegex(RuntimeError, "unloading"):
+                asyncio.run(rejected_generation())
+            self.assertFalse(generator.clear_stop())
+            self.assertTrue(generator._stop_event.is_set())
+        finally:
+            sequential.release.set()
+            trace_thread.join(1)
+
+        self.assertFalse(trace_thread.is_alive())
+        self.assertEqual(trace_error, [])
+        self.assertEqual(trace_result["steps"], [])
+        self.assertEqual(generator._active_operations, {})
+        self.assertTrue(generator.unload(timeout=0.5))
+        self.assertFalse(generator.is_loaded())
+        self.assertIsNone(generator.tokenizer)
+        self.assertIsNone(generator.embed_tokens)
 
     def test_generate_stream_initializes_position_ids_for_hidden_state_preparation(self) -> None:
         class DummyTokenizer:
@@ -3209,7 +4377,14 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 self.sequential = type(
                     "ReadySequential",
                     (),
-                    {"validate_reachable_route": lambda self: []},
+                    {
+                        "get_health_readiness": lambda self: {
+                            "enabled": True,
+                            "route_ready": True,
+                            "reasons": [],
+                            "selected_route": [],
+                        }
+                    },
                 )()
 
             def is_loaded(self) -> bool:
@@ -3372,7 +4547,14 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 self.sequential = type(
                     "ReadySequential",
                     (),
-                    {"validate_reachable_route": lambda self: []},
+                    {
+                        "get_health_readiness": lambda self: {
+                            "enabled": True,
+                            "route_ready": True,
+                            "reasons": [],
+                            "selected_route": [],
+                        }
+                    },
                 )()
 
             def is_loaded(self) -> bool:
@@ -3477,7 +4659,14 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 self.sequential = type(
                     "ReadySequential",
                     (),
-                    {"validate_reachable_route": lambda self: []},
+                    {
+                        "get_health_readiness": lambda self: {
+                            "enabled": True,
+                            "route_ready": True,
+                            "reasons": [],
+                            "selected_route": [],
+                        }
+                    },
                 )()
 
             def is_loaded(self) -> bool:
@@ -3714,8 +4903,13 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         from api import server as api_server
 
         class DummySequential:
-            def validate_reachable_route(self) -> list[dict]:
-                raise RuntimeError("missing layers")
+            def get_health_readiness(self) -> dict:
+                return {
+                    "enabled": True,
+                    "route_ready": False,
+                    "reasons": ["missing layers"],
+                    "selected_route": [],
+                }
 
         class DummyGenerator:
             model_name = "facebook/opt-125m"
@@ -3735,18 +4929,160 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertFalse(result["route_ready"])
         self.assertEqual(result["reasons"], ["missing layers"])
 
+    def test_generator_status_never_starts_an_unowned_network_probe(self) -> None:
+        from api import server as api_server
+
+        class LegacySequential:
+            validation_calls = 0
+
+            def validate_reachable_route(self) -> list[dict]:
+                self.validation_calls += 1
+                raise AssertionError("status must remain a passive snapshot read")
+
+        class DummyGenerator:
+            model_name = "facebook/opt-125m"
+            sequential = LegacySequential()
+
+            def is_loaded(self) -> bool:
+                return True
+
+        original_generator = api_server.generator
+        api_server.generator = DummyGenerator()
+        try:
+            result = asyncio.run(api_server.get_generator_status())
+        finally:
+            api_server.generator = original_generator
+
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["route_ready"])
+        self.assertEqual(DummyGenerator.sequential.validation_calls, 0)
+        self.assertIn("health snapshot is unavailable", result["reasons"][0])
+
+    def test_network_snapshot_passively_projects_suspended_generator(self) -> None:
+        from api import server as api_server
+
+        class DummySequential:
+            def get_health_readiness(self) -> dict:
+                return {
+                    "enabled": True,
+                    "route_ready": False,
+                    "reasons": ["missing layers"],
+                    "selected_route": [],
+                }
+
+        class DummyGenerator:
+            model_name = "facebook/opt-125m"
+            sequential = DummySequential()
+
+            def is_loaded(self) -> bool:
+                return True
+
+        class DummyDHT:
+            peer_id = "generator-peer"
+
+        class RecordingSupervisor:
+            def __init__(self) -> None:
+                self.updates: list[tuple[str, str, str]] = []
+
+            def snapshot(self) -> dict:
+                return {
+                    "state": "ready",
+                    "resources": {"control_dht": True, "discovery_task": True},
+                    "roles": {
+                        "workers": [],
+                        "generator": {
+                            "peer_id": "generator-peer",
+                            "state": "ready",
+                        },
+                    },
+                }
+
+            def register_role(self, role: str, *, peer_id: str, state: str) -> None:
+                self.updates.append((role, peer_id, state))
+
+        supervisor = RecordingSupervisor()
+        with patch.object(api_server, "generator", DummyGenerator()), patch.object(
+            api_server,
+            "client_dht",
+            DummyDHT(),
+        ), patch.object(api_server, "network_supervisor", supervisor):
+            result = asyncio.run(api_server.get_generator_status())
+            network = api_server._network_snapshot()
+
+        self.assertEqual(result["state"], "suspended")
+        self.assertEqual(supervisor.updates, [])
+        self.assertEqual(network["roles"]["generator"]["state"], "suspended")
+
+    def test_generator_status_does_not_write_the_role_registry(self) -> None:
+        from api import server as api_server
+
+        class DummySequential:
+            def get_health_readiness(self) -> dict:
+                return {
+                    "enabled": True,
+                    "route_ready": True,
+                    "reasons": [],
+                    "selected_route": [
+                        {
+                            "peer_id": "worker-peer",
+                            "layer_start": 0,
+                            "layer_end": 12,
+                        }
+                    ],
+                }
+
+        class DummyGenerator:
+            model_name = "facebook/opt-125m"
+            sequential = DummySequential()
+
+            def is_loaded(self) -> bool:
+                return True
+
+        class DummyDHT:
+            peer_id = "generator-peer"
+
+        class FailingSupervisor:
+            register_calls = 0
+
+            def snapshot(self) -> dict:
+                return {
+                    "state": "ready",
+                    "resources": {"control_dht": True, "discovery_task": True},
+                }
+
+            def register_role(self, role: str, *, peer_id: str, state: str) -> None:
+                self.register_calls += 1
+                raise RuntimeError("role registry unavailable")
+
+        supervisor = FailingSupervisor()
+        with patch.object(api_server, "generator", DummyGenerator()), patch.object(
+            api_server,
+            "client_dht",
+            DummyDHT(),
+        ), patch.object(api_server, "network_supervisor", supervisor):
+            result = asyncio.run(api_server.get_generator_status())
+
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(supervisor.register_calls, 0)
+
     def test_generator_status_reports_startup_route_and_generation_metrics(self) -> None:
         from api import server as api_server
 
         class DummySequential:
-            def validate_reachable_route(self) -> list[dict]:
-                return [
-                    {
-                        "peer_id": "peer-a",
-                        "layer_start": 0,
-                        "layer_end": 12,
-                    }
-                ]
+            def get_health_readiness(self) -> dict:
+                return {
+                    "enabled": True,
+                    "route_ready": True,
+                    "reasons": [],
+                    "selected_route": [
+                        {
+                            "peer_id": "peer-a",
+                            "layer_start": 0,
+                            "layer_end": 12,
+                        }
+                    ],
+                }
 
         class DummyGenerator:
             model_name = "facebook/opt-125m"
@@ -4221,16 +5557,23 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             def load(self) -> None:
                 raise RuntimeError("CUDA error: out of memory")
 
+            def unload(self) -> bool:
+                return True
+
         original_generator_cls = api_server.DistributedGenerator
         original_dht_cls = api_server.hivemind.DHT
         original_sequential_cls = api_server.RemoteSequential
         original_generator = api_server.generator
         original_client_dht = api_server.client_dht
+        original_cleanup_in_progress = api_server._generator_cleanup_in_progress
+        original_pending_cleanup = api_server._pending_generator_cleanup
         api_server.DistributedGenerator = FailingGenerator
         api_server.hivemind.DHT = FakeDHT
         api_server.RemoteSequential = FakeSequential
         api_server.generator = None
         api_server.client_dht = None
+        api_server._generator_cleanup_in_progress = False
+        api_server._pending_generator_cleanup = None
         try:
             result = asyncio.run(
                 api_server.start_generator(
@@ -4247,6 +5590,8 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             api_server.RemoteSequential = original_sequential_cls
             api_server.generator = original_generator
             api_server.client_dht = original_client_dht
+            api_server._generator_cleanup_in_progress = original_cleanup_in_progress
+            api_server._pending_generator_cleanup = original_pending_cleanup
 
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["error"], "cuda_out_of_memory")
@@ -4387,6 +5732,7 @@ class RemoteSequentialRouteTests(unittest.TestCase):
                 device: str,
                 hf_token: str | None,
                 local_model_path: str | None = None,
+                publication_verifier=None,
             ) -> None:
                 self.node_id = f"node-{len(created) + 1}"
                 self.model_name = model_name
@@ -4692,14 +6038,89 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertTrue(first.stopped)
         self.assertFalse(second.stopped)
 
+    def test_delete_node_requests_supervisor_refresh_after_unregister(self) -> None:
+        from api import server as api_server
+
+        class DummyNode:
+            node_id = "node-1"
+            model_name = "facebook/opt-125m"
+
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        class FakeSupervisor:
+            def __init__(self) -> None:
+                self.refresh_requests = 0
+                self.unregistered: list[tuple[str, str | None]] = []
+
+            def snapshot(self) -> dict:
+                return {
+                    "state": "ready",
+                    "resources": {
+                        "control_dht": True,
+                        "discovery_task": True,
+                    },
+                }
+
+            def unregister_role(
+                self,
+                role: str,
+                *,
+                role_id: str | None = None,
+            ) -> None:
+                self.unregistered.append((role, role_id))
+
+            def request_refresh(self) -> None:
+                self.refresh_requests += 1
+
+        dummy = DummyNode()
+        supervisor = FakeSupervisor()
+        original_node = api_server.node
+        original_generator = api_server.generator
+        original_supervisor = api_server.network_supervisor
+        original_local_nodes = dict(api_server.local_nodes)
+        api_server.node = dummy
+        api_server.generator = None
+        api_server.network_supervisor = supervisor
+        api_server.local_nodes.clear()
+        api_server.local_nodes[dummy.node_id] = dummy
+
+        async def run_inline(target, *args, **kwargs):
+            return target(*args, **kwargs)
+
+        try:
+            with patch.object(api_server.asyncio, "to_thread", run_inline):
+                result = asyncio.run(
+                    api_server.delete_node(node_id=dummy.node_id)
+                )
+        finally:
+            api_server.local_nodes.clear()
+            api_server.local_nodes.update(original_local_nodes)
+            api_server.node = original_node
+            api_server.generator = original_generator
+            api_server.network_supervisor = original_supervisor
+
+        self.assertEqual(result["status"], "deleted")
+        self.assertTrue(dummy.stopped)
+        self.assertEqual(supervisor.unregistered, [("worker", "node-1")])
+        self.assertEqual(supervisor.refresh_requests, 1)
+
     def test_shutdown_local_nodes_returns_promptly_when_node_stop_hangs(self) -> None:
         from api import server as api_server
 
         class BlockingNode:
             node_id = "blocking-node"
 
+            def __init__(self) -> None:
+                self.release = __import__("threading").Event()
+                self.stop_calls = 0
+
             def stop(self, timeout: float = 5.0) -> None:
-                time.sleep(1.0)
+                self.stop_calls += 1
+                self.release.wait(1.0)
 
         original_node = api_server.node
         original_local_nodes = dict(api_server.local_nodes)
@@ -4711,37 +6132,82 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             started = time.perf_counter()
             result = api_server._shutdown_local_nodes(timeout=0.01)
             elapsed = time.perf_counter() - started
+            self.assertLess(elapsed, 0.5)
+            self.assertEqual(
+                result,
+                [{"node_id": "blocking-node", "status": "cleanup_pending"}],
+            )
+            self.assertIs(api_server.node, blocking)
+            attempt = api_server._local_node_shutdown_attempts[blocking.node_id]
+            blocking.release.set()
+            attempt.thread.join(1.0)
+            self.assertFalse(attempt.thread.is_alive())
+            self.assertEqual(api_server._shutdown_local_nodes(timeout=1.0), [])
+            self.assertEqual(blocking.stop_calls, 1)
+            self.assertIsNone(api_server.node)
+            self.assertNotIn(
+                blocking.node_id,
+                api_server._local_node_shutdown_attempts,
+            )
         finally:
+            blocking.release.set()
+            api_server._local_node_shutdown_attempts.pop(blocking.node_id, None)
             api_server.local_nodes.clear()
             api_server.local_nodes.update(original_local_nodes)
             api_server.node = original_node
-
-        self.assertLess(elapsed, 0.5)
-        self.assertEqual(result, [{"node_id": "blocking-node", "status": "timeout"}])
-        self.assertIsNone(api_server.node)
 
     def test_shutdown_client_dht_returns_promptly_when_shutdown_hangs(self) -> None:
         from api import server as api_server
 
         class BlockingDHT:
+            def __init__(self) -> None:
+                self.release = __import__("threading").Event()
+                self.shutdown_calls = 0
+
             def shutdown(self) -> None:
-                time.sleep(1.0)
+                self.shutdown_calls += 1
+                self.release.wait(1.0)
 
         original_client_dht = api_server.client_dht
-        api_server.client_dht = BlockingDHT()
+        original_quarantine = api_server._generator_identity_quarantine
+        original_pending_cleanup = api_server._pending_generator_cleanup
+        original_attempts = dict(api_server._generator_dht_shutdown_attempts)
+        blocking = BlockingDHT()
+        api_server.client_dht = blocking
+        api_server._generator_identity_quarantine = None
+        api_server._pending_generator_cleanup = None
+        api_server._generator_dht_shutdown_attempts.clear()
         try:
             started = time.perf_counter()
             result = api_server._shutdown_client_dht(timeout=0.01)
             elapsed = time.perf_counter() - started
             client_after_shutdown = api_server.client_dht
+            blocking.release.set()
+            completed = asyncio.run(
+                api_server._unload_generator_runtime(
+                    "Retry retained test cleanup.",
+                    timeout=1.0,
+                )
+            )
         finally:
+            blocking.release.set()
             api_server.client_dht = original_client_dht
+            api_server._generator_identity_quarantine = original_quarantine
+            api_server._pending_generator_cleanup = original_pending_cleanup
+            api_server._generator_dht_shutdown_attempts.clear()
+            api_server._generator_dht_shutdown_attempts.update(original_attempts)
 
         self.assertLess(elapsed, 0.5)
         self.assertEqual(
             result,
-            {"status": "timeout", "remote_expert_p2p": "stopped"},
+            {"status": "pending", "remote_expert_p2p": "stopped"},
         )
+        self.assertEqual(
+            completed["network"],
+            {"status": "stopped", "remote_expert_p2p": "stopped"},
+        )
+        self.assertEqual(completed["status"], "unloaded")
+        self.assertEqual(blocking.shutdown_calls, 1)
         self.assertIsNone(client_after_shutdown)
         self.assertIs(api_server.client_dht, original_client_dht)
 

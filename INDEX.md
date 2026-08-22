@@ -18,7 +18,7 @@
 | Main documentation landing page           | `docs/README.md`                          |
 | Docs-only routing                         | `docs/INDEX.md`                           |
 | Repo file responsibilities                | `docs/REPO_MAP.md`                        |
-| Current backend/frontend/DHT architecture | `docs/CURRENT_ARCHITECTURE.md`            |
+| Current backend/frontend/network architecture | `docs/CURRENT_ARCHITECTURE.md`        |
 | Runtime flows                             | `docs/FLOWS.md`                           |
 | Implementation roadmap                    | `docs/IMPLEMENTATION.md`                  |
 | Petals comparison                         | `docs/PETALS_COMPARISON.md`               |
@@ -50,7 +50,7 @@
 | Health-aware route failover policy        | `backend/client/failover.py`              |
 | Peer-addressed expert protocol            | `tasks/sprints/sprint-28-peer-addressed-expert-protocol.md` |
 | Peer-addressed expert RPC tests            | `backend/tests/test_peer_addressed_rpc.py` |
-| Persistent network lifecycle plan         | `tasks/sprints/sprint-29-persistent-network-supervisor.md` |
+| Persistent network supervisor implementation | `tasks/sprints/sprint-29-persistent-network-supervisor.md` |
 | Transactional layer placement plan        | `tasks/sprints/sprint-30-transactional-swarm-placement.md` |
 | Session and KV-cache inference plan       | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` |
 | Infrastructure resilience and final architecture acceptance | `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` |
@@ -111,7 +111,7 @@
 | `tasks/sprints/sprint-26-credit-gated-api-access.md` | Active sprint for fair-use chat, verified-credit API access, and signed inference capabilities. |
 | `tasks/sprints/sprint-27-frontend-experience-and-model-discovery.md` | Proposed sprint for remote-model discovery, role clarity, coherent runtime status, diagnostics, and desktop UI optimization. |
 | `tasks/sprints/sprint-28-peer-addressed-expert-protocol.md` | Locally implemented peer-unique expert ownership, exact peer dispatch, and Hivemind 1.1.12 compatibility; physical rollout remains open. |
-| `tasks/sprints/sprint-29-persistent-network-supervisor.md` | Planned sprint for backend-owned discovery, explicit network state, publication ownership, and evidence-based transport recovery. |
+| `tasks/sprints/sprint-29-persistent-network-supervisor.md` | Implemented backend-owned discovery, explicit network state, last-good topology, publication ownership, evidence-based transport recovery, and exact-handle lifecycle ownership; physical validation remains open. |
 | `tasks/sprints/sprint-30-transactional-swarm-placement.md` | Planned sprint for authoritative layer reservations, provider lease states, and atomic placement. |
 | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` | Planned sprint for bounded remote prefill/decode sessions, key/value caches, parity, and safe recovery. |
 | `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` | Planned sprint for separated infrastructure roles, independent redundancy, failure injection, and final architecture evidence. |
@@ -138,7 +138,7 @@
 | `docs/INDEX.md`                    | Docs-only routing index.                                  |
 | `docs/README.md`                   | Documentation landing page, project goal, and end vision. |
 | `docs/REPO_MAP.md`                 | Source-file responsibilities.                             |
-| `docs/CURRENT_ARCHITECTURE.md`     | Current architecture, network goal, and limitations.      |
+| `docs/CURRENT_ARCHITECTURE.md`     | Current architecture, persistent network control plane, role identities, publication/recovery policy, generation, and limitations. |
 | `docs/FLOWS.md`                    | Runtime flows.                                            |
 | `docs/IMPLEMENTATION.md`           | Practical implementation roadmap and long-term phases.    |
 | `docs/PETALS_COMPARISON.md`        | Comparison with Petals and project-owned public swarm direction. |
@@ -168,14 +168,18 @@
 | `backend/main.py`        | Uvicorn entry point.                                                                 |
 | `backend/colab_worker.py` | Headless remote worker entry point with browser OAuth support for Colab and GPU hosts. |
 | `backend/api/`           | FastAPI app, root `.env` loading, settings/token endpoints, Hugging Face OAuth/download helpers, and local model import registry. |
-| `backend/api/lifecycle_jobs.py` | Thread-safe long-running node/generator job state, deduplication, progress, and cancellation requests. |
+| `backend/api/lifecycle_jobs.py` | Thread-safe long-running node/generator jobs, admission closure, deduplication, progress, cancellation, and bounded worker shutdown. |
 | `backend/api/runtime_state.py` | Authoritative generator readiness state machine and bounded structured runtime diagnostic events. |
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
+| `backend/client/sequential.py` | Validated route construction and exact peer dispatch, with optional supervisor-owned topology input. |
 | `backend/client/coverage.py` | Pure adjacent-range route planning, provider segmentation, snapshot revision, and serving recommendation logic. |
 | `backend/client/rpc_policy.py` | Validated remote-expert attempt policy, failure classification, and safe receipt fallback rules. |
 | `backend/incentives/` | Ed25519 identities, canonical BLAKE3 receipts, SQLite settlement, hashed developer API keys, credit reservations, and signed inference capabilities. |
+| `backend/network/` | Persistent control-plane discovery, immutable last-good topology, role state, publication verification, and typed publication outcomes. |
+| `backend/network/supervisor.py` | Backend-lifespan network supervisor with an independent cache-disabled DHT, passive topology snapshots, structured failures, role identities, and exact-handle cleanup/quarantine. |
+| `backend/network/publication.py` | Hivemind 1.1.12-aware publication-result classifier that separates equivalent newer records, conflicts, weak acknowledgement, and verified local transport loss. |
 | `backend/node/`          | Serving node, layer loading, direct/relay transport, Hivemind RPC, and GPU monitoring. |
-| `backend/node/reachability.py` | Petals-derived independent direct-reachability probe used before relay fallback. |
+| `backend/node/reachability.py` | Petals-derived independent direct-reachability probe with persistent stop requests and exact startup/shutdown ownership before relay fallback. |
 | `backend/node/relay_compat.py` | Hivemind 1.1.12 compatibility shim that selects configured trusted relays as static AutoRelay candidates. |
 | `backend/models/`        | Model-specific adapter placeholders and architecture-specific preprocessing helpers. |
 | `backend/traces/`        | Gitignored runtime JSON generation traces written by `/generator/trace`.             |
@@ -187,7 +191,7 @@
 | `backend/tinyllama_performance_probe.py` | Runs a bounded cached TinyLlama distributed timing, accounting, resource, and cleanup baseline. |
 | `backend/relay_probe.py` | Minimal Hivemind-only circuit-relay reservation probe for Sprint 16 diagnostics.     |
 | `backend/tensor_payload_probe.py` | Runs a bounded, checkpointed legacy tensor sweep against one exact direct or relayed physical worker without chat sampling or receipts. |
-| `backend/constants.py`   | Supported models, DHT constants, transport settings, and generation defaults.        |
+| `backend/constants.py`   | Supported models, DHT constants, transport settings, stable role identity paths, and generation defaults. |
 | `backend/pyproject.toml` | Python project metadata and dependencies.                                            |
 | `backend/uv.lock`        | Python dependency lockfile.                                                          |
 | `backend/tests/test_gpu_monitor.py` | Focused runtime resource-monitor metric and failure-path tests.                       |
@@ -201,7 +205,10 @@
 | `backend/tests/test_tinyllama_performance_probe.py` | TinyLlama probe bounds, metric sanitization, and acceptance-contract regressions. |
 | `backend/tests/test_tensor_payload_probe.py` | Controlled-target validation, tensor byte accounting, repeated-canary ordering, legacy-only dispatch, and first-failure stop regressions. |
 | `backend/tests/test_peer_addressed_rpc.py` | Exact Hivemind version, peer-scoped UID ownership, direct peer binding, and real duplicate-range provider regressions. |
-| `backend/tests/test_lifecycle_jobs.py` | Long-running startup job progress, deduplication, cancellation, failure, and prompt-response regressions. |
+| `backend/tests/test_lifecycle_jobs.py` | Long-running startup job progress, admission closure, deduplication, cancellation, shared shutdown deadline, failure, and prompt-response regressions. |
+| `backend/tests/test_network_supervisor.py` | Asynchronous supervisor startup, last-good retention, role isolation, and idempotent shutdown regressions. |
+| `backend/tests/test_network_supervisor_api.py` | Passive supervisor-backed status, node, model, and serving-plan API contract regressions. |
+| `backend/tests/test_publication_classification.py` | Ambiguous Hivemind store result, independent readback, conflict, expiration horizon, and recovery-eligibility regressions. |
 | `backend/tests/test_runtime_state_validation.py` | Generator state, tensor canary, local replica limits, route suspension, and dependent-node deletion regressions. |
 | `backend/tests/test_api_access.py` | Hashed API-key eligibility, revocation, shared atomic credit reservations, shadow accounting, and signed capability regressions. |
 
