@@ -3,6 +3,8 @@
  * Central API client for all backend communication.
  */
 
+import { recordDiagnostic } from './diagnostics'
+
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
 const WS_URL = import.meta.env.VITE_WS_BASE_URL ?? BASE_URL.replace(/^http/, 'ws')
 const REQUEST_TIMEOUT_MS = 8_000
@@ -173,6 +175,30 @@ export interface ServingPlan {
   route_kind: 'unavailable' | 'single_provider' | 'multiple_providers'
   projected_route_kind: 'unavailable' | 'single_provider' | 'multiple_providers'
   standby_ranges: ServingRouteNode[]
+  snapshot_stale: boolean
+  refreshing: boolean
+  snapshot_source: 'dht_cache' | 'local_only' | 'validated_dht'
+  snapshot_age_seconds: number
+}
+
+export interface RuntimeDiagnosticEvent {
+  event_id: string
+  operation_id: string | null
+  captured_at: string
+  kind: string
+  phase: string
+  status: string
+  message: string
+  details: Record<string, unknown>
+}
+
+export interface RuntimeSnapshot {
+  revision: number
+  captured_at: string
+  generator: GeneratorStatus
+  local_nodes: NodeInfo[]
+  lifecycle_jobs: LifecycleJob[]
+  events: RuntimeDiagnosticEvent[]
 }
 
 export interface Stats {
@@ -224,13 +250,7 @@ export interface IncentivesStatus {
   application_public_key: string | null
   p2p_peer_id: string | null
   settlement_url_configured: boolean
-  settlement_connectivity:
-    | 'disabled'
-    | 'unconfigured'
-    | 'idle'
-    | 'connected'
-    | 'retrying'
-    | 'error'
+  settlement_connectivity: 'disabled' | 'unconfigured' | 'idle' | 'connected' | 'retrying' | 'error'
   pending_submissions: number
   accepted_submissions: number
   rejected_submissions: number
@@ -654,10 +674,23 @@ async function fetchWithDeadline(
   try {
     return await fetch(`${BASE_URL}${path}`, { ...init, signal: controller.signal })
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error(`${init?.method ?? 'GET'} ${path} timed out after ${timeoutMs} ms`)
-    }
-    throw error
+    const method = init?.method ?? 'GET'
+    const isTimeout = error instanceof Error && error.name === 'AbortError'
+    const message = isTimeout
+      ? `${method} ${path} timed out after ${timeoutMs} ms`
+      : `${method} ${path} could not reach the backend`
+    recordDiagnostic({
+      source: 'api',
+      severity: 'error',
+      summary: message,
+      details: {
+        method,
+        path,
+        timeout_ms: timeoutMs,
+        error_name: error instanceof Error ? error.name : 'unknown'
+      }
+    })
+    throw isTimeout ? new Error(message) : error
   } finally {
     window.clearTimeout(timeout)
   }
@@ -665,7 +698,16 @@ async function fetchWithDeadline(
 
 async function get<T>(path: string, timeoutMs?: number): Promise<T> {
   const res = await fetchWithDeadline(path, undefined, timeoutMs)
-  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`)
+  if (!res.ok) {
+    const message = `GET ${path} failed: ${res.status}`
+    recordDiagnostic({
+      source: 'api',
+      severity: 'error',
+      summary: message,
+      details: { method: 'GET', path, status: res.status }
+    })
+    throw new Error(message)
+  }
   return res.json() as Promise<T>
 }
 
@@ -703,7 +745,14 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     } catch {
       detail = ''
     }
-    throw new ApiError(`POST ${path} failed: ${res.status}${detail}`, res.status, errorPayload)
+    const message = `POST ${path} failed: ${res.status}${detail}`
+    recordDiagnostic({
+      source: 'api',
+      severity: 'error',
+      summary: message,
+      details: { method: 'POST', path, status: res.status }
+    })
+    throw new ApiError(message, res.status, errorPayload)
   }
   return res.json() as Promise<T>
 }
@@ -725,7 +774,14 @@ async function del<T>(path: string): Promise<T> {
     } catch {
       detail = ''
     }
-    throw new Error(`DELETE ${path} failed: ${res.status}${detail}`)
+    const message = `DELETE ${path} failed: ${res.status}${detail}`
+    recordDiagnostic({
+      source: 'api',
+      severity: 'error',
+      summary: message,
+      details: { method: 'DELETE', path, status: res.status }
+    })
+    throw new Error(message)
   }
   return res.json() as Promise<T>
 }
@@ -745,9 +801,7 @@ export const api = {
   createDeveloperApiKey: (name: string) =>
     post<DeveloperApiKey & { api_key: string }>('/developer/api-keys', { name }),
   revokeDeveloperApiKey: (keyId: string) =>
-    del<{ status: string; key_id: string }>(
-      `/developer/api-keys/${encodeURIComponent(keyId)}`
-    ),
+    del<{ status: string; key_id: string }>(`/developer/api-keys/${encodeURIComponent(keyId)}`),
 
   // Models — validated list from server, used for dropdown
   getModels: () =>
@@ -773,8 +827,7 @@ export const api = {
       '/node/start',
       params
     ),
-  startNodeAsync: (params: NodeStartParams) =>
-    post<LifecycleJob>('/node/start-async', params),
+  startNodeAsync: (params: NodeStartParams) => post<LifecycleJob>('/node/start-async', params),
   turnOnNode: (nodeId?: string) =>
     post<{ status: string; info?: NodeInfo; error?: string }>(
       `/node/turn-on${nodeId ? `?node_id=${encodeURIComponent(nodeId)}` : ''}`
@@ -793,7 +846,9 @@ export const api = {
       `/node?${[
         nodeId ? `node_id=${encodeURIComponent(nodeId)}` : '',
         confirmGeneratorStop ? 'confirm_generator_stop=true' : ''
-      ].filter(Boolean).join('&')}`
+      ]
+        .filter(Boolean)
+        .join('&')}`
     ),
   stopNode: () => post<{ status: string }>('/node/stop'),
 
@@ -805,6 +860,7 @@ export const api = {
   stopGenerator: () => post<{ status: string }>('/generator/stop'),
   unloadGenerator: () => post<{ status: string }>('/generator/unload'),
   getGeneratorStatus: () => get<GeneratorStatus>('/generator/status'),
+  getRuntimeSnapshot: () => get<RuntimeSnapshot>('/runtime/snapshot', STATUS_REQUEST_TIMEOUT_MS),
   getLifecycleJob: (jobId: string) =>
     get<LifecycleJob>(`/lifecycle/jobs/${encodeURIComponent(jobId)}`),
   cancelLifecycleJob: (jobId: string) =>
@@ -901,6 +957,7 @@ export interface StreamChunk {
   node_trace?: string[]
   metrics?: GenerationPerformance
   error?: string
+  diagnostic?: Record<string, unknown>
 }
 
 export function createStreamSocket(
@@ -939,15 +996,45 @@ export function createStreamSocket(
       const chunk = JSON.parse(event.data as string) as StreamChunk
       if (chunk.token !== undefined) onToken(chunk.token)
       else if (chunk.done) onDone(chunk.node_trace ?? [])
-      else if (chunk.error) onError(chunk.error)
+      else if (chunk.error) {
+        recordDiagnostic({
+          source: 'inference',
+          severity: 'error',
+          summary: chunk.error,
+          details: { stage: 'generation_stream', ...(chunk.diagnostic ?? {}) }
+        })
+        onError(chunk.error)
+      }
     } catch {
+      recordDiagnostic({
+        source: 'inference',
+        severity: 'error',
+        summary: 'Failed to parse a generation stream message.',
+        details: { stage: 'websocket_parse' }
+      })
       onError('Failed to parse server message')
     }
   }
 
-  ws.onerror = () => onError('WebSocket connection error')
+  ws.onerror = () => {
+    recordDiagnostic({
+      source: 'inference',
+      severity: 'error',
+      summary: 'WebSocket connection error.',
+      details: { stage: 'websocket_transport' }
+    })
+    onError('WebSocket connection error')
+  }
   ws.onclose = () => {
-    if (!manuallyClosed) onClose?.()
+    if (!manuallyClosed) {
+      recordDiagnostic({
+        source: 'inference',
+        severity: 'warning',
+        summary: 'Generation WebSocket closed unexpectedly.',
+        details: { stage: 'websocket_close' }
+      })
+      onClose?.()
+    }
   }
 
   return {
@@ -971,6 +1058,12 @@ export function createStreamSocket(
       } else if (ws.readyState === WebSocket.CONNECTING) {
         pendingPayloads.push(payload)
       } else {
+        recordDiagnostic({
+          source: 'inference',
+          severity: 'error',
+          summary: 'WebSocket was not connected when generation was sent.',
+          details: { stage: 'websocket_send', ready_state: ws.readyState }
+        })
         onError('WebSocket not connected')
       }
     },

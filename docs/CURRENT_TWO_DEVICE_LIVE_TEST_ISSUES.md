@@ -3,9 +3,9 @@
 **Report updated:** 2026-08-22
 **Latest physical evidence:** 2026-08-22
 **Branch:** `fix/remote-dht-lease-recovery`
-**Physically tested source baseline:** `9fec4a8903162d34432bc2b7357b665fda8715c1`
-**Topology:** Windows Electron clients, WSL 2 participant backends, a public VPS bootstrap/circuit relay, and a loopback-only VPS settlement service reached through per-device SSH tunnels
-**Incentive rollout:** `shadow`
+**Latest physically tested source baseline:** `7c69382050f71cbd2ba41945714257d24af7c43c`
+**Topology:** Windows Electron clients, WSL 2 participant backends, a public VPS bootstrap/circuit relay, and, for shadow runs, a loopback-only VPS settlement service reached through per-device SSH tunnels
+**Latest controlled test mode:** `off` for legacy Test A; deployment rollout remains `shadow`
 
 ## 1. Plain-Language Summary
 
@@ -19,6 +19,10 @@ The second repair stores one private libp2p key per local worker, reuses it for 
 
 The real prompt still failed with the same ambiguous stream reset. This result rules out expired DHT leases and peer rotation as the cause of this occurrence. The remaining defect is in the real forward/response data path after discovery, metadata health, route validation, and the one-position tensor canary have succeeded.
 
+The controlled incentives-off baseline has now failed as well. Device 1 reported `mode: off`; Device 2 advertised only the normal expert `distribllm.0.12`; the selected route was relay-verified and the startup canary passed; then the first real prompt failed with `ambiguous_transport` and `stream reset` through the legacy expert. The defect is therefore not isolated to receipt RPC. It affects the common sustained tensor-over-relay path used by legacy and receipt generation.
+
+The latest adjacent split pass adds a narrower observation. Separate `0-6` and `6-12` workers formed a ready route and streamed some model output, then a later token forward failed ambiguously at layers `0-6`. Coverage and both split hops had already worked for earlier tokens; the remaining blocker is sustained remote forwarding rather than layer assignment or route discovery.
+
 The preceding physical run had exposed a longer-term publication failure. It proved that the two devices could initially find each other and exchange a real tensor through the VPS relay. Device 1 created a generator, discovered Device 2's complete worker, validated the route, and completed a tensor canary.
 
 Approximately five minutes later, Device 1 could no longer find Device 2's Hivemind expert UID. Device 1 then stopped seeing Device 2's provider advertisement altogether and correctly suspended inference.
@@ -31,7 +35,7 @@ The health validation did not cause this failure. It detected the vanished route
 
 Source inspection identified a concrete false-success path: Hivemind client-mode workers can include their own local DHT storage or cache in a successful store, even though a generator cannot retrieve that local copy. The repair now requires remote-peer acknowledgement for worker records. This is the strongest code-level explanation for the evidence, but it remains a hypothesis until the rebuilt two-device system passes the long soak test.
 
-The first repair set was implemented on `2026-08-22` and improved the next run enough to prove independent visibility and generator readiness. The peer-identity repair is now implemented but not yet physically tested. Passing local tests does not change the physical acceptance result from failed to passed.
+The first repair set was implemented on `2026-08-22` and improved the next run enough to prove independent visibility and generator readiness. The peer-identity repair preserved one worker identity during the corrected physical failure window. Its injected-recovery acceptance gate remains open, and the real generation result remains failed.
 
 ## 2. Intended Runtime Flow
 
@@ -174,6 +178,32 @@ The Trace button did not bypass the failure, but source review found that it is 
 
 The screenshots also show contradictory presentation: `Generator: READY` and `Route: READY` coexist with a stale `Waiting for generator route` message. This is tracked separately in Sprint 27 and must not be confused with the transport root cause.
 
+### 3.7 Incentives-off legacy baseline also resets
+
+The controlled Test A run disabled incentives and restarted both packaged participant backends. Device 1's live evidence showed:
+
+- incentives mode `off` with settlement disabled;
+- one selected Device 2 provider, peer `QmQXdUAw4SNPoA6gPMTAY6xPaCS7Em1EutF8FQpE9RWGMh`;
+- only the normal RPC UID `distribllm.0.12` published for that provider;
+- connection mode `relay` with transport verified;
+- generator and route ready;
+- a successful one-position startup tensor canary in approximately 2.26 seconds;
+- eleven accepted and completed worker RPC requests with zero worker failures, rejections, or timeouts in the retrieved provider snapshot.
+
+The first real prompt then failed under request `cbdcb4fa-0647-4c26-ba64-a5c2f9cca00b` after one dispatched attempt through the legacy expert. The terminal reason was `ambiguous_transport` with `stream reset`, and automatic replay remained correctly suppressed.
+
+The initial observer command did not run because its bootstrap multiaddress incorrectly ended in the worker peer ID instead of the VPS bootstrap peer ID, and it required a receipt expert even though Test A intentionally disabled receipts. A corrected post-failure observer then returned `ok: true`: the worker member lease and metadata had safe horizons, the normal expert resolved to peer `QmQXdUAw4SNPoA6gPMTAY6xPaCS7Em1EutF8FQpE9RWGMh`, RPC publication was fresh and remotely acknowledged, and no receipt UID was present as expected in off mode. There is no pre-failure observer sample for this occurrence, but discovery remained independently healthy immediately after the reset.
+
+This result selects the common-path branch of the transport decision tree. Test B is not needed to prove receipt specificity because the legacy baseline already fails. The bounded `backend/tensor_payload_probe.py` harness is now implemented for the next controlled legacy relay and direct runs; those physical results, plus Device 2 and VPS evidence for the failed request window, remain open.
+
+### 3.8 Adjacent split streams before a later `0-6` reset
+
+The latest submitted two-device split used one worker for `0-6` and the other for `6-12`. The generator reached ready, the route reached ready, and the Inference page streamed visible model output. A later token forward then ended with `Route attempt failed with uncertain execution at layers 0-6; automatic failover was suppressed.`
+
+This is not a missing-coverage or discovery failure. Visible streamed output means at least one earlier token forward completed through the full adjacent route, including both split hops. The terminal attempt was localized to the provider owning `0-6`, and its reset remained ambiguous after dispatch, so replay suppression was correct. This extends the common sustained-transport failure from the earlier full-provider case to the adjacent split topology; it does not yet prove whether payload size, repeated stream reuse, relay behavior, or a shared cross-machine RPC lifecycle is responsible.
+
+The same run exposed a separate serving-plan UI defect. Both devices could display `0-6` because the API intentionally returns an immediate local-only provisional plan while DHT discovery refreshes in the background, but the renderer ignored the existing stale/refreshing flags and drew that provisional recommendation as live. Repeated eight-second serving-plan request timeouts made the misleading range persist. The source implementation now marks snapshot source and age, hides and disables stale recommendations, records refresh failures, and requires a fresh completed DHT snapshot before Recommended can start a node. This prevents the observed stale-guidance path, but simultaneous participants can still choose the same fresh range before either publishes; sequential startup remains required until distributed range reservations exist.
+
 ## 4. What The Current Screens Mean
 
 ### Device 1 Nodes: `0 online`
@@ -206,29 +236,29 @@ Device 2 has no local generator, so it has no generator-side provider health mon
 | LT-04 | High | Shared members index retained expired peers | Discovery saw member IDs whose per-peer metadata was already gone | Per-peer v2 leases implemented with legacy fallback |
 | LT-05 | High | Monitoring combined incompatible snapshots | It could show `100%` raw coverage and `Missing: 0-12` simultaneously | UI calculation fixed; physical validation pending |
 | LT-06 | Medium | Worker-only health said `RPC HEALTH UNKNOWN` | Operators could mistake “not probed” for RPC failure | Relabeled as lease state plus `NOT PROBED` |
-| LT-07 | Critical | A complete user generation is not accepted yet | Tensor canary passed and worker accounting advanced, but both real prompts ended with an ambiguous stream reset | Open transport acceptance gate |
+| LT-07 | Critical | A complete user generation is not accepted yet | Tensor canaries pass, but both shadow receipt generation and the controlled incentives-off legacy prompt end with an ambiguous stream reset | Confirmed common sustained relay-path blocker |
 | LT-08 | High | Latest-run shadow receipt acceptance is not proven | No successful prompt means no final selected-work receipt | Open acceptance gate |
 | LT-09 | High | Settlement access uses manual participant SSH tunnels | Closing the tunnel makes local settlement unavailable | Test-only deployment limitation |
 | LT-10 | High | Portable EXE does not provision its backend | Every device still needs manual WSL, checkout, dependencies, configuration, and model setup | Packaging limitation |
 | LT-11 | Medium | Blank API database configuration can cause HTTP 500 | An empty path can resolve to a directory rather than a SQLite file | Workaround known; code/template fix open |
-| LT-12 | Medium | Runtime failure details are split across local and remote views | One machine alone cannot distinguish local success from global visibility | Instrumentation improvement required |
+| LT-12 | Medium | Runtime failure details were split across local and remote views | One machine alone could not distinguish local success from global visibility | Bounded renderer/backend diagnostic export implemented; packaged validation pending |
 | LT-13 | Critical | Worker transport recovery rotated its public peer ID | Loaded layers survived, but the generator's selected peer was replaced by a new identity | Peer remained stable during the latest failure; injected-recovery acceptance remains open |
-| LT-14 | High | Inference and Trace present contradictory or misleading state | READY/READY coexists with stale route-waiting text, while Trace runs a legacy diagnostic behind an eight-second HTTP timeout and does not reproduce shadow chat's receipt RPC | Planned in Sprint 27 |
+| LT-14 | High | Inference and Trace present contradictory or misleading state | READY/READY could coexist with stale route-waiting text, while Trace runs a legacy diagnostic behind an eight-second HTTP timeout and does not reproduce shadow chat's receipt RPC | Stale route text fixed in source; Trace redesign remains open in Sprint 27 |
+| LT-15 | High | Provisional serving plans were presented as live recommendations | Two devices could both auto-select `0-6` while remote discovery was refreshing or timing out | Freshness gate, source label, timeout retention, and disabled stale recommendation implemented; packaged validation pending |
 
 ## 6. Confirmed Failure Boundary And Remaining Root-Cause Questions
 
 ### Current confirmed boundary
 
-The latest persistent-identity run moved the open failure beyond discovery and legacy readiness:
+The incentives-off baseline moved the open failure beyond discovery, metadata health, and a one-position legacy canary:
 
 ```text
-Device 2 remotely publishes normal and receipt experts
-  -> independent Device 1 observer retrieves both with healthy horizons
+Device 2 remotely publishes the normal expert
   -> normal-expert metadata health passes
   -> normal-expert startup tensor canary passes
-  -> Device 1 starts a useful-work generation session
-  -> shadow chat selects the receipt expert
-  -> receipt forward ends in an ambiguous stream reset
+  -> Device 1 starts a real incentives-off generation
+  -> chat selects the normal legacy expert
+  -> sustained legacy forward ends in an ambiguous stream reset
   -> no response is accepted and no safe automatic replay occurs
 ```
 
@@ -510,6 +540,7 @@ Users should not need Git, `uv`, manual `.env` editing, shell commands, or a pre
 | Provider remains remotely visible during the corrected prompt retest | Passed for the observed interval; full 1,000-second soak still open |
 | Generator reaches and reports a ready route | Passed; readiness does not guarantee completion of a full generation stream |
 | User prompt completes through Device 2 | **Failed: ambiguous stream reset after remote execution** |
+| Adjacent `0-6` plus `6-12` prompt completes | **Failed after partial streamed output: later uncertain execution at `0-6`** |
 | Device 2 useful-work receipt is accepted | Not accepted because the generator could not accept the uncertain response |
 | Shadow mode leaves credits unchanged | Passed by policy; successful receipt path remains unproven |
 | Provider failure suspends unsafe inference | Passed |
@@ -519,9 +550,9 @@ Users should not need Git, `uv`, manual `.env` editing, shell commands, or a pre
 
 ## 11. Current Stopping Point
 
-The persistent-identity physical run is a failed real-generation result but a successful discovery and lease-observation result. The same worker remained visible, its peer identity did not rotate, the generator became ready, and the tensor canary passed. The real prompt still ended in an ambiguous stream reset.
+The latest adjacent split is a failed sustained-generation result, not a coverage failure. The route was ready and streamed visible text, proving earlier forwards completed through both `0-6` and `6-12`; a later forward then reset ambiguously at `0-6`. Automatic replay must remain disabled.
 
-Do not repeat prompts or Trace requests in the same evidence pass. Preserve the post-failure Device 1 generator/runtime state, Device 2 RPC/accounting state, and VPS relay logs with their request identity and timestamps. The next diagnosis must correlate where the request was accepted, whether worker execution completed, how many response bytes left Device 2 and crossed the relay, and which endpoint reset the stream. The full 1,000-second lease soak and successful shadow receipt remain acceptance gates after the transport defect is isolated.
+A new dirty development executable now includes freshness-gated serving recommendations and request-correlated Settings diagnostics. The next run should validate the UI sequentially, dispatch only one prompt after confirming the exact adjacent route, export Diagnostics immediately after the result, and then stop. If the reset repeats, preserve the exported bundle plus Device 2 and VPS logs and run the controlled relay payload sweep followed by the identical direct comparison. The full 1,000-second lease soak and successful shadow receipt remain acceptance gates after the transport defect is isolated.
 
 ## 12. Related Documentation
 

@@ -11,6 +11,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { applyIndependently } from '../api/independentRefresh'
 import { api, createStreamSocket, type GeneratorStatus } from '../api/client'
+import { recordDiagnostic } from '../api/diagnostics'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -85,23 +86,31 @@ export default function Chat(): React.JSX.Element {
     if (readinessInFlightRef.current) return
     readinessInFlightRef.current = true
     try {
-      const statusRequest = applyIndependently(api.getStatus(), () => {
-        if (!mountedRef.current) return
-        setBackendState('online')
-        setReadinessError(null)
-      }, (err) => {
-        if (!mountedRef.current) return
-        setBackendState('offline')
-        setReadinessError(err instanceof Error ? err.message : 'Backend readiness check failed')
-      })
-      const generatorRequest = applyIndependently(api.getGeneratorStatus(), (generator) => {
-        if (!mountedRef.current) return
-        setGeneratorStatus(generator)
-      }, (err) => {
-        if (!mountedRef.current) return
-        setGeneratorStatus(null)
-        setReadinessError(err instanceof Error ? err.message : 'Generator readiness check failed')
-      })
+      const statusRequest = applyIndependently(
+        api.getStatus(),
+        () => {
+          if (!mountedRef.current) return
+          setBackendState('online')
+          setReadinessError(null)
+        },
+        (err) => {
+          if (!mountedRef.current) return
+          setBackendState('offline')
+          setReadinessError(err instanceof Error ? err.message : 'Backend readiness check failed')
+        }
+      )
+      const generatorRequest = applyIndependently(
+        api.getGeneratorStatus(),
+        (generator) => {
+          if (!mountedRef.current) return
+          setGeneratorStatus(generator)
+        },
+        (err) => {
+          if (!mountedRef.current) return
+          setGeneratorStatus(null)
+          setReadinessError(err instanceof Error ? err.message : 'Generator readiness check failed')
+        }
+      )
       await Promise.allSettled([statusRequest, generatorRequest])
     } finally {
       readinessInFlightRef.current = false
@@ -116,6 +125,29 @@ export default function Chat(): React.JSX.Element {
       if (readinessIntervalRef.current) clearInterval(readinessIntervalRef.current)
     }
   }, [refreshReadiness])
+
+  useEffect(() => {
+    setMessages((previous) => {
+      const first = previous[0]
+      if (
+        !first ||
+        first.role !== 'assistant' ||
+        ![
+          'Waiting for generator route.',
+          'Generator route is ready. Open the stream to start inference.'
+        ].includes(first.content)
+      ) {
+        return previous
+      }
+      const content =
+        generatorStatus?.ready && generatorStatus.route_ready
+          ? 'Generator route is ready. Open the stream to start inference.'
+          : 'Waiting for generator route.'
+      return content === first.content
+        ? previous
+        : [{ ...first, content, timestamp: new Date() }, ...previous.slice(1)]
+    })
+  }, [generatorStatus?.ready, generatorStatus?.route_ready])
 
   // ---------------------------------------------------------------------------
   // Auto-scroll to bottom when messages update
@@ -144,42 +176,64 @@ export default function Chat(): React.JSX.Element {
   // Finalise streaming message when done
   // ---------------------------------------------------------------------------
 
-  const finaliseMessage = useCallback((trace: string[]) => {
-    if (!mountedRef.current) return
-    setMessages((prev) => {
-      const last = prev[prev.length - 1]
-      if (last?.role === 'assistant' && last.streaming) {
-        return [...prev.slice(0, -1), { ...last, streaming: false, nodeTrace: trace }]
-      }
-      return prev
-    })
-    setLoading(false)
-    setConnState('open')
-    void refreshReadiness()
-  }, [refreshReadiness])
+  const finaliseMessage = useCallback(
+    (trace: string[]) => {
+      if (!mountedRef.current) return
+      recordDiagnostic({
+        source: 'inference',
+        severity: 'success',
+        summary: 'Generation stream completed.',
+        details: { route: trace }
+      })
+      setMessages((prev) => {
+        const last = prev[prev.length - 1]
+        if (last?.role === 'assistant' && last.streaming) {
+          return [...prev.slice(0, -1), { ...last, streaming: false, nodeTrace: trace }]
+        }
+        return prev
+      })
+      setLoading(false)
+      setConnState('open')
+      void refreshReadiness()
+    },
+    [refreshReadiness]
+  )
 
   // ---------------------------------------------------------------------------
   // Handle WS error
   // ---------------------------------------------------------------------------
 
-  const handleError = useCallback((error: string) => {
-    if (!mountedRef.current) return
-    setMessages((prev) => {
-      // Replace streaming placeholder with error message if present
-      const last = prev[prev.length - 1]
-      if (last?.role === 'assistant' && last.streaming) {
-        return [
-          ...prev.slice(0, -1),
-          { ...last, content: `Error: ${error}`, streaming: false, error: true }
-        ]
-      }
-      return [...prev, makeMessage('assistant', `Error: ${error}`, { error: true })]
-    })
-    setLoading(false)
-    setConnState('error')
-    socketRef.current?.close()
-    socketRef.current = null
-  }, [])
+  const handleError = useCallback(
+    (error: string) => {
+      if (!mountedRef.current) return
+      recordDiagnostic({
+        source: 'inference',
+        severity: 'error',
+        summary: error,
+        details: {
+          stage: 'generation',
+          model_name: generatorStatus?.model_name ?? null,
+          route: generatorStatus?.node_trace ?? []
+        }
+      })
+      setMessages((prev) => {
+        // Replace streaming placeholder with error message if present
+        const last = prev[prev.length - 1]
+        if (last?.role === 'assistant' && last.streaming) {
+          return [
+            ...prev.slice(0, -1),
+            { ...last, content: `Error: ${error}`, streaming: false, error: true }
+          ]
+        }
+        return [...prev, makeMessage('assistant', `Error: ${error}`, { error: true })]
+      })
+      setLoading(false)
+      setConnState('error')
+      socketRef.current?.close()
+      socketRef.current = null
+    },
+    [generatorStatus?.model_name, generatorStatus?.node_trace]
+  )
 
   const handleSocketOpen = useCallback(() => {
     if (!mountedRef.current) return
@@ -213,6 +267,12 @@ export default function Chat(): React.JSX.Element {
       )
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
+      recordDiagnostic({
+        source: 'inference',
+        severity: 'error',
+        summary: `Failed to create generation WebSocket: ${msg}`,
+        details: { stage: 'websocket_connect' }
+      })
       setConnState('error')
       setMessages((prev) => [
         ...prev,
@@ -236,7 +296,14 @@ export default function Chat(): React.JSX.Element {
 
   const handleSend = useCallback(() => {
     const text = input.trim()
-    if (!text || loading || connState !== 'open' || !generatorStatus?.ready || !generatorStatus.route_ready) return
+    if (
+      !text ||
+      loading ||
+      connState !== 'open' ||
+      !generatorStatus?.ready ||
+      !generatorStatus.route_ready
+    )
+      return
     if (socketRef.current === null) return
 
     // Add user message
@@ -277,7 +344,8 @@ export default function Chat(): React.JSX.Element {
 
   const handleTrace = useCallback(async () => {
     const text = input.trim()
-    if (!text || loading || traceLoading || !generatorStatus?.ready || !generatorStatus.route_ready) return
+    if (!text || loading || traceLoading || !generatorStatus?.ready || !generatorStatus.route_ready)
+      return
 
     setTraceLoading(true)
     try {
@@ -317,6 +385,12 @@ export default function Chat(): React.JSX.Element {
       setInput('')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Trace request failed'
+      recordDiagnostic({
+        source: 'inference',
+        severity: 'error',
+        summary: msg,
+        details: { stage: 'legacy_trace' }
+      })
       setMessages((prev) => [...prev, makeMessage('assistant', `Error: ${msg}`, { error: true })])
     } finally {
       setTraceLoading(false)
@@ -374,11 +448,11 @@ export default function Chat(): React.JSX.Element {
     ? 'Generating...'
     : traceLoading
       ? 'Tracing...'
-    : !generatorReady || !routeReady
-      ? 'Generator route not ready'
-      : connState !== 'open'
-        ? 'Stream closed'
-        : 'Send a message...'
+      : !generatorReady || !routeReady
+        ? 'Generator route not ready'
+        : connState !== 'open'
+          ? 'Stream closed'
+          : 'Send a message...'
 
   const readinessItems = [
     {

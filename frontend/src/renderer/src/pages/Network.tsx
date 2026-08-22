@@ -11,7 +11,9 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../api/client'
+import { recordDiagnostic } from '../api/diagnostics'
 import { applyIndependently } from '../api/independentRefresh'
+import { isServingPlanAuthoritative, servingPlanStatus } from '../api/servingPlanState'
 import type {
   HuggingFaceConnection,
   HuggingFaceDeviceFlow,
@@ -86,21 +88,19 @@ function startResultFromJob(job: LifecycleJob): StartResult {
   const candidate = job.result
   if (candidate && typeof candidate.status === 'string') {
     const info = candidate.info
-    const infoRecord =
-      info && typeof info === 'object' ? (info as Record<string, unknown>) : null
+    const infoRecord = info && typeof info === 'object' ? (info as Record<string, unknown>) : null
     const plan = candidate.plan
     return {
       status: candidate.status,
       error: typeof candidate.error === 'string' ? candidate.error : undefined,
       message: typeof candidate.message === 'string' ? candidate.message : undefined,
-      info:
-        infoRecord
-          ? {
-              maddrs: Array.isArray(infoRecord.maddrs)
-                ? infoRecord.maddrs.filter((item): item is string => typeof item === 'string')
-                : undefined
-            }
-          : undefined,
+      info: infoRecord
+        ? {
+            maddrs: Array.isArray(infoRecord.maddrs)
+              ? infoRecord.maddrs.filter((item): item is string => typeof item === 'string')
+              : undefined
+          }
+        : undefined,
       plan: plan && typeof plan === 'object' ? (plan as ServingPlan) : undefined
     }
   }
@@ -110,7 +110,13 @@ function startResultFromJob(job: LifecycleJob): StartResult {
   }
 }
 
-function CoverageStrip({ plan }: { plan: ServingPlan }): React.JSX.Element {
+function CoverageStrip({
+  plan,
+  showRecommendation
+}: {
+  plan: ServingPlan
+  showRecommendation: boolean
+}): React.JSX.Element {
   return (
     <div className="flex h-8 w-full overflow-hidden rounded border border-border bg-bg-surface">
       {plan.segments.map((segment) => {
@@ -125,10 +131,12 @@ function CoverageStrip({ plan }: { plan: ServingPlan }): React.JSX.Element {
           <div
             key={`${segment.start}-${segment.end}`}
             title={`Layers ${segment.start}-${segment.end}: ${segment.provider_count} provider(s)${
-              segment.recommended ? '; recommended' : ''
+              showRecommendation && segment.recommended ? '; recommended' : ''
             }`}
             className={`h-full border-r border-bg-base/60 last:border-r-0 ${color} ${
-              segment.recommended ? 'shadow-[inset_0_0_0_2px_rgba(0,212,255,0.85)]' : ''
+              showRecommendation && segment.recommended
+                ? 'shadow-[inset_0_0_0_2px_rgba(0,212,255,0.85)]'
+                : ''
             }`}
             style={{ width: `${width}%` }}
           />
@@ -165,6 +173,8 @@ export default function Network(): React.JSX.Element {
   const [servingMode, setServingMode] = useState<ServingMode>('recommended')
   const [servingPlan, setServingPlan] = useState<ServingPlan | null>(null)
   const [servingPlanLoading, setServingPlanLoading] = useState(false)
+  const [servingPlanError, setServingPlanError] = useState<string | null>(null)
+  const [servingPlanReceivedAt, setServingPlanReceivedAt] = useState<Date | null>(null)
   const [device, setDevice] = useState('cuda')
   const [nodeRunning, setNodeRunning] = useState(false)
   const [nodeLoading, setNodeLoading] = useState(false)
@@ -183,6 +193,7 @@ export default function Network(): React.JSX.Element {
   const servingPlanPromiseRef = useRef<Promise<ServingPlan | null> | null>(null)
   const inferencePlanPromiseRef = useRef<Promise<void> | null>(null)
   const generatorStatusPromiseRef = useRef<Promise<void> | null>(null)
+  const lastServingPlanStateRef = useRef<string | null>(null)
 
   // Status badges
   const [backendOk, setBackendOk] = useState(false)
@@ -194,6 +205,11 @@ export default function Network(): React.JSX.Element {
 
   const log = useCallback((message: string, type: ActivityEntry['type'] = 'info') => {
     setActivity((prev) => [...prev.slice(-99), makeEntry(message, type)])
+    recordDiagnostic({
+      source: 'network',
+      severity: type,
+      summary: message
+    })
   }, [])
 
   useEffect(() => {
@@ -269,32 +285,40 @@ export default function Network(): React.JSX.Element {
   useEffect(() => {
     let active = true
     const loadInitial = async (): Promise<void> => {
-      const modelsRequest = applyIndependently(api.getModelCatalog(), (result) => {
-        if (!active) return
-        setModels(result.models)
-        setModelsLoading(false)
-        if (result.models.length > 0) {
-          const first = result.models[0]
-          setServeModel(first.id)
-          setInferModel(first.id)
-          const initialLayerCount = Math.max(1, Math.ceil(first.num_layers / 2))
-          setLayerCount(initialLayerCount)
-          setLayerStart(0)
-          setLayerEnd(initialLayerCount)
+      const modelsRequest = applyIndependently(
+        api.getModelCatalog(),
+        (result) => {
+          if (!active) return
+          setModels(result.models)
+          setModelsLoading(false)
+          if (result.models.length > 0) {
+            const first = result.models[0]
+            setServeModel(first.id)
+            setInferModel(first.id)
+            const initialLayerCount = Math.max(1, Math.ceil(first.num_layers / 2))
+            setLayerCount(initialLayerCount)
+            setLayerStart(0)
+            setLayerEnd(initialLayerCount)
+          }
+        },
+        () => {
+          if (active) setModelsLoading(false)
         }
-      }, () => {
-        if (active) setModelsLoading(false)
-      })
-      const statusRequest = applyIndependently(api.getStatus(), (status) => {
-        if (!active) return
-        setLocalImports(status.local_models ?? [])
-        setBackendOk(true)
-        setGpuAvailable(status.gpu_available)
-        setNodeRunning(status.node_running)
-        setGenReady(status.generator_ready)
-      }, () => {
-        if (active) setBackendOk(false)
-      })
+      )
+      const statusRequest = applyIndependently(
+        api.getStatus(),
+        (status) => {
+          if (!active) return
+          setLocalImports(status.local_models ?? [])
+          setBackendOk(true)
+          setGpuAvailable(status.gpu_available)
+          setNodeRunning(status.node_running)
+          setGenReady(status.generator_ready)
+        },
+        () => {
+          if (active) setBackendOk(false)
+        }
+      )
       const hfRequest = applyIndependently(api.getHuggingFaceConnection(), (connection) => {
         if (active) setHfConnection(connection)
       })
@@ -321,6 +345,8 @@ export default function Network(): React.JSX.Element {
         setLayerStart(0)
         setLayerEnd(nextLayerCount)
         setServingPlan(null)
+        setServingPlanError(null)
+        setServingPlanReceivedAt(null)
       }
     },
     [models]
@@ -357,6 +383,8 @@ export default function Network(): React.JSX.Element {
     servingPlan?.missing_ranges.length &&
     !customAddsMissingCoverage
   )
+  const servingPlanAuthoritative = isServingPlanAuthoritative(servingPlan)
+  const servingPlanState = servingPlanStatus(servingPlan, servingPlanError, servingPlanLoading)
 
   const refreshServingPlan = useCallback(async (): Promise<ServingPlan | null> => {
     if (!serveModel || !selectedServeModel) return null
@@ -367,13 +395,38 @@ export default function Network(): React.JSX.Element {
       try {
         const plan = await api.getServingPlan(serveModel, boundedCount)
         setServingPlan(plan)
-        if (servingMode === 'recommended') {
+        setServingPlanError(null)
+        setServingPlanReceivedAt(new Date())
+        const planState = `${plan.snapshot_source}:${plan.snapshot_stale}:${plan.refreshing}:${plan.coverage_revision}`
+        if (lastServingPlanStateRef.current !== planState) {
+          recordDiagnostic({
+            source: 'network',
+            severity: isServingPlanAuthoritative(plan) ? 'success' : 'warning',
+            summary: isServingPlanAuthoritative(plan)
+              ? `Fresh serving plan received for ${serveModel}.`
+              : `Serving plan for ${serveModel} is provisional while remote discovery refreshes.`,
+            details: {
+              model_id: serveModel,
+              layer_count: boundedCount,
+              snapshot_source: plan.snapshot_source,
+              snapshot_stale: plan.snapshot_stale,
+              refreshing: plan.refreshing,
+              coverage_revision: plan.coverage_revision,
+              recommendation: plan.recommendation,
+              selected_route: plan.selected_route
+            }
+          })
+          lastServingPlanStateRef.current = planState
+        }
+        if (servingMode === 'recommended' && isServingPlanAuthoritative(plan)) {
           setLayerStart(plan.recommendation.layer_start)
           setLayerEnd(plan.recommendation.layer_end)
         }
         return plan
       } catch (err) {
-        log(err instanceof Error ? err.message : 'Could not refresh layer coverage', 'error')
+        const message = err instanceof Error ? err.message : 'Could not refresh layer coverage'
+        setServingPlanError(message)
+        log(message, 'error')
         return null
       } finally {
         setServingPlanLoading(false)
@@ -751,10 +804,19 @@ export default function Network(): React.JSX.Element {
       const requestedCount = servingMode === 'recommended' ? layerCount : layerEnd - layerStart
       const latestPlan = await api.getServingPlan(serveModel, requestedCount)
       setServingPlan(latestPlan)
+      setServingPlanReceivedAt(new Date())
+      setServingPlanError(null)
 
       let requestedStart = layerStart
       let requestedEnd = layerEnd
       if (servingMode === 'recommended') {
+        if (!isServingPlanAuthoritative(latestPlan)) {
+          log(
+            'Remote coverage discovery is still refreshing. Wait for a FRESH snapshot before using Recommended.',
+            'error'
+          )
+          return
+        }
         requestedStart = latestPlan.recommendation.layer_start
         requestedEnd = latestPlan.recommendation.layer_end
         applyRecommendation(latestPlan)
@@ -802,7 +864,8 @@ export default function Network(): React.JSX.Element {
       if (
         res.status === 'error' &&
         res.plan &&
-        (res.error === 'coverage_revision_stale' || res.error === 'redundancy_confirmation_required')
+        (res.error === 'coverage_revision_stale' ||
+          res.error === 'redundancy_confirmation_required')
       ) {
         setServingPlan(res.plan)
         if (servingMode === 'recommended') applyRecommendation(res.plan)
@@ -815,10 +878,10 @@ export default function Network(): React.JSX.Element {
           return
         }
         const confirmedJob = await api.startNodeAsync({
-            ...startParams,
-            coverage_revision: res.plan.coverage_revision,
-            confirm_redundancy: true
-          })
+          ...startParams,
+          coverage_revision: res.plan.coverage_revision,
+          confirm_redundancy: true
+        })
         setNodeJobId(confirmedJob.job_id)
         completed = await waitForLifecycleJob(confirmedJob, observe)
         res = startResultFromJob(completed)
@@ -885,6 +948,10 @@ export default function Network(): React.JSX.Element {
       : Math.max(1, Math.ceil(selectedInferModel.num_layers / 2))
     try {
       const plan = await api.getServingPlan(selectedInferModel.id, capacity)
+      if (!isServingPlanAuthoritative(plan)) {
+        log('Remote coverage is still refreshing. No recommended range was selected.', 'error')
+        return
+      }
       setServeModel(selectedInferModel.id)
       setServingMode('recommended')
       applyRecommendation(plan)
@@ -924,21 +991,18 @@ export default function Network(): React.JSX.Element {
 
       let previousStage = ''
       const submitted = await api.startGeneratorAsync({
-          model_name: inferModel,
-          dht_prefix: 'distribllm',
-          initial_peers: []
-        })
+        model_name: inferModel,
+        dht_prefix: 'distribllm',
+        initial_peers: []
+      })
       setGenJobId(submitted.job_id)
-      const completed = await waitForLifecycleJob(
-        submitted,
-        (job) => {
-          setGenProgress(job.stage)
-          if (job.stage !== previousStage) {
-            previousStage = job.stage
-            log(job.detail, job.status === 'failed' ? 'error' : 'info')
-          }
+      const completed = await waitForLifecycleJob(submitted, (job) => {
+        setGenProgress(job.stage)
+        if (job.stage !== previousStage) {
+          previousStage = job.stage
+          log(job.detail, job.status === 'failed' ? 'error' : 'info')
         }
-      )
+      })
       const res = startResultFromJob(completed)
 
       if (res.status === 'error') {
@@ -1290,7 +1354,9 @@ export default function Network(): React.JSX.Element {
                     type="button"
                     onClick={() => {
                       setServingMode(mode)
-                      if (mode === 'recommended' && servingPlan) applyRecommendation(servingPlan)
+                      if (mode === 'recommended' && servingPlanAuthoritative) {
+                        applyRecommendation(servingPlan)
+                      }
                     }}
                     disabled={nodeLoading}
                     className={`rounded-md font-mono text-[10px] font-semibold uppercase transition-colors ${
@@ -1369,14 +1435,35 @@ export default function Network(): React.JSX.Element {
               {servingPlan && (
                 <div className="flex flex-col gap-2 rounded-lg border border-border bg-bg-surface px-3 py-3">
                   <div className="flex items-center justify-between gap-3">
-                    <span className={labelCls}>Live Coverage</span>
-                    <span className="font-mono text-[9px] text-text-dim">
-                      {servingPlanLoading
-                        ? 'REFRESHING'
-                        : `REV ${servingPlan.coverage_revision.slice(0, 7)}`}
+                    <span className={labelCls}>Coverage Snapshot</span>
+                    <span
+                      className={`rounded border px-1.5 py-0.5 font-mono text-[9px] ${
+                        servingPlanState === 'fresh'
+                          ? 'border-green/20 bg-green/5 text-green'
+                          : servingPlanState === 'unavailable'
+                            ? 'border-red/20 bg-red/5 text-red'
+                            : 'border-amber/20 bg-amber/5 text-amber'
+                      }`}
+                    >
+                      {servingPlanState === 'fresh'
+                        ? 'FRESH'
+                        : servingPlanState === 'unavailable'
+                          ? 'UNAVAILABLE'
+                          : 'DISCOVERING'}
                     </span>
                   </div>
-                  <CoverageStrip plan={servingPlan} />
+                  <p className="font-mono text-[9px] text-text-dim">
+                    REV {servingPlan.coverage_revision.slice(0, 7)} ·{' '}
+                    {servingPlan.snapshot_source === 'local_only'
+                      ? 'LOCAL-ONLY'
+                      : servingPlan.snapshot_source === 'validated_dht'
+                        ? 'VALIDATED DHT'
+                        : 'DHT CACHE'}
+                    {servingPlanReceivedAt
+                      ? ` · RECEIVED ${servingPlanReceivedAt.toLocaleTimeString()}`
+                      : ''}
+                  </p>
+                  <CoverageStrip plan={servingPlan} showRecommendation={servingPlanAuthoritative} />
                   <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[9px] text-text-dim">
                     <span>
                       <i className="mr-1 inline-block h-2 w-2 bg-red/40" />
@@ -1390,18 +1477,48 @@ export default function Network(): React.JSX.Element {
                       <i className="mr-1 inline-block h-2 w-2 bg-amber/50" />
                       Redundant
                     </span>
-                    <span>
-                      <i className="mr-1 inline-block h-2 w-2 border border-cyan" />
-                      Recommended
-                    </span>
+                    {servingPlanAuthoritative && (
+                      <span>
+                        <i className="mr-1 inline-block h-2 w-2 border border-cyan" />
+                        Recommended
+                      </span>
+                    )}
                   </div>
-                  <p className="font-mono text-[10px] leading-relaxed text-text-secondary">
-                    {servingPlan.recommendation.completes_route && !servingPlan.current_runnable
-                      ? `Fills ${servingPlan.recommendation.layer_start}-${servingPlan.recommendation.layer_end}; model becomes runnable.`
-                      : servingPlan.recommendation.adds_missing_coverage
-                        ? `Adds missing coverage at ${servingPlan.recommendation.layer_start}-${servingPlan.recommendation.layer_end}; still needs ${formatRanges(servingPlan.projected_missing_ranges)}.`
-                        : `Adds redundancy at ${servingPlan.recommendation.layer_start}-${servingPlan.recommendation.layer_end}.`}
-                  </p>
+                  {!servingPlanAuthoritative ? (
+                    <p className="font-mono text-[10px] leading-relaxed text-amber">
+                      Remote discovery has not produced a fresh snapshot yet. The cyan
+                      recommendation is hidden and Recommended cannot start a node. Wait for FRESH,
+                      or use Custom; the backend will still validate the range before loading
+                      layers.
+                    </p>
+                  ) : (
+                    <p className="font-mono text-[10px] leading-relaxed text-text-secondary">
+                      {servingPlan.recommendation.completes_route && !servingPlan.current_runnable
+                        ? `Fills ${servingPlan.recommendation.layer_start}-${servingPlan.recommendation.layer_end}; model becomes runnable.`
+                        : servingPlan.recommendation.adds_missing_coverage
+                          ? `Adds missing coverage at ${servingPlan.recommendation.layer_start}-${servingPlan.recommendation.layer_end}; still needs ${formatRanges(servingPlan.projected_missing_ranges)}.`
+                          : `Adds redundancy at ${servingPlan.recommendation.layer_start}-${servingPlan.recommendation.layer_end}.`}
+                    </p>
+                  )}
+                  {servingPlanError && (
+                    <p className="break-words font-mono text-[10px] text-red">
+                      Last refresh failed: {servingPlanError}
+                    </p>
+                  )}
+                  {servingPlan.selected_route.length > 0 && (
+                    <div className="flex flex-col gap-1 border-t border-border pt-2">
+                      <span className={labelCls}>Discovered active route</span>
+                      {servingPlan.selected_route.map((provider) => (
+                        <p
+                          key={`${provider.peer_id}-${provider.layer_start}-${provider.layer_end}`}
+                          className="font-mono text-[9px] text-text-secondary"
+                        >
+                          {provider.layer_start}-{provider.layer_end} ·{' '}
+                          {provider.peer_id.slice(0, 12)}…
+                        </p>
+                      ))}
+                    </div>
+                  )}
                   {servingMode === 'custom' && !customRangeValid && (
                     <p className="font-mono text-[10px] text-red">
                       Range must stay inside 0-{selectedServeModel?.num_layers ?? 0} with end
@@ -1432,19 +1549,29 @@ export default function Network(): React.JSX.Element {
               </div>
 
               <button
-                onClick={() =>
-                  void (nodeLoading ? handleCancelNodeStart() : handleStartNode())
+                onClick={() => void (nodeLoading ? handleCancelNodeStart() : handleStartNode())}
+                disabled={
+                  !nodeLoading &&
+                  (!serveModel ||
+                    !customRangeValid ||
+                    (servingMode === 'recommended' && !servingPlanAuthoritative))
                 }
-                disabled={!nodeLoading && (!serveModel || !customRangeValid)}
+                title={
+                  servingMode === 'recommended' && !servingPlanAuthoritative
+                    ? 'Wait for a fresh remote coverage snapshot or switch to Custom.'
+                    : 'Start serving the selected layers.'
+                }
                 className={`
                   w-full rounded-xl border py-3 font-mono text-[12px] font-semibold
                   transition-all duration-150
                   ${
                     nodeLoading
                       ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
-                      : !serveModel || !customRangeValid
+                      : !serveModel ||
+                          !customRangeValid ||
+                          (servingMode === 'recommended' && !servingPlanAuthoritative)
                         ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
-                      : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
+                        : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
                   }
                 `}
               >
@@ -1491,13 +1618,15 @@ export default function Network(): React.JSX.Element {
                         inferencePlan.current_runnable ? 'text-green' : 'text-amber'
                       }`}
                     >
-                      {inferencePlan.current_runnable
-                        ? inferencePlan.route_kind === 'single_provider'
-                          ? 'Complete through one full-model provider'
-                          : `Complete through ${inferencePlan.selected_route.length} providers`
-                        : `Needs layers ${formatRanges(inferencePlan.missing_ranges)}`}
+                      {!isServingPlanAuthoritative(inferencePlan)
+                        ? 'Discovering remote providers; this coverage is provisional'
+                        : inferencePlan.current_runnable
+                          ? inferencePlan.route_kind === 'single_provider'
+                            ? 'Complete through one full-model provider'
+                            : `Complete through ${inferencePlan.selected_route.length} providers`
+                          : `Needs layers ${formatRanges(inferencePlan.missing_ranges)}`}
                     </p>
-                    <CoverageStrip plan={inferencePlan} />
+                    <CoverageStrip plan={inferencePlan} showRecommendation={false} />
                     {inferencePlan.selected_route.length > 0 && (
                       <div className="flex flex-wrap gap-1">
                         {inferencePlan.selected_route.map((routeNode) => (
@@ -1597,13 +1726,9 @@ export default function Network(): React.JSX.Element {
               ) : (
                 <button
                   onClick={() =>
-                    void (genLoading
-                      ? handleCancelGeneratorStart()
-                      : handleStartGenerator())
+                    void (genLoading ? handleCancelGeneratorStart() : handleStartGenerator())
                   }
-                  disabled={
-                    !genLoading && !inferModel
-                  }
+                  disabled={!genLoading && !inferModel}
                   className={`
                     w-full rounded-xl border py-3 font-mono text-[12px] font-semibold
                     transition-all duration-150
@@ -1612,7 +1737,7 @@ export default function Network(): React.JSX.Element {
                         ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
                         : !inferModel
                           ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
-                        : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
+                          : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
                     }
                   `}
                 >

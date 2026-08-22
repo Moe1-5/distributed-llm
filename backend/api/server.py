@@ -1421,7 +1421,13 @@ async def get_model_serving_plan(
         cached = _serving_plan_cache.get(key)
         refresh_task = _serving_plan_refresh_tasks.get(key)
     if cached is not None and now - cached[0] <= SERVING_PLAN_CACHE_SECONDS:
-        return {**cached[1], "snapshot_stale": False, "refreshing": False}
+        return {
+            **cached[1],
+            "snapshot_stale": False,
+            "refreshing": False,
+            "snapshot_source": "dht_cache",
+            "snapshot_age_seconds": max(0.0, now - cached[0]),
+        }
 
     if refresh_task is None or refresh_task.done():
         refresh_task = asyncio.create_task(_refresh_serving_plan(key))
@@ -1429,7 +1435,13 @@ async def get_model_serving_plan(
             _serving_plan_refresh_tasks[key] = refresh_task
 
     if cached is not None:
-        return {**cached[1], "snapshot_stale": True, "refreshing": True}
+        return {
+            **cached[1],
+            "snapshot_stale": True,
+            "refreshing": True,
+            "snapshot_source": "dht_cache",
+            "snapshot_age_seconds": max(0.0, now - cached[0]),
+        }
 
     local_infos = [
         info
@@ -1441,7 +1453,13 @@ async def get_model_serving_plan(
         layer_count,
         serving_nodes=local_infos,
     )
-    return {**immediate, "snapshot_stale": True, "refreshing": True}
+    return {
+        **immediate,
+        "snapshot_stale": True,
+        "refreshing": True,
+        "snapshot_source": "local_only",
+        "snapshot_age_seconds": 0.0,
+    }
 
 
 async def _refresh_serving_plan(key: tuple[str, int]) -> None:
@@ -1452,7 +1470,30 @@ async def _refresh_serving_plan(key: tuple[str, int]) -> None:
             timeout=30.0,
         )
         with _serving_plan_cache_lock:
+            previous = _serving_plan_cache.get(key)
             _serving_plan_cache[key] = (time.monotonic(), plan)
+        if previous is None or previous[1].get("coverage_revision") != plan.get("coverage_revision"):
+            _runtime_state.record_event(
+                kind="coverage",
+                phase="refresh",
+                status="success",
+                message=f"Fresh serving plan is available for {model_id}.",
+                details={
+                    "model_id": model_id,
+                    "layer_count": layer_count,
+                    "coverage_revision": plan.get("coverage_revision"),
+                    "current_runnable": plan.get("current_runnable"),
+                    "selected_route": [
+                        {
+                            "peer_id": item.get("peer_id"),
+                            "layer_start": item.get("layer_start"),
+                            "layer_end": item.get("layer_end"),
+                        }
+                        for item in plan.get("selected_route", [])
+                    ],
+                    "recommendation": plan.get("recommendation"),
+                },
+            )
     except Exception as exc:
         logger.warning(
             "Background serving-plan refresh failed for %s: %s",
@@ -1974,12 +2015,18 @@ async def start_node(req: NodeStartRequest) -> dict:
         )
 
     serving_nodes = _active_serving_nodes(req.model_name, req.dht_prefix)
-    fresh_plan = _build_model_serving_plan(
-        req.model_name,
-        req.layer_end - req.layer_start,
-        req.dht_prefix,
-        serving_nodes,
-    )
+    fresh_plan = {
+        **_build_model_serving_plan(
+            req.model_name,
+            req.layer_end - req.layer_start,
+            req.dht_prefix,
+            serving_nodes,
+        ),
+        "snapshot_stale": False,
+        "refreshing": False,
+        "snapshot_source": "validated_dht",
+        "snapshot_age_seconds": 0.0,
+    }
     if (
         req.coverage_revision is not None
         and req.coverage_revision != fresh_plan["coverage_revision"]
@@ -3006,7 +3053,15 @@ async def chat(req: ChatRequest) -> dict:
             node_trace = chunk.get("node_trace", [])
             generation_metrics = chunk.get("metrics")
         elif "error" in chunk:
-            raise HTTPException(status_code=500, detail=chunk["error"])
+            diagnostic = _record_generation_failure(active_generator, str(chunk["error"]))
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "generation_failed",
+                    "message": chunk["error"],
+                    "diagnostic": diagnostic,
+                },
+            )
 
     return {
         "response":         full_response,
@@ -3018,6 +3073,49 @@ async def chat(req: ChatRequest) -> dict:
         ),
         "performance": generation_metrics,
     }
+
+
+def _record_generation_failure(
+    active_generator: DistributedGenerator,
+    error: str,
+) -> dict:
+    """Persist a prompt-free, request-correlated summary of the last route failure."""
+    details: dict = {"error": error}
+    sequential = getattr(active_generator, "sequential", None)
+    health_getter = getattr(sequential, "get_health_readiness", None)
+    if callable(health_getter):
+        try:
+            health = health_getter()
+            failover = health.get("last_failover") or {}
+            reasons = failover.get("reasons") or []
+            terminal = dict(reasons[-1]) if reasons else {}
+            details.update(
+                {
+                    "route_ready": bool(health.get("route_ready")),
+                    "route_revision": health.get("route_revision"),
+                    "coverage_revision": health.get("coverage_revision"),
+                    "attempt_count": failover.get("attempt_count", 0),
+                    "failed_over": bool(failover.get("failed_over")),
+                    "request_id": terminal.get("request_id"),
+                    "failure_class": terminal.get("failure_class"),
+                    "peer_id": terminal.get("peer_id"),
+                    "layer_start": terminal.get("layer_start"),
+                    "layer_end": terminal.get("layer_end"),
+                    "reason": terminal.get("reason"),
+                }
+            )
+        except Exception as exc:
+            details["diagnostic_error"] = str(exc)
+
+    _runtime_state.record_event(
+        kind="generation",
+        phase="forward",
+        status="error",
+        message=error,
+        operation_id=details.get("request_id"),
+        details=details,
+    )
+    return details
 
 
 @app.websocket("/stream")
@@ -3098,7 +3196,14 @@ async def stream(websocket: WebSocket) -> None:
                     repetition_penalty=repetition_penalty,
                     do_sample=do_sample,
                 ):
-                    await websocket.send_json(chunk)
+                    if "error" in chunk:
+                        diagnostic = _record_generation_failure(
+                            generator,
+                            str(chunk["error"]),
+                        )
+                        await websocket.send_json({**chunk, "diagnostic": diagnostic})
+                    else:
+                        await websocket.send_json(chunk)
             else:
                 await websocket.send_json(
                     {

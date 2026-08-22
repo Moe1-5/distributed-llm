@@ -7,7 +7,15 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react'
-import { api } from '../api/client'
+import { api, type RuntimeSnapshot } from '../api/client'
+import {
+  clearDiagnosticEvents,
+  getDiagnosticEvents,
+  recordDiagnostic,
+  subscribeDiagnostics,
+  type DiagnosticEvent,
+  type DiagnosticSeverity
+} from '../api/diagnostics'
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error' | 'deleting'
 type LauncherConfig = Awaited<ReturnType<Window['api']['getBackendLauncherConfig']>>
@@ -24,6 +32,13 @@ const launcherStatusStyle: Record<LauncherStatus['state'], string> = {
   ready: 'border-green/20 bg-green/5 text-green',
   stopping: 'border-amber/30 bg-amber/10 text-amber',
   failed: 'border-red/20 bg-red/5 text-red'
+}
+
+const diagnosticStatusStyle: Record<DiagnosticSeverity, string> = {
+  info: 'border-cyan/20 bg-cyan/5 text-cyan',
+  success: 'border-green/20 bg-green/5 text-green',
+  warning: 'border-amber/20 bg-amber/5 text-amber',
+  error: 'border-red/20 bg-red/5 text-red'
 }
 
 export default function Settings(): React.JSX.Element {
@@ -43,6 +58,10 @@ export default function Settings(): React.JSX.Element {
     message: string
     ok: boolean
   } | null>(null)
+  const [diagnosticEvents, setDiagnosticEvents] = useState<DiagnosticEvent[]>(getDiagnosticEvents)
+  const [runtimeSnapshot, setRuntimeSnapshot] = useState<RuntimeSnapshot | null>(null)
+  const [diagnosticsRefreshing, setDiagnosticsRefreshing] = useState(false)
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null)
 
   // ---------------------------------------------------------------------------
   // Load current settings on mount
@@ -64,6 +83,26 @@ export default function Settings(): React.JSX.Element {
     void loadSettings()
   }, [loadSettings])
 
+  const refreshDiagnostics = useCallback(async () => {
+    setDiagnosticsRefreshing(true)
+    try {
+      setRuntimeSnapshot(await api.getRuntimeSnapshot())
+      setDiagnosticsError(null)
+    } catch (error) {
+      setDiagnosticsError(
+        error instanceof Error ? error.message : 'Could not read backend runtime diagnostics'
+      )
+    } finally {
+      setDiagnosticsRefreshing(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = subscribeDiagnostics(setDiagnosticEvents)
+    void refreshDiagnostics()
+    return unsubscribe
+  }, [refreshDiagnostics])
+
   useEffect(() => {
     void Promise.all([
       window.api.getBackendLauncherConfig(),
@@ -82,27 +121,30 @@ export default function Settings(): React.JSX.Element {
     []
   )
 
-  const saveLauncherConfig = useCallback(async (
-    showProgress = true
-  ): Promise<LauncherConfig | null> => {
-    if (!launcherConfig) return null
-    if (showProgress) setLauncherAction('saving')
-    setLauncherError(null)
-    try {
-      const saved = await window.api.saveBackendLauncherConfig(launcherConfig)
-      setLauncherConfig(saved)
-      return saved
-    } catch (error) {
-      setLauncherError(error instanceof Error ? error.message : 'Could not save backend settings')
-      return null
-    } finally {
-      if (showProgress) setLauncherAction('idle')
-    }
-  }, [launcherConfig])
+  const saveLauncherConfig = useCallback(
+    async (showProgress = true): Promise<LauncherConfig | null> => {
+      if (!launcherConfig) return null
+      if (showProgress) setLauncherAction('saving')
+      setLauncherError(null)
+      try {
+        const saved = await window.api.saveBackendLauncherConfig(launcherConfig)
+        setLauncherConfig(saved)
+        return saved
+      } catch (error) {
+        setLauncherError(error instanceof Error ? error.message : 'Could not save backend settings')
+        return null
+      } finally {
+        if (showProgress) setLauncherAction('idle')
+      }
+    },
+    [launcherConfig]
+  )
 
   const runLauncherAction = useCallback(
     async (action: 'start' | 'stop' | 'restart') => {
-      setLauncherAction(action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : 'restarting')
+      setLauncherAction(
+        action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : 'restarting'
+      )
       setLauncherError(null)
       setLauncherReportStatus(null)
       try {
@@ -148,6 +190,60 @@ export default function Settings(): React.JSX.Element {
       setLauncherAction('idle')
     }
   }, [])
+
+  const exportDiagnostics = useCallback(() => {
+    const capturedAt = new Date().toISOString()
+    const payload = {
+      schema_version: 1,
+      captured_at: capturedAt,
+      renderer_events: diagnosticEvents,
+      backend_runtime: runtimeSnapshot
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `distribllm-diagnostics-${capturedAt.replaceAll(':', '-')}.json`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+    recordDiagnostic({
+      source: 'network',
+      severity: 'success',
+      summary: 'Diagnostic bundle exported.',
+      details: {
+        renderer_event_count: diagnosticEvents.length,
+        backend_event_count: runtimeSnapshot?.events.length ?? 0
+      }
+    })
+  }, [diagnosticEvents, runtimeSnapshot])
+
+  const displayedDiagnostics = [
+    ...diagnosticEvents.map((event) => ({
+      id: event.id,
+      capturedAt: event.capturedAt,
+      source: event.source,
+      severity: event.severity,
+      summary: event.summary,
+      occurrences: event.occurrences
+    })),
+    ...(runtimeSnapshot?.events ?? []).map((event) => ({
+      id: event.event_id,
+      capturedAt: event.captured_at,
+      source: `backend · ${event.kind} · ${event.phase}`,
+      severity: (event.status === 'error'
+        ? 'error'
+        : event.status === 'success'
+          ? 'success'
+          : 'info') as DiagnosticSeverity,
+      summary: event.message,
+      occurrences: 1
+    }))
+  ]
+    .sort((left, right) => right.capturedAt.localeCompare(left.capturedAt))
+    .slice(0, 50)
+  const lastRouteFailure = runtimeSnapshot?.generator.health?.last_failover?.reasons.at(-1)
 
   // ---------------------------------------------------------------------------
   // Save token
@@ -321,7 +417,10 @@ export default function Settings(): React.JSX.Element {
                   onChange={(event) =>
                     updateLauncherConfig(
                       'initialPeers',
-                      event.target.value.split('\n').map((value) => value.trim()).filter(Boolean)
+                      event.target.value
+                        .split('\n')
+                        .map((value) => value.trim())
+                        .filter(Boolean)
                     )
                   }
                   className="resize-y rounded border border-border-bright bg-bg-surface px-3 py-2 font-mono text-[11px] text-text-primary outline-none focus:border-cyan/40"
@@ -335,7 +434,10 @@ export default function Settings(): React.JSX.Element {
                   onChange={(event) =>
                     updateLauncherConfig(
                       'trustedRelays',
-                      event.target.value.split('\n').map((value) => value.trim()).filter(Boolean)
+                      event.target.value
+                        .split('\n')
+                        .map((value) => value.trim())
+                        .filter(Boolean)
                     )
                   }
                   className="resize-y rounded border border-border-bright bg-bg-surface px-3 py-2 font-mono text-[11px] text-text-primary outline-none focus:border-cyan/40"
@@ -427,6 +529,136 @@ export default function Settings(): React.JSX.Element {
             </div>
           </section>
         )}
+
+        <section className="flex flex-col gap-4 rounded-xl border border-border bg-bg-elevated p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 className="font-mono text-[13px] font-semibold text-text-primary">
+                Runtime Diagnostics
+              </h2>
+              <p className="mt-1 max-w-xl text-[12px] leading-relaxed text-text-secondary">
+                Keeps the latest 200 renderer events across page changes and app restarts. Export
+                combines them with the backend runtime snapshot, lifecycle jobs, route state, and
+                bounded backend events. Prompts, tokens, passwords, and authorization values are not
+                recorded.
+              </p>
+            </div>
+            <span
+              className={`rounded border px-2.5 py-1 font-mono text-[9px] font-semibold ${
+                diagnosticsError
+                  ? diagnosticStatusStyle.error
+                  : runtimeSnapshot
+                    ? diagnosticStatusStyle.success
+                    : diagnosticStatusStyle.warning
+              }`}
+            >
+              {diagnosticsError
+                ? 'BACKEND SNAPSHOT FAILED'
+                : runtimeSnapshot
+                  ? 'SNAPSHOT READY'
+                  : 'NO SNAPSHOT'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {[
+              ['Renderer events', diagnosticEvents.length],
+              ['Backend events', runtimeSnapshot?.events.length ?? 0],
+              ['Runtime revision', runtimeSnapshot?.revision ?? '—'],
+              ['Local nodes', runtimeSnapshot?.local_nodes.length ?? '—']
+            ].map(([label, value]) => (
+              <div
+                key={label}
+                className="rounded-lg border border-border bg-bg-surface px-3 py-2.5"
+              >
+                <p className="font-mono text-[9px] uppercase text-text-dim">{label}</p>
+                <p className="mt-1 font-mono text-[14px] text-text-primary">{value}</p>
+              </div>
+            ))}
+          </div>
+
+          {diagnosticsError && (
+            <p className="break-words rounded border border-red/20 bg-red/5 px-3 py-2 font-mono text-[10px] text-red">
+              {diagnosticsError}
+            </p>
+          )}
+
+          {lastRouteFailure && (
+            <div className="rounded-lg border border-red/20 bg-red/5 px-3 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="font-mono text-[10px] font-semibold text-red">LAST ROUTE FAILURE</p>
+                <p className="font-mono text-[9px] text-text-dim">
+                  {lastRouteFailure.failure_class}
+                </p>
+              </div>
+              <p className="mt-2 break-all font-mono text-[10px] text-text-secondary">
+                Request {lastRouteFailure.request_id}
+              </p>
+              <p className="mt-1 font-mono text-[10px] text-text-secondary">
+                Layers {lastRouteFailure.layer_start}-{lastRouteFailure.layer_end} · peer{' '}
+                {lastRouteFailure.peer_id.slice(0, 16)}…
+              </p>
+              <p className="mt-2 break-words font-mono text-[9px] leading-relaxed text-text-dim">
+                {lastRouteFailure.reason}
+              </p>
+            </div>
+          )}
+
+          <div className="max-h-72 overflow-y-auto rounded-lg border border-border bg-bg-surface">
+            {displayedDiagnostics.length === 0 ? (
+              <p className="px-4 py-5 font-mono text-[10px] text-text-dim">
+                No diagnostic events have been captured yet.
+              </p>
+            ) : (
+              displayedDiagnostics.map((event) => (
+                <div
+                  key={`${event.source}-${event.id}`}
+                  className="flex gap-3 border-b border-border px-3 py-2.5 last:border-b-0"
+                >
+                  <span
+                    className={`mt-0.5 h-fit rounded border px-1.5 py-0.5 font-mono text-[8px] font-semibold uppercase ${diagnosticStatusStyle[event.severity]}`}
+                  >
+                    {event.severity}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="break-words text-[11px] text-text-secondary">{event.summary}</p>
+                    <p className="mt-1 font-mono text-[9px] text-text-dim">
+                      {new Date(event.capturedAt).toLocaleString()} · {event.source}
+                      {event.occurrences > 1 ? ` · repeated ${event.occurrences} times` : ''}
+                    </p>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void refreshDiagnostics()}
+              disabled={diagnosticsRefreshing}
+              className="h-9 rounded border border-cyan/30 bg-cyan-dim px-4 font-mono text-[10px] font-semibold text-cyan disabled:opacity-50"
+            >
+              {diagnosticsRefreshing ? 'REFRESHING...' : 'REFRESH SNAPSHOT'}
+            </button>
+            <button
+              type="button"
+              onClick={exportDiagnostics}
+              className="h-9 rounded border border-border-bright px-4 font-mono text-[10px] font-semibold text-text-secondary"
+            >
+              EXPORT DIAGNOSTICS
+            </button>
+            <button
+              type="button"
+              onClick={() => clearDiagnosticEvents()}
+              disabled={diagnosticEvents.length === 0}
+              title="Clear only renderer events; backend events remain bounded by the backend runtime."
+              className="h-9 rounded border border-red/20 bg-red/5 px-4 font-mono text-[10px] font-semibold text-red disabled:opacity-40"
+            >
+              CLEAR RENDERER EVENTS
+            </button>
+          </div>
+        </section>
 
         {/* HuggingFace Token Section */}
         <section className="flex flex-col gap-4 rounded-xl border border-border bg-bg-elevated p-6">

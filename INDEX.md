@@ -26,7 +26,7 @@
 | Windows managed WSL packaging and acceptance capture | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` |
 | Deployment, VPS services, and live testing | `docs/DEPLOYMENT_AND_LIVE_TESTING.md` |
 | Current two-device live-test issues and production roadmap | `docs/CURRENT_TWO_DEVICE_LIVE_TEST_ISSUES.md` |
-| Relay receipt RPC stream-reset handoff | `docs/RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md` |
+| Relay tensor RPC stream-reset handoff and physical test chronology | `docs/RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md` |
 | Useful-work incentives and settlement | `docs/USEFUL_WORK_INCENTIVES.md`       |
 | Two-device and final acceptance evidence | `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` |
 | Local split acceptance                   | `docs/LOCAL_SPLIT_ACCEPTANCE.md` |
@@ -53,11 +53,15 @@
 | Route failover tests                      | `backend/tests/test_route_failover.py`    |
 | Real local Hivemind failover probe        | `backend/local_failover_probe.py`         |
 | Local failover probe tests                | `backend/tests/test_local_failover_probe.py` |
+| Physical legacy tensor payload sweep      | `backend/tensor_payload_probe.py`         |
+| Tensor payload probe tests                | `backend/tests/test_tensor_payload_probe.py` |
 | Distributed generation                    | `backend/client/generation.py`            |
 | Frontend API client                       | `frontend/src/renderer/src/api/client.ts` |
+| Persistent renderer diagnostics           | `frontend/src/renderer/src/api/diagnostics.ts` |
+| Serving-plan freshness policy             | `frontend/src/renderer/src/api/servingPlanState.ts` |
 | Packaged executable identity capture      | `frontend/src/main/artifactIdentity.ts`   |
 | Independent renderer refresh primitive    | `frontend/src/renderer/src/api/independentRefresh.ts` |
-| Renderer partial-state tests              | `frontend/tests/independentRefresh.test.ts` |
+| Renderer partial-state, diagnostics, and serving-plan freshness tests | `frontend/tests/independentRefresh.test.ts` |
 | Renderer partial-state test runner         | `frontend/scripts/test-renderer-flow.mjs`  |
 | Frontend pages                            | `frontend/src/renderer/src/pages/`        |
 | Env variable template                     | `.env.example`                            |
@@ -132,7 +136,7 @@
 | `docs/VPS_RELAY_OPERATIONS.md` | Manual foreground launch, persistent VPS relay installation, machine-readable restart validation, external probe binding, recovery, and rollback runbook. |
 | `docs/DEPLOYMENT_AND_LIVE_TESTING.md` | EXE rebuild rules, local WSL backend updates, VPS bootstrap and shadow settlement deployment, relay probes, two-device checks, and future backend-bundled packaging. |
 | `docs/CURRENT_TWO_DEVICE_LIVE_TEST_ISSUES.md` | Timestamped lease-persistence evidence, implemented first-stage DHT/expert repair, production service architecture, packaging plan, and open physical acceptance gates. |
-| `docs/RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md` | Legacy-versus-receipt RPC isolation, request-correlated diagnostics, ruled-out causes, physical test matrix, and next-agent fix decision tree. |
+| `docs/RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md` | Physical test chronology, common sustained relay-path boundary, request-correlated diagnostics, outcome ledger, controlled isolation matrix, and next-agent fix decision tree. |
 | `docs/SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md` | Full codebase and runtime-state audit, ranked technical findings, settlement connection-refused repair, unfinished work, and final desktop release sequence. |
 | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, launcher contract, sanitized acceptance report, and clean-Windows runbook. |
 | `docs/USEFUL_WORK_INCENTIVES.md` | Signed useful-work receipt protocol, SQLite settlement policy, rollout modes, VPS deployment, and remaining acceptance gates. |
@@ -171,6 +175,7 @@
 | `backend/local_split_probe.py` | Runs cached-model local split inference through two real Hivemind serving peers and records parity, accounting, and cleanup evidence. |
 | `backend/tinyllama_performance_probe.py` | Runs a bounded cached TinyLlama distributed timing, accounting, resource, and cleanup baseline. |
 | `backend/relay_probe.py` | Minimal Hivemind-only circuit-relay reservation probe for Sprint 16 diagnostics.     |
+| `backend/tensor_payload_probe.py` | Runs a bounded, checkpointed legacy tensor sweep against one exact direct or relayed physical worker without chat sampling or receipts. |
 | `backend/constants.py`   | Supported models, DHT constants, transport settings, and generation defaults.        |
 | `backend/pyproject.toml` | Python project metadata and dependencies.                                            |
 | `backend/uv.lock`        | Python dependency lockfile.                                                          |
@@ -183,6 +188,7 @@
 | `backend/tests/test_acceptance_manifest.py` | Cross-sprint artifact compatibility, VPS/probe binding, version mismatch, manual-gate, and private-output regressions. |
 | `backend/tests/test_local_split_probe.py` | Local split probe option, range, evidence sanitization, and private-output regressions. |
 | `backend/tests/test_tinyllama_performance_probe.py` | TinyLlama probe bounds, metric sanitization, and acceptance-contract regressions. |
+| `backend/tests/test_tensor_payload_probe.py` | Controlled-target validation, tensor byte accounting, repeated-canary ordering, legacy-only dispatch, and first-failure stop regressions. |
 | `backend/tests/test_lifecycle_jobs.py` | Long-running startup job progress, deduplication, cancellation, failure, and prompt-response regressions. |
 | `backend/tests/test_runtime_state_validation.py` | Generator state, tensor canary, local replica limits, route suspension, and dependent-node deletion regressions. |
 | `backend/tests/test_api_access.py` | Hashed API-key eligibility, revocation, shared atomic credit reservations, shadow accounting, and signed capability regressions. |
@@ -199,7 +205,7 @@
 | `frontend/src/main/backendLauncher.ts`  | Validated WSL detection, dependency sync, FastAPI health, diagnostics, PID lifecycle, and sanitized Windows acceptance evidence. |
 | `frontend/src/preload/`                 | Electron preload bridge.                      |
 | `frontend/src/renderer/`                | React renderer application.                   |
-| `frontend/src/renderer/src/api/`        | HTTP and WebSocket API client.                |
+| `frontend/src/renderer/src/api/`        | HTTP/WebSocket client, persistent sanitized diagnostics, independent refresh, and serving-plan freshness policy. |
 | `frontend/src/renderer/src/pages/`      | Dashboard, Network, Chat, Monitoring, and Settings pages. |
 | `frontend/src/renderer/src/components/` | Shared renderer components.                   |
 | `frontend/src/renderer/src/assets/`     | CSS and static renderer assets.               |

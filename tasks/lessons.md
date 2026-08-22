@@ -17,6 +17,36 @@
 
 ## Active
 
+### [2026-08-22] Never present a timed-out coverage plan as live guidance
+**Problem:** The serving page retained and displayed a recommended layer range after repeated serving-plan request timeouts, and the user followed an automatic `0-6` recommendation even though another device was already serving that range.
+**Rule:** Coverage recommendations must expose freshness and request failure explicitly, clear or quarantine stale guidance after a refresh failure, and prevent automatic serving from using a plan that was not successfully refreshed against the current remote topology.
+**Why:** DHT convergence is delayed and fallible. Labeling cached or incomplete coverage as live can create duplicate ranges, leave the model gap unserved, and invalidate the intended split-inference test.
+
+### [2026-08-22] Assert route ownership before naming a topology test
+**Problem:** I described a full local worker plus generator workflow as a local-only inference test without first requiring evidence that the generator selected that local peer; the live UI instead selected an existing remote full worker and kept the new local worker as an alternate.
+**Rule:** Every physical inference gate must name the expected peer IDs and layer ranges before dispatch, then verify the selected route and response trace match them. A local worker being online does not prove it executed the generation, and every full-range provider must be removed before testing an adjacent split route.
+**Why:** Discovery intentionally lets a generator choose any healthy complete route. Without explicit ownership assertions, a successful response can be credited to the wrong topology and leave local, reciprocal, or split execution completely untested.
+
+### [2026-08-22] Validate observer bootstrap and capability flags against the active test mode
+**Problem:** I did not catch that the Test A observer command placed the worker peer ID at the VPS bootstrap address and still required the receipt expert while incentives were off.
+**Rule:** Before a physical observer run, independently verify the bootstrap multiaddress ends in the VPS bootstrap peer ID, `--expected-peer` names the current worker, and receipt capability is required only for shadow or credit mode.
+**Why:** A swapped peer identity prevents the observer DHT from starting, while a receipt requirement in off mode would fail a correctly configured legacy baseline and discard useful lease evidence.
+
+### [2026-08-22] Respond to the presented runtime failure before repeating setup guidance
+**Problem:** When the user presented the failed inference state, I continued explaining how to configure and launch the backend instead of recognizing that the controlled prompt had already failed.
+**Rule:** When physical-test evidence shows a completed test action and terminal error, classify that result immediately, stop further attempts, and request only the evidence needed to distinguish the documented branches.
+**Why:** Repeating setup instructions after the failure wastes the operator's time and risks overwriting the one-shot logs required to diagnose an ambiguous remote execution.
+
+### [2026-08-22] Preserve the user's proven EXE-only backend launch path
+**Problem:** After the user showed the packaged application workflow, I repeatedly instructed them to start the participant backend manually from WSL even though their physical setup only starts it successfully through the EXE.
+**Rule:** For this two-device Windows acceptance environment, use the packaged Electron managed launcher as the authoritative backend lifecycle unless the user explicitly confirms a manual WSL launch works on that device. Configure variables the launcher does not inject through the repository-root `.env`, then restart through Settings.
+**Why:** Replacing a proven packaged lifecycle with an unsupported manual command blocks the physical test and creates misleading port-ownership states instead of testing the deployed system.
+
+### [2026-08-22] Distinguish manual backend health from managed launcher ownership
+**Problem:** I treated a managed-launcher `port already in use` result as an unidentified-backend blocker even though the user had deliberately started the controlled backend in WSL and Uvicorn reported a successful bind on port 8000.
+**Rule:** When a backend is started manually for environment-controlled testing, verify its health and effective mode through the API and use the renderer against its configured URL; do not expect the Electron managed launcher to claim or restart a process it does not own.
+**Why:** Launcher ownership state and backend API availability are separate contracts. Conflating them interrupts a valid physical test and can lead to unnecessary process termination.
+
 ### [2026-08-22] Verify session-dependent RPC selection before equating diagnostics
 **Problem:** I said Trace exercised the same failing generation path as shadow-mode chat, but source review showed that chat starts a useful-work session and selects the receipt expert while Trace starts no session and selects the legacy expert.
 **Rule:** Before treating a canary, trace, parity check, and user generation as equivalent distributed tests, follow their session setup and capability selection through the actual RPC UID used on the wire.

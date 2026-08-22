@@ -127,9 +127,11 @@ class CoverageApiConflictTests(unittest.TestCase):
 
         self.api_server = api_server
         self.original_active_nodes = api_server._active_serving_nodes
+        self.original_local_node_infos = api_server._local_node_infos
 
     def tearDown(self) -> None:
         self.api_server._active_serving_nodes = self.original_active_nodes
+        self.api_server._local_node_infos = self.original_local_node_infos
 
     def test_stale_revision_returns_http_409_with_fresh_plan(self) -> None:
         self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None: [
@@ -199,6 +201,83 @@ class CoverageApiConflictTests(unittest.TestCase):
         self.assertEqual(plan["route_kind"], "single_provider")
         self.assertEqual([item["peer_id"] for item in plan["selected_route"]], ["full"])
         self.assertEqual([item["peer_id"] for item in plan["standby_ranges"]], ["partial"])
+        self.assertFalse(plan["snapshot_stale"])
+        self.assertFalse(plan["refreshing"])
+        self.assertEqual(plan["snapshot_source"], "dht_cache")
+        self.assertGreaterEqual(plan["snapshot_age_seconds"], 0.0)
+
+    def test_local_only_plan_is_provisional_until_remote_refresh_completes(self) -> None:
+        self.api_server._local_node_infos = lambda: []
+        self.api_server._active_serving_nodes = lambda model_id, dht_prefix=None: [
+            node(0, 6, "remote-head")
+        ]
+
+        async def load_both_snapshots() -> tuple[dict, dict]:
+            key = ("facebook/opt-125m", 6)
+            with self.api_server._serving_plan_cache_lock:
+                self.api_server._serving_plan_cache.pop(key, None)
+            provisional = await self.api_server.get_model_serving_plan(*key)
+            refresh = self.api_server._serving_plan_refresh_tasks.get(key)
+            if refresh is not None:
+                await refresh
+            fresh = await self.api_server.get_model_serving_plan(*key)
+            return provisional, fresh
+
+        provisional, fresh = asyncio.run(load_both_snapshots())
+
+        self.assertTrue(provisional["snapshot_stale"])
+        self.assertTrue(provisional["refreshing"])
+        self.assertEqual(provisional["snapshot_source"], "local_only")
+        self.assertEqual(provisional["recommendation"]["layer_start"], 0)
+        self.assertFalse(fresh["snapshot_stale"])
+        self.assertFalse(fresh["refreshing"])
+        self.assertEqual(fresh["snapshot_source"], "dht_cache")
+        self.assertEqual(fresh["recommendation"]["layer_start"], 6)
+
+    def test_generation_failure_diagnostic_keeps_request_and_failed_hop(self) -> None:
+        from api.runtime_state import RuntimeStateStore
+
+        class FakeSequential:
+            def get_health_readiness(self) -> dict:
+                return {
+                    "route_ready": True,
+                    "route_revision": "route-1",
+                    "coverage_revision": "coverage-1",
+                    "last_failover": {
+                        "attempt_count": 1,
+                        "failed_over": False,
+                        "reasons": [
+                            {
+                                "request_id": "request-123",
+                                "failure_class": "ambiguous_transport",
+                                "peer_id": "peer-head",
+                                "layer_start": 0,
+                                "layer_end": 6,
+                                "reason": "stream reset after dispatch",
+                            }
+                        ],
+                    },
+                }
+
+        class FakeGenerator:
+            sequential = FakeSequential()
+
+        original_runtime_state = self.api_server._runtime_state
+        self.api_server._runtime_state = RuntimeStateStore()
+        try:
+            diagnostic = self.api_server._record_generation_failure(
+                FakeGenerator(),
+                "uncertain execution at layers 0-6",
+            )
+            event = self.api_server._runtime_state.snapshot()["events"][-1]
+        finally:
+            self.api_server._runtime_state = original_runtime_state
+
+        self.assertEqual(diagnostic["request_id"], "request-123")
+        self.assertEqual(diagnostic["failure_class"], "ambiguous_transport")
+        self.assertEqual((diagnostic["layer_start"], diagnostic["layer_end"]), (0, 6))
+        self.assertEqual(event["operation_id"], "request-123")
+        self.assertEqual(event["kind"], "generation")
 
     def test_confirmed_redundancy_preserves_legacy_node_start(self) -> None:
         created: list[object] = []
