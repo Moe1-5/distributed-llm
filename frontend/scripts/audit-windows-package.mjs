@@ -69,6 +69,18 @@ if (expectedCommit && sourceCommit !== expectedCommit) {
   throw new Error(`Packaged backend commit ${sourceCommit} does not match ${expectedCommit}.`)
 }
 
+// electron-builder can refresh win-unpacked and its intermediate NSIS archive
+// while leaving an older portable executable in dist. The unpacked runtime is
+// not what a Windows participant launches, so never certify that stale wrapper.
+const portableMtimeMs = statSync(portablePath).mtimeMs
+const runtimeMarkerPath = join(backendRuntimePath, '.distribllm-source-commit')
+const runtimeMarkerMtimeMs = statSync(runtimeMarkerPath).mtimeMs
+if (portableMtimeMs < runtimeMarkerMtimeMs) {
+  throw new Error(
+    'Portable executable is older than the packaged backend runtime; rebuild it on a Windows-capable host before distributing it.'
+  )
+}
+
 const checksumManifest = readFileSync(join(backendRuntimePath, '.distribllm-sha256'), 'utf8')
   .trim()
   .split('\n')
