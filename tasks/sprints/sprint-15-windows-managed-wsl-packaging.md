@@ -162,3 +162,10 @@ This preserves the current working backend environment while giving testers a Wi
 - Why: a Linux cross-build refreshed `win-unpacked` for source commit `2a2c27c5eaa7def0b0ae6a336ffd9eee29a06a01` and its NSIS archive, but left `DistribLLM-1.0.0-portable.exe` at the previous `b468185` timestamp and SHA-256. The former audit checked the unpacked resource only, which could incorrectly certify a stale file that Windows users would actually launch.
 - Verification: the stale wrapper was observed before the new guard was present; after electron-builder completed its delayed portable output, the refreshed executable is 87,922,625 bytes with SHA-256 `d1a9401b1f9546e6862a6ccce7c9eb8cba1a51cfdb0cea8b1f059beaced928e7`. The strict audit reports backend commit `2a2c27c5eaa7def0b0ae6a336ffd9eee29a06a01`, 38 ASAR entries, 65 checksummed backend files, and no forbidden entries. The next stale state will be rejected before distribution.
 - Status: this is the reviewed participant artifact for the terminal-session diagnostics. Physical acceptance remains open; it requires the two EXE-managed backends to use this same file.
+
+### 2026-08-23 - Verify finalized current portable artifact
+
+- What changed: waited for the portable-output phase after the cross-build had refreshed the unpacked resource, then reran the strict package audit against the latest pushed source commit.
+- Why: the portable target can finish after its initial console output, so an intermediate timestamp check may still show the preceding wrapper. Distribution must use the finalized file, not that intermediate observation.
+- Verification: `DistribLLM-1.0.0-portable.exe` is 87,918,383 bytes with SHA-256 `59744c55d37cf63d4815bc0ef1997c73694360c690f768cae2f56f43bd240e36`. The audit passes for commit `05be3d6c9e5a6a3c4787d7262abec66aac21398a`, with 38 ASAR entries, 65 checksummed runtime files, manifest SHA-256 `b47178e203e5a3fda050874f334a9334bb230c5168d80e315787b679eeaf0dd3`, and zero forbidden entries.
+- Status: this is the current reviewed artifact to copy unchanged to both Windows participants before the one-prompt adjacent-session diagnostic run.
