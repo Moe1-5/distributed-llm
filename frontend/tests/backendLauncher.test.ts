@@ -325,7 +325,7 @@ test('packaged runtime sync and launch use the explicit versioned environment', 
     new RegExp(`UV_PROJECT_ENVIRONMENT="\\$XDG_STATE_HOME/distribllm/environments/${sourceCommit}"`)
   )
   assert.match(syncScript, /export VIRTUAL_ENV="\$UV_PROJECT_ENVIRONMENT"/)
-  assert.match(syncScript, /uv venv --python 3\.12 "\$UV_PROJECT_ENVIRONMENT"/)
+  assert.match(syncScript, /uv venv --allow-existing --python 3\.12 "\$UV_PROJECT_ENVIRONMENT"/)
   assert.match(syncScript, /uv sync --frozen --active --python 3\.12/)
   assert.match(launchScript, /"\$UV_PROJECT_ENVIRONMENT\/bin\/python" main\.py/)
   assert.doesNotMatch(launchScript, /uv run --frozen --no-sync/)

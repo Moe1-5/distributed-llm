@@ -437,7 +437,7 @@ export function buildDependencySyncScript(
 ): string {
   const syncCommands = sourceCommit
     ? [
-        'uv venv --python 3.12 "$UV_PROJECT_ENVIRONMENT"',
+        'uv venv --allow-existing --python 3.12 "$UV_PROJECT_ENVIRONMENT"',
         'uv sync --frozen --active --python 3.12'
       ]
     : ['uv sync --frozen --python 3.12']
