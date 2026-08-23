@@ -57,6 +57,16 @@ uv run --python 3.12 python -m acceptance_evidence validate \
 
 A successful incentives-off report has `ok: true`, two adjacent selected ranges, at least two distinct selected peer IDs and participant owners, verified relay transport, matching per-hop timing, generated tokens, and no receipt submissions. Preserve it as the base inference result. Only after that report passes should both repository-root `.env` files be changed to `DISTRIBLLM_INCENTIVES_MODE=shadow`, the managed backends restarted, and the relay capture repeated. The shadow report additionally requires zero pending submissions and an increase in accepted shadow receipts during generation.
 
+Hash the preserved report and put that exact digest in
+`topologies.incentives_off.evidence_sha256` in the Sprint 32 architecture
+matrix. The final cross-sprint validator loads the report itself, verifies that
+it is a passing relay report for incentives mode `off`, and rejects a matrix
+whose recorded digest does not match the supplied file.
+
+```bash
+sha256sum ~/distribllm-evidence/relay-off-report.json
+```
+
 For the shadow repeat, use new `device-a-relay-shadow.json` and
 `device-b-relay-shadow.json` output names, restore `--settlement-wait 30` on the
 inference capture, and validate with:
@@ -141,6 +151,8 @@ After completing both relay and direct validation, collect these files in one ap
 - the post-restart relay probe bound to that VPS report with `--validation-context`;
 - the passing relay inference report;
 - the passing direct inference report.
+- the earlier passing incentives-off relay report;
+- the completed Sprint 32 architecture failure matrix.
 
 Validate that they form one compatible set:
 
@@ -153,11 +165,13 @@ uv run --python 3.12 python -m acceptance_manifest \
   --relay-probe ~/distribllm-evidence/post-restart-relay-probe.json \
   --relay-report ~/distribllm-evidence/relay-report.json \
   --direct-report ~/distribllm-evidence/direct-report.json \
+  --incentives-off-report ~/distribllm-evidence/relay-off-report.json \
+  --architecture-report ~/distribllm-evidence/architecture-matrix.json \
   --model facebook/opt-125m \
   --expected-app-version 1.0.0 \
   --output ~/distribllm-evidence/final-acceptance.json
 ```
 
-The validator requires two passing packaged-Windows and WSL lifecycle reports on the same application version, clean source commit, and executable SHA-256; a passing VPS identity-preserving restart; effective relay flags; a timely Hivemind 1.1.12 circuit reservation through that exact VPS report; passing relay and direct split inference for the same participant labels; and shadow-mode incentives. It writes the final report with mode `0600`.
+The validator requires two passing packaged-Windows and WSL lifecycle reports on the same application version, clean source commit, and executable SHA-256; a passing VPS identity-preserving restart; effective relay flags; a timely Hivemind 1.1.12 circuit reservation through that exact VPS report; passing relay and direct split inference for the same participant labels; a structurally valid incentives-off relay baseline whose file hash matches the architecture matrix; and a shadow relay report with a later timezone-aware validation timestamp. It writes the final report with mode `0600`.
 
 `ok: true` means the artifacts are internally compatible and ready for review. `final_approval` deliberately remains `pending_manual_review`: software cannot prove that operator labels correspond to separate physical devices or that the visible output and Monitoring UI were reviewed. Do not close a sprint or enable credit mode from the automated flag alone.

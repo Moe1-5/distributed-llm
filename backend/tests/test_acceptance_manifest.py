@@ -116,14 +116,18 @@ def relay_probe() -> dict:
     }
 
 
-def inference_report(mode: str) -> dict:
+def inference_report(mode: str, incentives_mode: str = "shadow") -> dict:
     return {
         "schema_version": 1,
-        "validated_at": "2026-08-13T00:00:00+00:00",
+        "validated_at": (
+            "2026-08-13T00:00:00+00:00"
+            if incentives_mode == "off"
+            else "2026-08-13T00:01:00+00:00"
+        ),
         "ok": True,
         "model_name": "facebook/opt-125m",
         "expected_mode": mode,
-        "expected_incentives": "shadow",
+        "expected_incentives": incentives_mode,
         "participants": ["device-a", "device-b"],
         "selected_route": [
             {
@@ -238,8 +242,16 @@ class AcceptanceManifestTests(unittest.TestCase):
         architecture["participant_source_commit"] = SOURCE_COMMIT
         for component in architecture["components"]:
             component["deployment_commit"] = SOURCE_COMMIT
+        off_report_hash = "f" * 64
+        architecture["topologies"]["incentives_off"][
+            "evidence_sha256"
+        ] = off_report_hash
 
-        report = validate(architecture_report=architecture)
+        report = validate(
+            architecture_report=architecture,
+            incentives_off_report=inference_report("relay", "off"),
+            incentives_off_report_sha256=off_report_hash,
+        )
 
         self.assertTrue(report["ok"], report["errors"])
         self.assertEqual(report["schema_version"], 2)
@@ -247,10 +259,62 @@ class AcceptanceManifestTests(unittest.TestCase):
         self.assertEqual(len(report["manual_gates"]), 5)
 
         architecture["participant_source_commit"] = "d" * 40
-        rejected = validate(architecture_report=architecture)
+        rejected = validate(
+            architecture_report=architecture,
+            incentives_off_report=inference_report("relay", "off"),
+            incentives_off_report_sha256=off_report_hash,
+        )
         self.assertFalse(rejected["ok"])
         self.assertTrue(
             any("does not match the Windows artifact" in error for error in rejected["errors"])
+        )
+
+    def test_architecture_requires_hash_bound_incentives_off_report(self) -> None:
+        architecture = architecture_matrix()
+        architecture["participant_source_commit"] = SOURCE_COMMIT
+        for component in architecture["components"]:
+            component["deployment_commit"] = SOURCE_COMMIT
+
+        missing = validate(architecture_report=architecture)
+        self.assertFalse(missing["ok"])
+        self.assertIn(
+            "Architecture acceptance requires the incentives-off relay report",
+            missing["errors"],
+        )
+
+        mismatched = validate(
+            architecture_report=architecture,
+            incentives_off_report=inference_report("relay", "off"),
+            incentives_off_report_sha256="f" * 64,
+        )
+        self.assertFalse(mismatched["ok"])
+        self.assertIn(
+            "Architecture incentives-off evidence hash does not match the supplied relay report",
+            mismatched["errors"],
+        )
+
+        wrong_mode = validate(
+            architecture_report=architecture,
+            incentives_off_report=inference_report("relay", "shadow"),
+            incentives_off_report_sha256="b" * 64,
+        )
+        self.assertFalse(wrong_mode["ok"])
+        self.assertIn(
+            "Incentives-off relay report does not validate off incentives",
+            wrong_mode["errors"],
+        )
+
+        out_of_order = inference_report("relay", "off")
+        out_of_order["validated_at"] = "2026-08-13T00:02:00+00:00"
+        rejected_order = validate(
+            architecture_report=architecture,
+            incentives_off_report=out_of_order,
+            incentives_off_report_sha256="b" * 64,
+        )
+        self.assertFalse(rejected_order["ok"])
+        self.assertIn(
+            "Incentives-off relay evidence was not validated before shadow relay evidence",
+            rejected_order["errors"],
         )
 
     def test_malformed_numeric_evidence_becomes_errors_instead_of_exceptions(self) -> None:

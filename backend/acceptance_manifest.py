@@ -49,6 +49,22 @@ def _integer(value: Any) -> int | None:
         return None
 
 
+def _valid_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _utc_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 def _validate_windows_reports(
     reports: Sequence[Mapping[str, Any]],
     *,
@@ -228,6 +244,7 @@ def _validate_inference_report(
     label: str,
     model_name: str,
     expected_mode: str,
+    expected_incentives: str = "shadow",
 ) -> tuple[list[str], dict[str, Any]]:
     errors: list[str] = []
     if report.get("schema_version") != 1:
@@ -238,8 +255,10 @@ def _validate_inference_report(
         errors.append(f"{label} report model does not match {model_name}")
     if report.get("expected_mode") != expected_mode:
         errors.append(f"{label} report does not validate {expected_mode} mode")
-    if report.get("expected_incentives") != "shadow":
-        errors.append(f"{label} report does not validate shadow incentives")
+    if report.get("expected_incentives") != expected_incentives:
+        errors.append(
+            f"{label} report does not validate {expected_incentives} incentives"
+        )
 
     participants = _string_list(report.get("participants"))
     if len(set(participants)) < 2:
@@ -269,6 +288,7 @@ def _validate_inference_report(
 
     return errors, {
         "participants": participants,
+        "expected_incentives": report.get("expected_incentives"),
         "selected_route": [
             {
                 "peer_id": item.get("peer_id"),
@@ -293,6 +313,8 @@ def validate_acceptance_set(
     max_relay_seconds: float = 90.0,
     vps_report_sha256: str,
     architecture_report: Mapping[str, Any] | None = None,
+    incentives_off_report: Mapping[str, Any] | None = None,
+    incentives_off_report_sha256: str | None = None,
 ) -> dict[str, Any]:
     if not model_name.strip():
         raise EvidenceError("Model name must not be empty")
@@ -329,7 +351,38 @@ def validate_acceptance_set(
         errors.append("Relay and direct reports use different participant labels")
 
     architecture_summary: dict[str, Any] | None = None
+    incentives_off_summary: dict[str, Any] | None = None
     if architecture_report is not None:
+        if incentives_off_report is None:
+            errors.append(
+                "Architecture acceptance requires the incentives-off relay report"
+            )
+        else:
+            off_errors, incentives_off_summary = _validate_inference_report(
+                incentives_off_report,
+                label="Incentives-off relay",
+                model_name=model_name,
+                expected_mode="relay",
+                expected_incentives="off",
+            )
+            errors.extend(off_errors)
+            if set(incentives_off_summary["participants"]) != set(
+                relay_summary["participants"]
+            ):
+                errors.append(
+                    "Incentives-off and shadow relay reports use different participant labels"
+                )
+            off_validated_at = _utc_timestamp(incentives_off_report.get("validated_at"))
+            shadow_validated_at = _utc_timestamp(relay_report.get("validated_at"))
+            if off_validated_at is None or shadow_validated_at is None:
+                errors.append(
+                    "Incentives-off and shadow relay reports require timezone-aware validation timestamps"
+                )
+            elif off_validated_at >= shadow_validated_at:
+                errors.append(
+                    "Incentives-off relay evidence was not validated before shadow relay evidence"
+                )
+
         source_commits = windows_summary["source_commits"]
         architecture_summary = validate_architecture_matrix(
             architecture_report,
@@ -339,6 +392,15 @@ def validate_acceptance_set(
         errors.extend(
             f"Architecture: {error}" for error in architecture_summary["errors"]
         )
+        expected_off_hash = _mapping(
+            _mapping(architecture_report.get("topologies")).get("incentives_off")
+        ).get("evidence_sha256")
+        if not _valid_sha256(incentives_off_report_sha256):
+            errors.append("Incentives-off relay report SHA-256 is missing or invalid")
+        elif incentives_off_report_sha256 != expected_off_hash:
+            errors.append(
+                "Architecture incentives-off evidence hash does not match the supplied relay report"
+            )
 
     return {
         "schema_version": 2 if architecture_report is not None else SCHEMA_VERSION,
@@ -351,6 +413,12 @@ def validate_acceptance_set(
         "vps": vps_summary,
         "relay_inference": relay_summary,
         "direct_inference": direct_summary,
+        "incentives_off_inference": incentives_off_summary,
+        "incentives_off_report_sha256": (
+            incentives_off_report_sha256
+            if _valid_sha256(incentives_off_report_sha256)
+            else None
+        ),
         "architecture": architecture_summary,
         "manual_gates": [
             "Confirm the reports came from two separate physical Windows devices.",
@@ -374,6 +442,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--relay-probe", type=Path, required=True)
     parser.add_argument("--relay-report", type=Path, required=True)
     parser.add_argument("--direct-report", type=Path, required=True)
+    parser.add_argument("--incentives-off-report", type=Path)
     parser.add_argument("--architecture-report", type=Path)
     parser.add_argument("--model", required=True)
     parser.add_argument("--expected-app-version")
@@ -401,6 +470,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         architecture_report = None
         if args.architecture_report:
             (architecture_report,) = load_documents([args.architecture_report])
+        incentives_off_report = None
+        incentives_off_report_sha256 = None
+        if args.incentives_off_report:
+            try:
+                incentives_off_report_sha256 = hashlib.sha256(
+                    args.incentives_off_report.expanduser().read_bytes()
+                ).hexdigest()
+            except OSError as exc:
+                raise EvidenceError(
+                    "Could not hash incentives-off report "
+                    f"{args.incentives_off_report}: {exc}"
+                ) from exc
+            (incentives_off_report,) = load_documents([args.incentives_off_report])
         report = validate_acceptance_set(
             windows_reports=windows_reports,
             vps_report=vps_report,
@@ -413,6 +495,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_relay_seconds=args.max_relay_seconds,
             vps_report_sha256=vps_report_sha256,
             architecture_report=architecture_report,
+            incentives_off_report=incentives_off_report,
+            incentives_off_report_sha256=incentives_off_report_sha256,
         )
         write_private_json(args.output, report)
         print(json.dumps(report, indent=2, sort_keys=True))

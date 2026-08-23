@@ -70,3 +70,9 @@ Relay-mode participants run as DHT clients, while the current VPS combines boots
 - What changed: clarified that the Electron launcher owns Bootstrap Peers, Trusted Relays, and Network Mode, so operators must configure ordered infrastructure lists in Settings rather than relying on overridden `.env` values; retained `.env` for incentives mode; and corrected the two-device evidence sequence to preserve an incentives-off relay report before repeating the capture in shadow mode.
 - Why: the final physical procedure must match the actual EXE-only lifecycle and Sprint 32's fail-closed incentives-off-before-shadow requirement.
 - Status: the runbooks now describe the implemented launcher boundary and rollout order. Independent-host deployment and every physical failure-matrix gate remain open.
+
+### 2026-08-23 - Bind the incentives-off baseline into final acceptance
+
+- What changed: extended the cross-sprint acceptance manifest to load and structurally validate the real incentives-off relay report whenever a Sprint 32 architecture matrix is supplied, require matching physical participant labels, verify that the matrix's incentives-off evidence hash is the SHA-256 of that exact report, and enforce that its timezone-aware validation timestamp precedes the shadow relay report; updated the two-device and infrastructure runbooks and added regression coverage for missing, mismatched, wrong-mode, and out-of-order evidence.
+- Why: a boolean and syntactically valid hash in the architecture matrix did not prove that the required incentives-off inference baseline actually passed before shadow rollout.
+- Status: fourteen focused manifest and architecture tests and all 450 backend tests pass. The final validator now rejects unbound off-mode evidence; generating the report and completing the remaining physical matrix still require the two Windows devices and independent infrastructure hosts.

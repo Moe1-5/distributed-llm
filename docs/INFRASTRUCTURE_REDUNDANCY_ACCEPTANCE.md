@@ -257,5 +257,10 @@ failure domains, duplicate peer identities, an unproven three-provider route,
 protocol drift, missing evidence hashes, or shadow testing performed before
 the incentives-off baseline.
 
+The `topologies.incentives_off.evidence_sha256` value must be the SHA-256 of
+the actual passing `relay-off-report.json`, not a combined folder or manually
+invented digest. The final cross-sprint validator loads that report and binds
+its contents to the matrix hash.
+
 Do not enable credit mode after this procedure. Credit still requires explicit
 manual review and sprint closure approval.
