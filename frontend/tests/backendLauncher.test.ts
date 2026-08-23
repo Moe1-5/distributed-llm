@@ -16,6 +16,7 @@ import {
   buildBackendSourceIdentityScript,
   buildDependencySyncScript,
   buildBackendStopScript,
+  buildWindowsPathConversionScript,
   buildWslBashArgs,
   parseWslDistroInfo,
   parseWslDistros,
@@ -102,7 +103,7 @@ function fakeRuntime(
           stderr: ''
         }
       }
-      if (args.includes('wslpath')) {
+      if (args.includes('-lc') && decodeWslScript(args).includes('wslpath -a -u')) {
         return { stdout: '/mnt/c/Program Files/DistribLLM/resources/backend-runtime\n', stderr: '' }
       }
       if (args.includes('-lc') && decodeWslScript(args).includes('runtime_source=')) {
@@ -345,6 +346,18 @@ test('transports multiline WSL scripts without relying on Windows preserving new
   assert.deepEqual(args.slice(0, 5), ['--distribution', 'Ubuntu', '--', 'bash', '-lc'])
   assert.equal(decodeWslScript(args), script)
   assert.doesNotMatch(args.at(-1) ?? '', /set -eu|export EXAMPLE/)
+})
+
+test('transports packaged Windows paths inside the encoded WSL script', () => {
+  const windowsPath =
+    'C:\\Users\\albad\\AppData\\Local\\Temp\\portable folder\\resources\\backend-runtime'
+  const args = buildWslBashArgs('Ubuntu', buildWindowsPathConversionScript(windowsPath))
+  const script = decodeWslScript(args)
+
+  assert.match(script, /wslpath -a -u "\$windows_path"/)
+  assert.ok(script.includes(`windows_path='${windowsPath}'`))
+  assert.equal(args.includes(windowsPath), false)
+  assert.equal(args.includes('wslpath'), false)
 })
 
 test('reports missing WSL without attempting a launch', async () => {

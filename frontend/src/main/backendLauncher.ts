@@ -278,6 +278,14 @@ export function buildWslBashArgs(distroName: string, script: string): string[] {
   return ['--distribution', distroName, '--', 'bash', '-lc', decodeCommand]
 }
 
+export function buildWindowsPathConversionScript(windowsPath: string): string {
+  return [
+    'set -eu',
+    `windows_path=${shellQuote(windowsPath)}`,
+    'wslpath -a -u "$windows_path"'
+  ].join('\n')
+}
+
 export function validateBackendLauncherConfig(
   config: BackendLauncherConfig,
   packagedRuntimeAvailable = false
@@ -736,15 +744,13 @@ export class WslBackendLauncher extends EventEmitter {
     if (usePackagedRuntime) {
       this.update('installing_backend', 'Installing the versioned packaged backend runtime.')
       try {
-        const sourcePathResult = await this.runtime.run('wsl.exe', [
-          '--distribution',
-          this.config.distroName,
-          '--',
-          'wslpath',
-          '-a',
-          '-u',
-          this.packagedBackendRuntime.windowsSourcePath
-        ])
+        const sourcePathResult = await this.runtime.run(
+          'wsl.exe',
+          buildWslBashArgs(
+            this.config.distroName,
+            buildWindowsPathConversionScript(this.packagedBackendRuntime.windowsSourcePath)
+          )
+        )
         const sourcePath = decodeWslOutput(sourcePathResult.stdout).trim()
         if (!sourcePath.startsWith('/') || sourcePath.includes('\n')) {
           throw new Error('wslpath did not return an absolute Linux path.')

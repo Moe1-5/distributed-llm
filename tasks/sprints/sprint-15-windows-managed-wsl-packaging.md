@@ -137,3 +137,9 @@ This preserves the current working backend environment while giving testers a Wi
 - What changed: expanded the explicit packaged backend allowlist to include the non-secret evidence, manifest, architecture, relay, tensor, lease, failover, split, and performance modules required by the physical runbooks; added required-file and exclusion regressions; and documented how packaged operators run those tools through the commit-versioned Python environment without a Git checkout.
 - Why: the first backend-bundled candidate removed the checkout requirement for runtime operation but accidentally left the physical evidence commands dependent on a separate checkout, contradicting the managed-package boundary.
 - Status: payload and package verification must be rerun, followed by a new exact commit-bound Windows candidate. Physical testing must use the corrected artifact rather than the earlier package.
+
+### 2026-08-23 - Preserve portable extraction paths during WSL conversion
+
+- What changed: replaced the raw `wsl.exe wslpath <Windows path>` argument with the launcher's existing base64-encoded Bash transport, assigns the decoded Windows path with strict shell quoting inside WSL, and added a regression covering a portable temporary path with backslashes and spaces.
+- Why: the first physical launch of the checksum-bound package failed before backend installation because WSL argument rewriting changed `C:\Users\albad\AppData\Local\Temp\...\resources\backend-runtime` into `C:UsersalbadAppDataLocalTemp...resourcesbackend-runtime`. Passing only base64 characters through the raw Windows-to-WSL boundary prevents backslashes from being consumed.
+- Status: all 28 launcher/security tests and both frontend TypeScript checks pass. The failing package is rejected; a new exact clean commit-bound package and physical Device 1 retry are required before the external relay probe.
