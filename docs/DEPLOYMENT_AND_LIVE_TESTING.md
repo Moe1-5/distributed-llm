@@ -155,7 +155,7 @@ Expected result:
 The current project relay multiaddress is:
 
 ```text
-/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2
+/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y
 ```
 
 Use that exact value in both local settings:
@@ -205,7 +205,7 @@ Run this on a participant backend machine, not on the VPS, when checking whether
 
 ```bash
 cd /home/albad/FYP/fyp-projects/backend
-RELAY_ADDR="/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2"
+RELAY_ADDR="/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y"
 
 DISTRIBLLM_INITIAL_PEERS="$RELAY_ADDR" \
 DISTRIBLLM_TRUSTED_RELAYS="$RELAY_ADDR" \
@@ -435,7 +435,7 @@ Then run the independent observer in a separate Device 1 WSL terminal. With the 
 
 ```bash
 cd "$HOME/FYP/fyp-projects/backend"
-RELAY_ADDR="/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2"
+RELAY_ADDR="/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y"
 set -o pipefail
 uv run --python 3.12 python -m lease_observer \
   --initial-peer "$RELAY_ADDR" \

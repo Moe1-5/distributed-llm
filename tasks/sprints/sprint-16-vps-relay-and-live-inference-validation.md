@@ -16,7 +16,7 @@ The participant now selects the configured trusted relay statically and requests
 
 - The VPS firewall permits inbound TCP port `7001`.
 - The VPS loads its persistent identity from `/var/lib/distribllm/bootstrap.id`.
-- The VPS advertises `/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2`.
+- The VPS advertises `/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y`; the older configured `QmTXjKi...` expectation was disproved by the preserved identity-file hash and repeated service restarts on 2026-08-23.
 - A Windows participant previously confirmed TCP connectivity to `178.156.212.0:7001`.
 - Participant `.env` configuration uses the same VPS address for `DISTRIBLLM_INITIAL_PEERS` and `DISTRIBLLM_TRUSTED_RELAYS`, with `DISTRIBLLM_NETWORK_MODE=auto` and automatic relay enabled.
 - The participant's direct-reachability decision selected relay mode.
@@ -166,3 +166,9 @@ The participant now selects the configured trusted relay statically and requests
 - What changed: expanded the VPS relay operations runbook with an explicit `bind: address already in use` recovery path, including how to inspect port `7001`, distinguish the managed service from an unmanaged foreground process, validate an already-running service, and stop only the intended process before relaunching.
 - Why: the manual bootstrap now loads the stable identity successfully, but Hivemind failed to bind because another process already occupied port `7001`.
 - Status: documentation now covers the observed port ownership failure. The next operator step is to identify the process that owns port `7001`, then either use the existing managed service or stop it before running the foreground command.
+
+### 2026-08-23 - Correct stale expected relay peer identity
+
+- What changed: upgraded the live combined VPS service to commit `3e4ad448edb5dbb546389164c06315bd3f57b27f`, captured a restart-validation failure, and compared the configured expected peer with the persistent identity file and service journal. The source default, packaged Windows launcher, active runbooks, and a literal regression assertion now use peer `QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y`.
+- Why: `/etc/distribllm/bootstrap.env` expected `QmTXjKi...`, but both managed-service restarts deterministically loaded `QmczTupu...`. The identity-file SHA-256 was `34629a9d7ec3ede4a7b12eb3f49537f172cf6f597bed0425dbd7986007a9eab3` before and after restart, proving stale configuration rather than identity rotation. Changing `12D3KooW...` journal peers are reachability-check clients, not the bootstrap relay.
+- Status: the root cause is corrected in source and is under automated/package verification. The operator must deploy the resulting commit, allow the installer to refresh `/etc/distribllm/bootstrap.env`, rerun restart validation, and then continue the external relay and two-device inference gates.

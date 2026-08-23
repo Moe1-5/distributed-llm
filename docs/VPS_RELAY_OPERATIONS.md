@@ -81,16 +81,24 @@ A healthy foreground launch prints these important facts:
 ```text
 Relay transport/service: enabled
 Forced reachability: public
-Peer ID: QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2
+Peer ID: QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y
 Bootstrap addresses (share these with your nodes):
-  /ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2
+  /ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y
 ```
 
 The exact public participant configuration must include the complete multiaddress, including `/p2p/<peer-id>`, as both the bootstrap peer and trusted relay:
 
 ```text
-/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2
+/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y
 ```
+
+The peer ID above was re-derived from the persistent identity file during the
+2026-08-23 managed-service restart test. The identity-file SHA-256 remained
+`34629a9d7ec3ede4a7b12eb3f49537f172cf6f597bed0425dbd7986007a9eab3`
+before and after restart. Older references to `QmTXjKi...` are stale deployment
+configuration, not evidence that the identity rotated. Transient `12D3KooW...`
+IDs in the service journal belong to independent reachability-check clients and
+are not the bootstrap identity.
 
 ### Common Launch Checks
 

@@ -153,6 +153,10 @@ test('parses selected distro names and WSL versions', () => {
 })
 
 test('packaged defaults use the verified project VPS for bootstrap and relay', () => {
+  assert.equal(
+    PROJECT_VPS_RELAY_MADDR,
+    '/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y'
+  )
   assert.equal(DEFAULT_BACKEND_LAUNCHER_CONFIG.networkMode, 'auto')
   assert.deepEqual(DEFAULT_BACKEND_LAUNCHER_CONFIG.initialPeers, [PROJECT_VPS_RELAY_MADDR])
   assert.deepEqual(DEFAULT_BACKEND_LAUNCHER_CONFIG.trustedRelays, [PROJECT_VPS_RELAY_MADDR])

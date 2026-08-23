@@ -159,7 +159,7 @@ The corrected shadow-mode observer used the VPS bootstrap peer as `--initial-pee
 cd /home/albad/FYP/fyp-projects/backend
 set -o pipefail
 uv run --python 3.12 python -m lease_observer \
-  --initial-peer "/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2" \
+  --initial-peer "/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y" \
   --expected-peer "QmRevwu67tzcBjWW21u11Q7oPuhbtEodmuDD87aoW9Yp6z" \
   --require-receipt \
   --interval 10 \
@@ -175,7 +175,7 @@ The first Test A observer command was invalid: its bootstrap address ended in th
 cd /home/albad/FYP/fyp-projects/backend
 set -o pipefail
 uv run --python 3.12 python -m lease_observer \
-  --initial-peer "/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2" \
+  --initial-peer "/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y" \
   --expected-peer "QmQXdUAw4SNPoA6gPMTAY6xPaCS7Em1EutF8FQpE9RWGMh" \
   --interval 10 \
   --duration 1000 \

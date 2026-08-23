@@ -30,6 +30,17 @@ The updated bootstrap process is now running on the VPS with its persistent iden
 /ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2
 ```
 
+That address records the 2026-08-12 deployment observation. It is superseded
+for current operation by the peer ID re-derived from the preserved identity on
+2026-08-23:
+
+```text
+/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y
+```
+
+The persistent identity hash was unchanged across the 2026-08-23 restart. The
+old expected-peer setting was stale; the restart did not rotate the identity.
+
 Confirmed:
 
 - The VPS firewall allows inbound TCP port `7001`.

@@ -141,7 +141,7 @@ export interface BackendLauncherRuntime {
 }
 
 export const PROJECT_VPS_RELAY_MADDR =
-  '/ip4/178.156.212.0/tcp/7001/p2p/QmTXjKiMggt92DP4CLbDwMCfLd4L1aNKyBnja5apT2ZZL2'
+  '/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y'
 
 export const DEFAULT_BACKEND_LAUNCHER_CONFIG: BackendLauncherConfig = {
   autoStart: true,
