@@ -74,3 +74,9 @@ Users cannot currently answer these basic questions from the interface:
 - Why: the physical tests showed that independent booleans and stale snapshots could produce contradictory readiness claims, an eight-second Trace timeout could obscure a second distributed attempt, and users could not distinguish local processes from remote DHT providers or selected routes.
 - Verification: all 449 backend unit tests, 20 launcher tests, and seven renderer state tests pass; frontend type checking and the production Electron/Vite build pass; lint reports zero errors and 78 pre-existing formatting warnings; `git diff --check` passes.
 - Status: Sprint 27 source acceptance is complete. Packaged visual review remains part of the consolidated Windows physical matrix and the sprint stays active until the user explicitly requests closure.
+
+### 2026-08-23 - Record post-start serving-plan refresh timeout
+
+- What changed: recorded a packaged Device 1 observation where the node successfully loaded and began publishing the manual `0-6` range, then the renderer logged `GET /models/facebook%2Fopt-125m/serving-plan?layer_count=6 timed out after 8000 ms`.
+- Why: the local node status proves this was a delayed serving-plan refresh after successful startup, not a failed node start. The UI must not make this timeout appear equivalent to lost worker health.
+- Status: the physical worker reports layers loaded, RPC active, fresh publication, verified relay transport, and no errors. This is retained as packaged visual-review evidence; it does not block the adjacent Device 2 worker gate.

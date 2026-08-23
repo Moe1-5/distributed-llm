@@ -190,3 +190,9 @@ The participant now selects the configured trusted relay statically and requests
 - What changed: copied the exact `b468185...` VPS restart report to Device 1 and ran the packaged `relay_probe` through its isolated Python `3.12.3` environment with forced relay mode, the corrected bootstrap/trusted-relay multiaddress, and validation-context binding.
 - Why: service-local restart success is insufficient until a real external participant reserves a circuit through that exact restarted relay. The bound report prevents mixing a probe with an older VPS state.
 - Status: passed. Device 1 obtained `/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y/p2p-circuit/p2p/12D3KooWJPAiJqqjHQP7ooMGWZfkVDNb5ebEJoW4fPGFLetgnpsL` in `2.507` seconds using Hivemind `1.1.12`; the result has `ok: true`, static trusted-relay selection, private reachability, and validation-context SHA-256 `16cb2b7f7a0c85c14388d82717eea3ddaad66292ae4e86588f399100760a0863`. The next gate is adjacent `0-6` and `6-12` package-hosted workers across the two devices.
+
+### 2026-08-23 - Start the Device 1 lower split worker
+
+- What changed: started the packaged Device 1 OPT-125M worker with the manual adjacent range `0-6` on CUDA.
+- Why: the split test must use explicit disjoint ranges rather than Recommended placement, whose discovery snapshot can still lag physical node publication.
+- Status: passed. Peer `QmUZTRtPJHGubgrR82F5sJRym96EzD2Z6euwNB4XXdXXRJ` serves `0-6`, has layers loaded, an active RPC server, fresh Hivemind publication, verified relay transport, and a visible circuit multiaddress. The node has accepted no forwards yet. The next gate is Device 2 serving the complementary `6-12` range.
