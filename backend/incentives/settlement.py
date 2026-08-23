@@ -14,8 +14,12 @@ from typing import Any, Iterator
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
-from constants import SUPPORTED_MODELS
-from incentives.config import IncentivesMode, parse_incentives_mode
+from constants import REWARDED_MODEL_REVISIONS, SUPPORTED_MODELS
+from incentives.config import (
+    IncentivesMode,
+    is_immutable_model_revision,
+    parse_incentives_mode,
+)
 from incentives.protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -32,18 +36,31 @@ SCHEMA_VERSION = 1
 
 
 def default_policy() -> dict[str, Any]:
+    rewarded_models = {
+        model_id: SUPPORTED_MODELS[model_id]
+        for model_id in REWARDED_MODEL_REVISIONS
+    }
+    if not all(
+        is_immutable_model_revision(revision)
+        for revisions in REWARDED_MODEL_REVISIONS.values()
+        for revision in revisions
+    ):
+        raise RuntimeError("Reward policy contains a mutable model revision")
     return {
-        "reward_version": 1,
+        "reward_version": 2,
         "protocol_version": PROTOCOL_VERSION,
         "reward_scale": 1,
         "model_compute_weights": {
             model_id: max(1, int(info["hidden_size"]) // 768)
-            for model_id, info in SUPPORTED_MODELS.items()
+            for model_id, info in rewarded_models.items()
         },
-        "model_revisions": {model_id: ["main"] for model_id in SUPPORTED_MODELS},
+        "model_revisions": {
+            model_id: list(revisions)
+            for model_id, revisions in REWARDED_MODEL_REVISIONS.items()
+        },
         "model_layer_counts": {
             model_id: int(info["num_layers"])
-            for model_id, info in SUPPORTED_MODELS.items()
+            for model_id, info in rewarded_models.items()
         },
     }
 

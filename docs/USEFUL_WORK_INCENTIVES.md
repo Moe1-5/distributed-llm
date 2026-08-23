@@ -17,7 +17,7 @@ The existing inference expert remains unchanged. In shadow or credit mode, a wor
 - position count and input tensor commitment;
 - nonce and timestamp.
 
-The worker verifies the signature, tensor commitment, selected-route membership, model, revision, and served range before inference. It signs the response commitment and counters. The generator verifies the returned tensor, shape, finite values, signature, commitments, and paired fields before countersigning acceptance. Receipts remain local until every hop in that forward pass succeeds. A receipt-path failure falls back to the legacy expert without credit; a later route failure discards all pending receipts from that pass.
+The worker verifies the signature, tensor commitment, selected-route membership, model, revision, and served range before inference. The revision comes from the checkpoint commit resolved by the worker's actual layer load, not from a mutable branch label or an operator claim. Incentives fail closed if loading diagnostics do not contain a canonical lowercase 40-character commit hash or if the optional `DISTRIBLLM_MODEL_REVISION` assertion differs from that hash. It signs the response commitment and counters. The generator verifies the returned tensor, shape, finite values, signature, commitments, and paired fields before countersigning acceptance. Receipts remain local until every hop in that forward pass succeeds. A receipt-path failure falls back to the legacy expert without credit; a later route failure discards all pending receipts from that pass.
 
 ## Settlement
 
@@ -44,11 +44,13 @@ history is pruned to `DISTRIBLLM_SETTLEMENT_OUTBOX_RETENTION`. Set
 application identity is unsuitable. Replacing the identity without moving its
 outbox fails closed rather than submitting another identity's receipts.
 
-Reward policy version one uses:
+Reward policy version two uses:
 
 `position_count * served_layer_count * model_compute_weight * reward_scale`
 
 Hardware claims and latency do not affect rewards. Shadow mode validates and stores receipts without ledger entries. Credit mode adds a ledger entry. Off mode disables receipt work entirely.
+
+The settlement allowlist is intentionally narrower than the selectable model registry. It currently rewards only the reviewed `facebook/opt-125m` checkpoint `27dcfa74d334bc871f3234de431e71c6eeba5dd6`. Adding another model or checkpoint requires an explicit source-reviewed policy entry and a new reward policy version. Existing databases retain policy version one for historical ledger references while automatically activating version two; no receipt or balance rows are rewritten.
 
 Public endpoints are:
 
@@ -99,6 +101,8 @@ The service records an explicit database schema version and refuses unknown or i
 
 Check service health with `systemctl status distribllm-settlement`, policy with `curl http://127.0.0.1:7101/v1/policy`, and logs with `journalctl -u distribllm-settlement -n 200 --no-pager`.
 
+Before a shadow run, verify `/v1/policy` reports reward version two and the exact OPT-125M commit above. Participant `.env` files should normally leave `DISTRIBLLM_MODEL_REVISION` empty so the worker advertises the loader-resolved hash. Set it only as an additional exact-hash assertion; never set it to `main`.
+
 When settlement remains bound to VPS loopback, each participant must create an
 SSH local forward from the same WSL distro that runs its backend. In that WSL
 namespace, `http://127.0.0.1:7101` reaches the VPS only while the forward is
@@ -108,6 +112,6 @@ debugging guide for the exact checks.
 
 ## Remaining Acceptance
 
-Local tests prove signatures, canonicalization, BLAKE3 commitments, countersignatures, replay and self-dealing rejection, policy bounds, concurrent writes, pagination, restart durability, rollout modes, and legacy inference compatibility. A real independent client-mode Hivemind peer also forwards a variable-length tensor through the receipt expert and settles the accepted signed response.
+Local tests prove signatures, canonicalization, BLAKE3 commitments, countersignatures, replay and self-dealing rejection, immutable checkpoint allowlisting, policy upgrade, policy bounds, concurrent writes, pagination, restart durability, rollout modes, and legacy inference compatibility. A real independent client-mode Hivemind peer also forwards a variable-length tensor through the receipt expert, observes the loader-resolved checkpoint hash, and settles the accepted signed response.
 
 The [two-device evidence runbook](TWO_DEVICE_ACCEPTANCE_EVIDENCE.md) now captures selected-route ownership, per-hop transport and timing, an accepted-receipt increase, settlement drain, and optional standby before/after counters. Two separate devices must still execute that run through the live VPS relay, prove settlement restart continuity, and receive explicit review before credit mode is approved.

@@ -137,7 +137,7 @@ Limits:
 
 - not every registry model has live distributed generation evidence;
 - large gated models remain constrained by local RAM, VRAM, download authorization, and checkpoint format;
-- policy revisions currently use mutable `main` labels instead of immutable model commit hashes.
+- reward-eligible workers advertise the immutable commit resolved by the actual layer load; the current settlement allowlist contains only the reviewed OPT-125M checkpoint.
 
 ### 4.2 Serving And Selective Loading
 
@@ -400,26 +400,24 @@ Required action:
 
 ### High 6 - Source And Package Reproducibility Is Not Clean
 
-The active branch contains broad uncommitted integration changes and generated archives. The frontend has tracked `bun.lock` plus an untracked npm lock while project instructions use npm.
-
-Required action:
-
-- select npm or Bun as the authoritative package manager;
-- commit its lockfile and use deterministic install commands;
-- reconcile and commit reviewed source changes;
-- exclude generated archives;
-- build from a clean commit with explicit source metadata;
-- rerun package-content auditing.
+Resolved in source and packaging procedure on 2026-08-23. Bun and its tracked
+lockfile are the declared dependency authority, generated archives remain
+outside the packaged allowlist, and acceptance builds require a committed
+tracked-clean tree plus an explicit full source commit. The packaged launcher
+also checks the external WSL checkout against that embedded commit before sync
+or startup. Every release candidate is rebuilt only after its source commit and
+must pass the ASAR/package audit before distribution. User-owned untracked
+archives in a development checkout are not release inputs.
 
 ### High 7 - Receipt Policy Uses Mutable Model Revisions
 
-Settlement currently allows revision `main`. The same name can resolve to different model files over time, weakening reproducibility and reward-policy accountability.
-
-Required action:
-
-- resolve and sign immutable Hugging Face commit hashes;
-- advertise the resolved revision in worker metadata;
-- maintain explicit policy allowlists for those immutable revisions.
+Resolved in source on 2026-08-23. Receipt RPC startup now reads the checkpoint
+commit from the loaded layer diagnostics and refuses incentives when that value
+is missing, mutable, or different from the optional operator assertion. Worker
+metadata and signed requests therefore use the exact loaded commit. Settlement
+reward policy version two replaces `main` with an explicit immutable allowlist,
+currently limited to the reviewed OPT-125M checkpoint. Existing databases keep
+historical version-one rows while automatically activating version two.
 
 ### Medium 1 - Settlement Outbox Durability
 
@@ -616,7 +614,6 @@ Both the participant backend and VPS settlement source must be updated to the co
 - durable local receipt outbox;
 - HTTPS domain, authentication, and reverse-proxy rate limits;
 - schema migrations and automated backups;
-- immutable model revision policy;
 - hosted globally atomic API credit spending;
 - stronger anti-Sybil and anti-collusion controls;
 - code signing and automatic updates;

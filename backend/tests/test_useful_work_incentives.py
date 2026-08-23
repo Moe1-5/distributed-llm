@@ -45,9 +45,14 @@ from incentives.settlement import (
     validate_submission,
 )
 from incentives.config import IncentivesConfig
+from incentives.config import is_immutable_model_revision
 from incentives.runtime import UsefulWorkRuntime
 from client.sequential import RemoteSequential, get_peer_expert
 from node.rpc_server import RPCServer, _ReceiptHandlerModule
+from constants import REWARDED_MODEL_REVISIONS
+
+
+MODEL_REVISION = REWARDED_MODEL_REVISIONS["facebook/opt-125m"][0]
 
 
 def request_asgi(app, method: str, path: str, **kwargs):
@@ -93,7 +98,7 @@ class ReceiptFixture:
             generator_peer_id=self.generator_peer,
             session_id="session-1",
             model_name="facebook/opt-125m",
-            model_revision="main",
+            model_revision=MODEL_REVISION,
             route=self.route,
             worker=self.route[0],
             hidden_states=self.hidden,
@@ -138,6 +143,57 @@ class ReceiptFixture:
 
 
 class IdentityAndProtocolTests(unittest.TestCase):
+    def test_incentives_reject_mutable_revision_override(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exact lowercase 40-character"):
+            IncentivesConfig("shadow", "", "main")
+
+    def test_reward_policy_contains_only_explicit_immutable_revisions(self) -> None:
+        policy = default_policy()
+
+        self.assertEqual(
+            set(policy["model_revisions"]),
+            set(REWARDED_MODEL_REVISIONS),
+        )
+        self.assertTrue(
+            all(
+                is_immutable_model_revision(revision)
+                for revisions in policy["model_revisions"].values()
+                for revision in revisions
+            )
+        )
+
+    def test_receipt_rpc_rejects_mutable_or_mismatched_loaded_revision(self) -> None:
+        class Handler:
+            model_name = "facebook/opt-125m"
+            layer_start = 0
+            layer_end = 12
+
+            def is_loaded(self) -> bool:
+                return True
+
+        dht = type("DHT", (), {"peer_id": "worker-peer"})()
+        handler = Handler()
+        handler.load_diagnostics = {"model_revision": "main"}
+        with self.assertRaisesRegex(RuntimeError, "loaded model.*exact"):
+            RPCServer(
+                handler,
+                dht,
+                "distribllm",
+                incentives_config=IncentivesConfig("shadow", "", ""),
+            )
+
+        handler.load_diagnostics = {"model_revision": MODEL_REVISION}
+        different_revision = "0" * 40
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            RPCServer(
+                handler,
+                dht,
+                "distribllm",
+                incentives_config=IncentivesConfig(
+                    "shadow", "", different_revision
+                ),
+            )
+
     def test_identity_persists_with_private_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "identity.json"
@@ -199,7 +255,7 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 fixture.worker,
                 fixture.worker_peer,
                 fixture.route[0]["rpc_uid"],
-                "main",
+                MODEL_REVISION,
             )
 
             output, metadata = module.forward(
@@ -318,7 +374,7 @@ class IdentityAndProtocolTests(unittest.TestCase):
             "rpc_uid": "distribllm.0.12",
             "receipt_rpc_uid": "distribllm.999999.0.12",
             "model_name": "facebook/opt-125m",
-            "model_revision": "main",
+            "model_revision": MODEL_REVISION,
             "layer_start": 0,
             "layer_end": 12,
         }
@@ -360,7 +416,7 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 Path(directory) / "correlated-generator.json"
             )
             runtime = UsefulWorkRuntime(
-                IncentivesConfig("shadow", "", "main"),
+                IncentivesConfig("shadow", "", MODEL_REVISION),
                 identity=identity,
             )
             sequential = RemoteSequential(
@@ -375,7 +431,7 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 "peer_id": "worker-peer",
                 "application_public_key": "worker-public-key",
                 "receipt_rpc_uid": "distribllm.999999.0.12",
-                "model_revision": "main",
+                "model_revision": MODEL_REVISION,
                 "layer_start": 0,
                 "layer_end": 12,
             }
@@ -434,6 +490,7 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 layer_end = 12
                 device = "cpu"
                 layers = nn.ModuleList([nn.Linear(768, 768, bias=False)])
+                load_diagnostics = {"model_revision": MODEL_REVISION}
 
                 def is_loaded(self) -> bool:
                     return True
@@ -450,7 +507,7 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 Handler(),
                 dht,
                 "receiptintegration",
-                incentives_config=IncentivesConfig("shadow", "", "main"),
+                incentives_config=IncentivesConfig("shadow", "", MODEL_REVISION),
                 application_identity=worker,
             )
             client_dht = None
@@ -460,6 +517,7 @@ class IdentityAndProtocolTests(unittest.TestCase):
                 worker_peer = str(dht.peer_id)
                 capability = rpc.get_receipt_capability(worker_peer)
                 self.assertIsNotNone(capability)
+                self.assertEqual(capability["model_revision"], MODEL_REVISION)
                 client_dht = hivemind.DHT(
                     start=True,
                     use_ipfs=False,
@@ -492,7 +550,7 @@ class IdentityAndProtocolTests(unittest.TestCase):
                     generator_peer_id=generator_peer,
                     session_id="integration-session",
                     model_name="facebook/opt-125m",
-                    model_revision="main",
+                    model_revision=MODEL_REVISION,
                     route=route,
                     worker=route[0],
                     hidden_states=hidden,
@@ -549,6 +607,36 @@ class IdentityAndProtocolTests(unittest.TestCase):
 
 
 class SettlementTests(unittest.TestCase):
+    def test_existing_database_activates_immutable_policy_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy-upgrade.sqlite3"
+            store = SettlementStore(path)
+            legacy_policy = {
+                **default_policy(),
+                "reward_version": 1,
+                "model_revisions": {"facebook/opt-125m": ["main"]},
+            }
+            with store.connection() as connection:
+                connection.execute("DELETE FROM policy_versions")
+                connection.execute(
+                    "INSERT INTO policy_versions"
+                    "(reward_version, policy_json, created_at) VALUES (?, ?, ?)",
+                    (
+                        1,
+                        json.dumps(legacy_policy, sort_keys=True, separators=(",", ":")),
+                        int(time.time()),
+                    ),
+                )
+                connection.commit()
+
+            upgraded = SettlementStore(path).active_policy()
+
+            self.assertEqual(upgraded["reward_version"], 2)
+            self.assertEqual(
+                upgraded["model_revisions"]["facebook/opt-125m"],
+                [MODEL_REVISION],
+            )
+
     def test_credit_formula_and_restart_durability(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -677,7 +765,7 @@ class SettlementTests(unittest.TestCase):
                 generator_peer_id=fixture.generator_peer,
                 session_id="partial-session",
                 model_name="facebook/opt-125m",
-                model_revision="main",
+                model_revision=MODEL_REVISION,
                 route=partial_route,
                 worker=partial_route[0],
                 hidden_states=fixture.hidden,
@@ -806,7 +894,7 @@ class SettlementTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["component_role"], "settlement")
             self.assertEqual(response.json()["receipt_protocol_version"], 1)
-            self.assertEqual(response.json()["reward_version"], 1)
+            self.assertEqual(response.json()["reward_version"], 2)
             self.assertEqual(response.json()["mode"], "shadow")
             self.assertEqual(response.json()["deployment_commit"], "abc1234")
             self.assertEqual(response.json()["failure_domain"], "provider-two")
@@ -843,7 +931,9 @@ class SettlementTests(unittest.TestCase):
                 return Response(responses.pop(0))
 
             runtime = UsefulWorkRuntime(
-                IncentivesConfig("shadow", "https://settlement.example", "main"),
+                IncentivesConfig(
+                    "shadow", "https://settlement.example", MODEL_REVISION
+                ),
                 identity,
                 opener,
             )
@@ -899,7 +989,9 @@ class SettlementTests(unittest.TestCase):
                 )
 
             runtime = UsefulWorkRuntime(
-                IncentivesConfig("shadow", "http://127.0.0.1:7101", "main"),
+                IncentivesConfig(
+                    "shadow", "http://127.0.0.1:7101", MODEL_REVISION
+                ),
                 identity,
                 opener,
                 sleeper=lambda _: None,
@@ -957,7 +1049,9 @@ class SettlementTests(unittest.TestCase):
                 )
 
             runtime = UsefulWorkRuntime(
-                IncentivesConfig("shadow", "https://settlement.example", "main"),
+                IncentivesConfig(
+                    "shadow", "https://settlement.example", MODEL_REVISION
+                ),
                 identity,
                 opener,
                 sleeper=lambda _: None,

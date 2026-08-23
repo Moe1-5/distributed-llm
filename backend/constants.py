@@ -323,6 +323,15 @@ SUPPORTED_MODELS: dict[str, dict] = {
     },
 }
 
+# Settlement is intentionally narrower than the UI model registry. A model is
+# reward-eligible only after its exact Hugging Face commit has been reviewed and
+# added here; mutable names such as ``main`` are never valid receipt identities.
+REWARDED_MODEL_REVISIONS: dict[str, tuple[str, ...]] = {
+    "facebook/opt-125m": (
+        "27dcfa74d334bc871f3234de431e71c6eeba5dd6",
+    ),
+}
+
 # Fallback used when a model isn't in SUPPORTED_MODELS
 DEFAULT_GEN_CONFIG: dict = {
     "temperature":        0.8,

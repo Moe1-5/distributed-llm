@@ -33,7 +33,11 @@ from hivemind.utils.tensor_descr import BatchTensorDescriptor
 from hivemind.utils.logging import get_logger
 from hivemind.utils.mpfuture import MPFuture
 
-from incentives.config import IncentivesConfig, get_incentives_config
+from incentives.config import (
+    IncentivesConfig,
+    get_incentives_config,
+    is_immutable_model_revision,
+)
 from incentives.identity import ApplicationIdentity, load_application_identity
 from incentives.protocol import (
     METADATA_TENSOR_SIZE,
@@ -577,6 +581,27 @@ class RPCServer:
         self.dht_prefix = dht_prefix
         self.uid_suffix = uid_suffix
         self.incentives_config = incentives_config or get_incentives_config()
+        self._receipt_model_revision: Optional[str] = None
+        if self.incentives_config.enabled:
+            diagnostics = getattr(handler, "load_diagnostics", None)
+            loaded_revision = (
+                str(diagnostics.get("model_revision", "")).strip()
+                if isinstance(diagnostics, dict)
+                else ""
+            )
+            if not is_immutable_model_revision(loaded_revision):
+                raise RuntimeError(
+                    "Incentives require the loaded model to expose an exact "
+                    "lowercase 40-character checkpoint commit hash"
+                )
+            expected_revision = self.incentives_config.model_revision
+            if expected_revision and expected_revision != loaded_revision:
+                raise RuntimeError(
+                    "Loaded model revision does not match "
+                    "DISTRIBLLM_MODEL_REVISION: "
+                    f"expected {expected_revision}, got {loaded_revision}"
+                )
+            self._receipt_model_revision = loaded_revision
         self.safety_config = safety_config or get_rpc_safety_config()
         self.application_identity = (
             application_identity
@@ -830,6 +855,10 @@ class RPCServer:
             if self.incentives_config.enabled:
                 if self.application_identity is None:
                     raise RuntimeError("Incentives mode requires an application identity")
+                if self._receipt_model_revision is None:
+                    raise RuntimeError(
+                        "Incentives mode requires an immutable loaded model revision"
+                    )
                 self._receipt_uid = self.build_receipt_rpc_uid(
                     self.dht_prefix,
                     self.handler.layer_start,
@@ -853,7 +882,7 @@ class RPCServer:
                         self.application_identity,
                         provider_peer_id,
                         self._receipt_uid,
-                        self.incentives_config.model_revision,
+                        self._receipt_model_revision,
                         self.safety_controller,
                     ),
                     args_schema=(receipt_hidden_descriptor, metadata_descriptor),
@@ -1096,7 +1125,7 @@ class RPCServer:
             "receipt_rpc_uid": self._receipt_uid,
             "application_public_key": self.application_identity.public_key,
             "application_presence": self.application_identity.presence(peer_id),
-            "model_revision": self.incentives_config.model_revision,
+            "model_revision": self._receipt_model_revision,
         }
 
     def get_session_capability(self) -> Optional[dict]:
