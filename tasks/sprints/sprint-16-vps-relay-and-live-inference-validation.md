@@ -202,3 +202,9 @@ The participant now selects the configured trusted relay statically and requests
 - What changed: started complementary CUDA workers on the two physical devices: Device 1 peer `QmV1JC6v2C3vUwbYBK8anRpRoor57sWj5abubatyw6BSuZ` serves `0-6`, and Device 2 peer `QmUUHDX97bymRja9NtMQxdpK2iZ393GoxgSrFJSSmYmm5p` serves `6-12`.
 - Why: this is the controlled topology required to distinguish split-route tensor forwarding from the previously tested single full-model provider path.
 - Status: both nodes report exactly one running CUDA worker with layers loaded, RPC active, fresh publication, verified relay transport, public circuit multiaddresses, zero failed forwards, and zero forwarded requests before generation. The next gate is Device 1 generator route validation and one controlled prompt while both workers remain running.
+
+### 2026-08-23 - Validate the Device 1 generator against the adjacent relay route
+
+- What changed: started the Device 1 OPT-125M generator while retaining its local `0-6` worker and Device 2's remote `6-12` worker.
+- Why: generator readiness must prove the authoritative selected route and per-provider RPC health before a real prompt is allowed to exercise sustained tensor forwarding.
+- Status: passed. The generator is ready with route trace `QmV1JC... (0-6)` then `QmUUHD... (6-12)`, both selected providers are healthy and relay-verified, and startup produced the expected tensor shape `[1, 1, 768]`. The remote upper worker has not processed a tensor forward yet; one controlled prompt is the next terminal test.
