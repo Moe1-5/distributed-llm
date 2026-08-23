@@ -393,6 +393,7 @@ function runtimeEnvironmentLines(sourceCommit: string | null): string[] {
   if (sourceCommit) {
     lines.push(
       `export UV_PROJECT_ENVIRONMENT="$XDG_STATE_HOME/distribllm/environments/${sourceCommit}"`,
+      'export VIRTUAL_ENV="$UV_PROJECT_ENVIRONMENT"',
       'mkdir -p "$(dirname "$UV_PROJECT_ENVIRONMENT")"'
     )
   }
@@ -407,6 +408,9 @@ export function buildBackendLaunchScript(
     .map(([key, value]) => `${key}=${shellQuote(value)}`)
     .join(' ')
   const backendPath = shellQuote(config.backendPath)
+  const backendCommand = sourceCommit
+    ? '"$UV_PROJECT_ENVIRONMENT/bin/python" main.py'
+    : 'uv run --frozen --no-sync --python 3.12 python main.py'
 
   return [
     'set -eu',
@@ -416,7 +420,7 @@ export function buildBackendLaunchScript(
     'mkdir -p "$state_dir"',
     'pid_file="$state_dir/backend.pid"',
     `cd -- ${backendPath}`,
-    `env ${environment} uv run --frozen --no-sync --python 3.12 python main.py &`,
+    `env ${environment} ${backendCommand} &`,
     'backend_pid=$!',
     'printf "%s\\n" "$backend_pid" > "$pid_file"',
     'cleanup() { rm -f "$pid_file"; }',
@@ -431,6 +435,12 @@ export function buildDependencySyncScript(
   config: BackendLauncherConfig,
   sourceCommit: string | null = null
 ): string {
+  const syncCommands = sourceCommit
+    ? [
+        'uv venv --python 3.12 "$UV_PROJECT_ENVIRONMENT"',
+        'uv sync --frozen --active --python 3.12'
+      ]
+    : ['uv sync --frozen --python 3.12']
   return [
     'set -eu',
     ...WSL_RUNTIME_DIR_SCRIPT,
@@ -438,7 +448,7 @@ export function buildDependencySyncScript(
     'command -v uv >/dev/null 2>&1 || { echo "uv is not installed" >&2; exit 127; }',
     `cd -- ${shellQuote(config.backendPath)}`,
     'test -f pyproject.toml || { echo "pyproject.toml is missing" >&2; exit 2; }',
-    'uv sync --frozen --python 3.12'
+    ...syncCommands
   ].join('\n')
 }
 

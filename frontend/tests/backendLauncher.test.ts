@@ -315,6 +315,22 @@ test('sync and stop scripts guard WSL runtime directories before using uv or pid
   assert.match(stopScript, /pid_file="\$XDG_STATE_HOME\/distribllm\/backend\.pid"/)
 })
 
+test('packaged runtime sync and launch use the explicit versioned environment', () => {
+  const sourceCommit = 'c'.repeat(40)
+  const syncScript = buildDependencySyncScript(validConfig(), sourceCommit)
+  const launchScript = buildBackendLaunchScript(validConfig(), sourceCommit)
+
+  assert.match(
+    syncScript,
+    new RegExp(`UV_PROJECT_ENVIRONMENT="\\$XDG_STATE_HOME/distribllm/environments/${sourceCommit}"`)
+  )
+  assert.match(syncScript, /export VIRTUAL_ENV="\$UV_PROJECT_ENVIRONMENT"/)
+  assert.match(syncScript, /uv venv --python 3\.12 "\$UV_PROJECT_ENVIRONMENT"/)
+  assert.match(syncScript, /uv sync --frozen --active --python 3\.12/)
+  assert.match(launchScript, /"\$UV_PROJECT_ENVIRONMENT\/bin\/python" main\.py/)
+  assert.doesNotMatch(launchScript, /uv run --frozen --no-sync/)
+})
+
 test('source identity script reports the tracked-clean backend Git revision', () => {
   const script = buildBackendSourceIdentityScript(validConfig())
 
