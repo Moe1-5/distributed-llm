@@ -273,6 +273,41 @@ class CoverageApiConflictTests(unittest.TestCase):
         from api.runtime_state import RuntimeStateStore
 
         class FakeSequential:
+            def get_last_session_metrics(self) -> dict:
+                return {
+                    "hops": [
+                        {
+                            "peer_id": "peer-head",
+                            "rpc_uid": "session-head",
+                            "layer_start": 0,
+                            "layer_end": 6,
+                            "latency_ms": 11.5,
+                            "input_bytes": 3072,
+                            "expected_position": 4,
+                        }
+                    ],
+                    "failure": {
+                        "request_id": "session-request-456",
+                        "session_id": "session-456",
+                        "route_id": "route-456",
+                        "operation": "decode",
+                        "operation_id": "decode-4-456",
+                        "position_start": 4,
+                        "token_count": 1,
+                        "hop_index": 2,
+                        "hop_count": 2,
+                        "peer_id": "peer-tail",
+                        "rpc_uid": "session-tail",
+                        "layer_start": 6,
+                        "layer_end": 12,
+                        "input_bytes": 3072,
+                        "elapsed_ms": 25.0,
+                        "failure_class": "ambiguous_transport",
+                        "exception_type": "RuntimeError",
+                        "reason": "stream reset",
+                    },
+                }
+
             def get_health_readiness(self) -> dict:
                 return {
                     "route_ready": True,
@@ -308,11 +343,14 @@ class CoverageApiConflictTests(unittest.TestCase):
         finally:
             self.api_server._runtime_state = original_runtime_state
 
-        self.assertEqual(diagnostic["request_id"], "request-123")
+        self.assertEqual(diagnostic["request_id"], "session-request-456")
         self.assertEqual(diagnostic["failure_class"], "ambiguous_transport")
-        self.assertEqual((diagnostic["layer_start"], diagnostic["layer_end"]), (0, 6))
-        self.assertEqual(event["operation_id"], "request-123")
+        self.assertEqual((diagnostic["layer_start"], diagnostic["layer_end"]), (6, 12))
+        self.assertEqual(event["operation_id"], "session-request-456")
         self.assertEqual(event["kind"], "generation")
+        self.assertEqual(diagnostic["session"]["operation"], "decode")
+        self.assertEqual(diagnostic["session"]["hop_index"], 2)
+        self.assertEqual(diagnostic["completed_hops"][0]["peer_id"], "peer-head")
 
     def test_confirmed_redundancy_preserves_legacy_node_start(self) -> None:
         created: list[object] = []

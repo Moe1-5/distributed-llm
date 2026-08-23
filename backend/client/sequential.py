@@ -103,6 +103,13 @@ class SessionPreDispatchError(SessionRouteError):
 class SessionAmbiguousError(SessionRouteError):
     """At least one session expert may have executed; never replay blindly."""
 
+    def __init__(self, message: str, *, diagnostic: Optional[dict] = None) -> None:
+        super().__init__(message)
+        # A reset can happen after the worker has begun execution but before the
+        # client receives its response.  Keep only request/route/tensor-shape
+        # metadata here: diagnostics must never retain activation contents.
+        self.diagnostic = dict(diagnostic or {})
+
 
 def get_peer_expert(dht: object, rpc_uid: str, peer_id: str) -> RemoteExpert:
     """Construct an expert bound to the exact peer selected by the route."""
@@ -1132,9 +1139,44 @@ class RemoteSequential:
                     position_ids=position_ids,
                 )
             except Exception as exc:
+                elapsed_ms = (time.perf_counter() - hop_started_at) * 1000
+                failure = {
+                    "request_id": self._session_request_id,
+                    "session_id": self._session_id,
+                    "route_id": self._session_route_id,
+                    "operation": operation,
+                    "operation_id": operation_id,
+                    "position_start": self._session_position,
+                    "token_count": token_count,
+                    "hop_index": hop_index + 1,
+                    "hop_count": len(self._session_route),
+                    "peer_id": str(node["peer_id"]),
+                    "rpc_uid": str(node["session_rpc_uid"]),
+                    "layer_start": int(node["layer_start"]),
+                    "layer_end": int(node["layer_end"]),
+                    "input_bytes": initial_bytes,
+                    "elapsed_ms": elapsed_ms,
+                    "failure_class": classify_rpc_error(exc),
+                    "exception_type": type(exc).__name__,
+                    "reason": str(exc),
+                }
+                self._last_session_metrics = {
+                    "operation": operation,
+                    "session_id": self._session_id,
+                    "request_id": self._session_request_id,
+                    "route_id": self._session_route_id,
+                    "position_start": self._session_position,
+                    "token_count": token_count,
+                    "input_bytes": initial_bytes * (hop_index + 1),
+                    "elapsed_ms": (time.perf_counter() - started_at) * 1000,
+                    "hops": hop_metrics,
+                    "route": [dict(route_node) for route_node in self._session_route],
+                    "failure": failure,
+                }
                 raise SessionAmbiguousError(
                     f"Session {operation} may have executed through hop {hop_index + 1}; "
-                    "automatic replay is suppressed: " + str(exc)
+                    "automatic replay is suppressed: " + str(exc),
+                    diagnostic=failure,
                 ) from exc
             elapsed_ms = (time.perf_counter() - hop_started_at) * 1000
             node_trace.append(

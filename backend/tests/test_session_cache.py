@@ -583,6 +583,38 @@ class RemoteSequentialSessionTests(unittest.TestCase):
                 self.sequential.open_remote_session(16)
         self.assertEqual(len(failing.calls), 0)
 
+    def test_dispatched_session_failure_retains_exact_hop_diagnostic(self) -> None:
+        experts = {
+            "peer-one": FakeSessionExpert(),
+            "peer-two": FakeSessionExpert(),
+        }
+
+        def resolve(_dht, _uid, peer_id, rpc_role="normal"):
+            self.assertEqual(rpc_role, "session")
+            return experts[peer_id]
+
+        self.sequential.start_session("session-diagnostic")
+        with patch("client.sequential.get_ready_peer_expert", side_effect=resolve):
+            self.sequential.open_remote_session(16)
+            experts["peer-two"].fail_forward = True
+            with self.assertRaises(SessionAmbiguousError) as raised:
+                self.sequential.session_forward(
+                    torch.zeros((1, 2, 16)),
+                    operation="prefill",
+                    attention_mask=torch.ones((1, 2), dtype=torch.bool),
+                    position_ids=torch.arange(2).unsqueeze(0),
+                )
+
+        diagnostic = raised.exception.diagnostic
+        metrics = self.sequential.get_last_session_metrics()
+        self.assertEqual(diagnostic["operation"], "prefill")
+        self.assertEqual(diagnostic["hop_index"], 2)
+        self.assertEqual(diagnostic["peer_id"], "peer-two")
+        self.assertEqual(diagnostic["failure_class"], "ambiguous_transport")
+        self.assertEqual(metrics["failure"], diagnostic)
+        self.assertEqual(len(metrics["hops"]), 1)
+        self.assertEqual(metrics["hops"][0]["peer_id"], "peer-one")
+
     def test_rebuild_closes_old_route_and_prefills_a_different_route(self) -> None:
         alternate = [
             {

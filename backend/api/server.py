@@ -5943,6 +5943,61 @@ def _record_generation_failure(
     """Persist a prompt-free, request-correlated summary of the last route failure."""
     details: dict = {"error": error}
     sequential = getattr(active_generator, "sequential", None)
+    session_metrics_getter = getattr(sequential, "get_last_session_metrics", None)
+    if callable(session_metrics_getter):
+        try:
+            session_metrics = session_metrics_getter()
+            session_failure = session_metrics.get("failure")
+            if isinstance(session_failure, dict):
+                # Keep the terminal session operation in the same bounded event
+                # as the browser-visible error.  This distinguishes a reset at
+                # a particular hop from a generic generator failure without
+                # persisting prompt text or tensor values.
+                details.update(
+                    {
+                        "request_id": session_failure.get("request_id"),
+                        "failure_class": session_failure.get("failure_class"),
+                        "peer_id": session_failure.get("peer_id"),
+                        "layer_start": session_failure.get("layer_start"),
+                        "layer_end": session_failure.get("layer_end"),
+                        "reason": session_failure.get("reason"),
+                        "session": {
+                            key: session_failure.get(key)
+                            for key in (
+                                "session_id",
+                                "route_id",
+                                "operation",
+                                "operation_id",
+                                "position_start",
+                                "token_count",
+                                "hop_index",
+                                "hop_count",
+                                "rpc_uid",
+                                "input_bytes",
+                                "elapsed_ms",
+                                "exception_type",
+                            )
+                        },
+                        "completed_hops": [
+                            {
+                                key: hop.get(key)
+                                for key in (
+                                    "peer_id",
+                                    "rpc_uid",
+                                    "layer_start",
+                                    "layer_end",
+                                    "latency_ms",
+                                    "input_bytes",
+                                    "expected_position",
+                                )
+                            }
+                            for hop in session_metrics.get("hops", [])
+                            if isinstance(hop, dict)
+                        ],
+                    }
+                )
+        except Exception as exc:
+            details["session_diagnostic_error"] = str(exc)
     health_getter = getattr(sequential, "get_health_readiness", None)
     if callable(health_getter):
         try:
@@ -5957,14 +6012,21 @@ def _record_generation_failure(
                     "coverage_revision": health.get("coverage_revision"),
                     "attempt_count": failover.get("attempt_count", 0),
                     "failed_over": bool(failover.get("failed_over")),
-                    "request_id": terminal.get("request_id"),
-                    "failure_class": terminal.get("failure_class"),
-                    "peer_id": terminal.get("peer_id"),
-                    "layer_start": terminal.get("layer_start"),
-                    "layer_end": terminal.get("layer_end"),
-                    "reason": terminal.get("reason"),
                 }
             )
+            # A session failure includes its precise hop.  Stateless-route
+            # failures retain the existing health-monitor terminal reason.
+            if not details.get("request_id"):
+                details.update(
+                    {
+                        "request_id": terminal.get("request_id"),
+                        "failure_class": terminal.get("failure_class"),
+                        "peer_id": terminal.get("peer_id"),
+                        "layer_start": terminal.get("layer_start"),
+                        "layer_end": terminal.get("layer_end"),
+                        "reason": terminal.get("reason"),
+                    }
+                )
         except Exception as exc:
             details["diagnostic_error"] = str(exc)
 

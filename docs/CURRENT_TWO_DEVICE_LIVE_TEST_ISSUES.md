@@ -1,9 +1,9 @@
 # Current Two-Device Live-Test Issues And Production Roadmap
 
-**Report updated:** 2026-08-22
-**Latest physical evidence:** 2026-08-22
-**Branch:** `fix/remote-dht-lease-recovery`
-**Latest physically tested source baseline:** `7c69382050f71cbd2ba41945714257d24af7c43c`
+**Report updated:** 2026-08-23
+**Latest physical evidence:** 2026-08-23
+**Branch:** `feature/distributed-runtime-architecture`
+**Latest physically tested source baseline:** `b468185d87cb2884497b177e84f761478406b9af`
 **Topology:** Windows Electron clients, WSL 2 participant backends, a public VPS bootstrap/circuit relay, and, for shadow runs, a loopback-only VPS settlement service reached through per-device SSH tunnels
 **Latest controlled test mode:** `off` for legacy Test A; deployment rollout remains `shadow`
 
@@ -550,7 +550,9 @@ Users should not need Git, `uv`, manual `.env` editing, shell commands, or a pre
 
 ## 11. Current Stopping Point
 
-The latest adjacent split is a failed sustained-generation result, not a coverage failure. The route was ready and streamed visible text, proving earlier forwards completed through both `0-6` and `6-12`; a later forward then reset ambiguously at `0-6`. Automatic replay must remain disabled.
+The latest adjacent split is a failed sustained-generation result, not a coverage failure. The route was ready and streamed visible text, proving earlier forwards completed through both `0-6` and `6-12`; a later forward then reset ambiguously. The current concrete result is more precise: both workers reported eighteen accepted and completed session RPCs with no worker failures, rejections, or timeouts; each retained one prefill, fourteen completed decodes, and one cancellation. The generator's terminal error says the uncertain decode reached hop two, but the currently running artifact does not retain its exact operation metadata. Automatic replay must remain disabled because that final decode may have executed.
+
+The next artifact records the terminal session operation, failed hop, peer, session RPC UID, position, logical tensor byte count, elapsed time, exception class, and completed previous hops in the same Settings diagnostic bundle. It retains neither prompt text nor tensor contents. Collect that bundle after one prompt; do not send the prompt again on the already running artifact.
 
 A new clean-identity acceptance-candidate executable now includes freshness-gated serving recommendations and request-correlated Settings diagnostics. It embeds source commit `232acb1bdcba5c7347a8f58aba056881115a8308` and has SHA-256 `0b6121de080fb5f16df53d9f47df95d39a5ff07cd99892eef1f0e2af23de89ee`. The next run should validate the UI sequentially, dispatch only one prompt after confirming the exact adjacent route, export Diagnostics immediately after the result, and then stop. If the reset repeats, preserve the exported bundle plus Device 2 and VPS logs and run the controlled relay payload sweep followed by the identical direct comparison. The full 1,000-second lease soak and successful shadow receipt remain acceptance gates after the transport defect is isolated.
 
