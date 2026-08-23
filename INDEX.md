@@ -25,6 +25,7 @@
 | Network reachability and relay review      | `docs/NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` |
 | Windows managed WSL packaging and acceptance capture | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` |
 | Deployment, VPS services, and live testing | `docs/DEPLOYMENT_AND_LIVE_TESTING.md` |
+| Infrastructure redundancy and failure acceptance | `docs/INFRASTRUCTURE_REDUNDANCY_ACCEPTANCE.md` |
 | Current two-device live-test issues and production roadmap | `docs/CURRENT_TWO_DEVICE_LIVE_TEST_ISSUES.md` |
 | Relay tensor RPC stream-reset handoff and physical test chronology | `docs/RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md` |
 | Useful-work incentives and settlement | `docs/USEFUL_WORK_INCENTIVES.md`       |
@@ -147,6 +148,7 @@
 | `docs/COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, serving recommendations, stale-plan validation, and serving/inference workflow. |
 | `docs/VPS_RELAY_OPERATIONS.md` | Manual foreground launch, persistent VPS relay installation, machine-readable restart validation, external probe binding, recovery, and rollback runbook. |
 | `docs/DEPLOYMENT_AND_LIVE_TESTING.md` | EXE rebuild rules, local WSL backend updates, VPS bootstrap and shadow settlement deployment, relay probes, two-device checks, and future backend-bundled packaging. |
+| `docs/INFRASTRUCTURE_REDUNDANCY_ACCEPTANCE.md`, `docs/ARCHITECTURE_FAILURE_MATRIX_TEMPLATE.json` | Separated infrastructure deployment, physical outage procedure, recovery objectives, and fail-closed final evidence template. |
 | `docs/CURRENT_TWO_DEVICE_LIVE_TEST_ISSUES.md` | Timestamped lease-persistence evidence, implemented first-stage DHT/expert repair, production service architecture, packaging plan, and open physical acceptance gates. |
 | `docs/RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md` | Physical test chronology, common sustained relay-path boundary, request-correlated diagnostics, outcome ledger, controlled isolation matrix, and next-agent fix decision tree. |
 | `docs/SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md` | Full codebase and runtime-state audit, ranked technical findings, settlement connection-refused repair, unfinished work, and final desktop release sequence. |
@@ -180,6 +182,7 @@
 | `backend/incentives/` | Ed25519 identities, canonical BLAKE3 receipts, SQLite settlement, hashed developer API keys, credit reservations, and signed inference capabilities. |
 | `backend/network/` | Persistent control-plane discovery, immutable last-good topology, role state, publication verification, and typed publication outcomes. |
 | `backend/network/supervisor.py` | Backend-lifespan network supervisor with an independent cache-disabled DHT, passive topology snapshots, structured failures, role identities, and exact-handle cleanup/quarantine. |
+| `backend/network/infrastructure.py` | Ordered participant DHT/relay configuration diagnostics and explicit redundancy/degraded state. |
 | `backend/network/publication.py` | Hivemind 1.1.12-aware publication-result classifier that separates equivalent newer records, conflicts, weak acknowledgement, and verified local transport loss. |
 | `backend/placement/` | Authenticated SQLite placement coordinator, HTTP client, reservation state machine, and backend heartbeat owner. |
 | `backend/placement/service.py` | Separately deployable atomic range allocator with revisioned durable leases, expiry, idempotency, and audit-safe diagnostics. |
@@ -189,8 +192,10 @@
 | `backend/node/relay_compat.py` | Hivemind 1.1.12 compatibility shim that selects configured trusted relays as static AutoRelay candidates. |
 | `backend/models/`        | Model-specific adapter placeholders and architecture-specific preprocessing helpers. |
 | `backend/traces/`        | Gitignored runtime JSON generation traces written by `/generator/trace`.             |
-| `backend/bootstrap.py`   | Hivemind DHT bootstrap, circuit relay, and reachability-check node.                  |
-| `backend/bootstrap_service_validate.py` | Validates non-secret VPS runtime evidence, deployed versions, relay state, and restart identity continuity. |
+| `backend/bootstrap.py`   | Explicit full-DHT, non-storage relay, and legacy combined Hivemind infrastructure roles. |
+| `backend/bootstrap_service_validate.py` | Validates role, protocol, commit, effective flags, identity, address, failure domain, and restart continuity. |
+| `backend/architecture_acceptance.py` | Validates redundant infrastructure, controlled failures, protocol revisions, topology evidence, and rollout ordering. |
+| `backend/control_service_validate.py` | Validates coordinator/settlement component health, revisions, failure domain, logs, and restart evidence. |
 | `backend/acceptance_evidence.py` | Captures sanitized participant evidence and validates two-device route, transport, timing, receipts, ownership, and optional standby non-payment. |
 | `backend/acceptance_manifest.py` | Cross-validates packaged Windows, VPS restart, bound relay probe, relay inference, and direct inference artifacts while preserving manual approval gates. |
 | `backend/local_split_probe.py` | Runs cached-model local split inference through two real Hivemind serving peers and records parity, accounting, and cleanup evidence. |
@@ -207,6 +212,9 @@
 | `backend/tests/test_useful_work_incentives.py` | Receipt signatures and commitments, RPC wrapper, settlement abuse rejection, durability, concurrency, pagination, and rollout-mode regressions. |
 | `backend/tests/test_acceptance_evidence.py` | Evidence sanitization, route ownership, relay validation, replica selection, receipt deltas, and standby non-payment regressions. |
 | `backend/tests/test_acceptance_manifest.py` | Cross-sprint artifact compatibility, VPS/probe binding, version mismatch, manual-gate, and private-output regressions. |
+| `backend/tests/test_architecture_acceptance.py` | Independent failure-domain, protocol-binding, topology-redundancy, rollout-order, and private evidence regressions. |
+| `backend/tests/test_infrastructure_config.py` | Ordered and duplicate participant infrastructure configuration state regressions. |
+| `backend/tests/test_control_service_validate.py` | Coordinator/settlement health, protocol drift, log, and restart evidence regressions. |
 | `backend/tests/test_local_split_probe.py` | Local split probe option, range, evidence sanitization, and private-output regressions. |
 | `backend/tests/test_tinyllama_performance_probe.py` | TinyLlama probe bounds, metric sanitization, and acceptance-contract regressions. |
 | `backend/tests/test_tensor_payload_probe.py` | Controlled-target validation, tensor byte accounting, repeated-canary ordering, legacy-only dispatch, and first-failure stop regressions. |
@@ -257,7 +265,13 @@
 
 | Path | What's inside |
 | --- | --- |
-| `deploy/vps/` | Versioned systemd templates, environment examples, locked installers, relay validation, transactional placement, and useful-work settlement deployment. |
+| `deploy/vps/` | Versioned separated DHT, relay, coordinator, and settlement units, environment templates, locked installers, and role validation. |
+| `deploy/vps/distribllm-dht.service`, `deploy/vps/distribllm-relay.service` | Hardened role-specific systemd units with separate Unix identities and writable state. |
+| `deploy/vps/dht.env.example`, `deploy/vps/relay.env.example` | Secret-free role, address, identity, failure-domain, peer, and pinned-Hivemind configuration. |
+| `deploy/vps/run-infrastructure-peer.sh` | Validated launcher for full-DHT and non-storage relay roles. |
+| `deploy/vps/install-infrastructure-service.sh` | Role-aware installer that refuses to start unresolved configuration. |
+| `deploy/vps/validate-infrastructure-service.sh` | Restart, identity, status, role, and effective-p2pd-flag validator. |
+| `deploy/vps/validate-control-service.sh` | Coordinator/settlement health, journal, failure-domain, commit, and restart validator. |
 | `deploy/vps/distribllm-placement.service` | Hardened systemd unit template for the transactional placement authority. |
 | `deploy/vps/placement.env.example` | Secret-free placement host, port, database, TTL, and placeholder-secret configuration. |
 | `deploy/vps/run-placement.sh` | Validated placement service launcher using the locked service-owned environment. |

@@ -1072,6 +1072,8 @@ def create_placement_app(
     startup_ttl_seconds: float = 90.0,
     online_ttl_seconds: float = 300.0,
     clock: Callable[[], float] = time.time,
+    deployment_commit: str | None = None,
+    failure_domain: str | None = None,
 ) -> FastAPI:
     if len(auth_token) < 32:
         raise ValueError("placement auth_token must contain at least 32 characters")
@@ -1110,7 +1112,11 @@ def create_placement_app(
     async def health() -> dict[str, Any]:
         return {
             "status": "ok",
+            "component_role": "coordinator",
+            "service_protocol_version": 1,
             "schema_version": SCHEMA_VERSION,
+            "deployment_commit": deployment_commit,
+            "failure_domain": failure_domain,
             "topology_revision": store.audit(limit=1)["topology_revision"],
         }
 
@@ -1210,6 +1216,8 @@ def create_default_placement_app() -> FastAPI:
         online_ttl_seconds=float(
             os.environ.get("DISTRIBLLM_PLACEMENT_ONLINE_TTL_SECONDS", "300")
         ),
+        deployment_commit=os.environ.get("DISTRIBLLM_DEPLOY_COMMIT") or None,
+        failure_domain=os.environ.get("DISTRIBLLM_FAILURE_DOMAIN") or None,
     )
 
 

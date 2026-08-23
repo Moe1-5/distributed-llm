@@ -791,6 +791,25 @@ class SettlementTests(unittest.TestCase):
             self.assertEqual(policy["mode"], "shadow")
             self.assertEqual(policy["protocol_version"], 1)
 
+    def test_settlement_health_binds_protocol_policy_mode_and_deployment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = create_settlement_app(
+                Path(directory) / "health.sqlite3",
+                "shadow",
+                deployment_commit="abc1234",
+                failure_domain="provider-two",
+            )
+
+            response = request_asgi(app, "GET", "/health")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["component_role"], "settlement")
+            self.assertEqual(response.json()["receipt_protocol_version"], 1)
+            self.assertEqual(response.json()["reward_version"], 1)
+            self.assertEqual(response.json()["mode"], "shadow")
+            self.assertEqual(response.json()["deployment_commit"], "abc1234")
+            self.assertEqual(response.json()["failure_domain"], "provider-two")
+
     def test_runtime_submission_status_and_public_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             identity = load_application_identity(Path(directory) / "runtime.json")

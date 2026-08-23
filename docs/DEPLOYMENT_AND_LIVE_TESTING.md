@@ -5,6 +5,11 @@
 
 This document is the practical checklist for rebuilding the Windows executable, running the VPS bootstrap relay, updating the local WSL backend, and preparing the later backend-bundled package.
 
+The single combined VPS procedure is the established baseline. For the Sprint
+32 separated full-DHT and relay topology, isolated coordinator/settlement
+permissions, and failure injection, use
+[Infrastructure Redundancy And Architecture Acceptance](INFRASTRUCTURE_REDUNDANCY_ACCEPTANCE.md).
+
 ## Should I Create A New EXE?
 
 Create a new executable when you want to test any latest Electron, renderer, settings, managed WSL launcher, packaging, or UI validation change. That includes changes under:

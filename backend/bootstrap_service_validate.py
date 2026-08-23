@@ -10,9 +10,28 @@ from typing import Any
 def validate_status(status: dict[str, Any], expected: dict[str, Any]) -> list[str]:
     errors: list[str] = []
 
-    if status.get("schema_version") != 1:
+    if status.get("schema_version") not in {1, 2}:
         errors.append("Unsupported or missing bootstrap status schema.")
-    if not status.get("relay_enabled"):
+    expected_role = expected.get("role")
+    if expected_role:
+        if status.get("schema_version") != 2:
+            errors.append("Role-specific infrastructure requires status schema version 2.")
+        if status.get("infrastructure_protocol_version") != 1:
+            errors.append("Unsupported infrastructure protocol version.")
+        if status.get("role") != expected_role:
+            errors.append(
+                f"Unexpected infrastructure role: expected {expected_role!r}, "
+                f"got {status.get('role')!r}."
+            )
+        expected_relay = expected_role in {"relay", "combined"}
+        expected_storage = expected_role in {"dht", "combined"}
+        if status.get("relay_enabled") is not expected_relay:
+            errors.append("Infrastructure relay responsibility does not match its role.")
+        if status.get("dht_storage_enabled") is not expected_storage:
+            errors.append("Infrastructure DHT storage responsibility does not match its role.")
+        if expected_role == "relay" and not status.get("initial_peers"):
+            errors.append("Relay has no configured full DHT peer.")
+    elif not status.get("relay_enabled"):
         errors.append("Bootstrap relay service is not enabled.")
     if status.get("force_reachability") != "public":
         errors.append("Bootstrap does not report forced public reachability.")
@@ -27,6 +46,7 @@ def validate_status(status: dict[str, Any], expected: dict[str, Any]) -> list[st
         "deployment_commit": "deployment commit",
         "identity_path": "identity path",
         "port": "listening port",
+        "failure_domain": "failure domain",
     }
     for field, label in comparisons.items():
         expected_value = expected.get(field)
@@ -67,6 +87,7 @@ def build_validation_report(
     restart_requested: bool,
     identity_hash_preserved: bool,
     relay_flags_observed: bool,
+    role: str | None = None,
 ) -> dict[str, Any]:
     status_valid = not errors
     restart_passed = (
@@ -76,8 +97,9 @@ def build_validation_report(
         and relay_flags_observed
     )
     return {
-        "schema_version": 1,
-        "kind": "vps_bootstrap_validation",
+        "schema_version": 2 if role else 1,
+        "kind": "infrastructure_service_validation" if role else "vps_bootstrap_validation",
+        "role": role,
         "validated_at": datetime.now(timezone.utc).isoformat(),
         "ok": (
             status_valid
@@ -87,6 +109,7 @@ def build_validation_report(
         "checks": {
             "runtime_status_valid": status_valid,
             "relay_flags_observed": relay_flags_observed,
+            "effective_flags_observed": relay_flags_observed,
         },
         "restart": {
             "requested": restart_requested,
@@ -101,16 +124,19 @@ def build_validation_report(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", required=True)
+    parser.add_argument("--expected-role", choices=("dht", "relay", "combined"))
     parser.add_argument("--expected-peer-id")
     parser.add_argument("--expected-hivemind-version", default="1.1.12")
     parser.add_argument("--expected-commit")
     parser.add_argument("--expected-identity-path")
     parser.add_argument("--expected-public-maddr")
     parser.add_argument("--expected-port", type=int)
+    parser.add_argument("--expected-failure-domain")
     parser.add_argument("--python-prefix", default="3.12")
     parser.add_argument("--before-restart-status")
     parser.add_argument("--identity-hash-preserved", action="store_true")
     parser.add_argument("--relay-flags-observed", action="store_true")
+    parser.add_argument("--effective-flags-observed", action="store_true")
     return parser.parse_args()
 
 
@@ -125,6 +151,8 @@ def main() -> int:
         "public_maddr": args.expected_public_maddr,
         "port": args.expected_port,
         "python_prefix": args.python_prefix,
+        "role": args.expected_role,
+        "failure_domain": args.expected_failure_domain,
     }
     if args.before_restart_status:
         expected["before_restart"] = json.loads(
@@ -137,7 +165,10 @@ def main() -> int:
         errors,
         restart_requested=bool(args.before_restart_status),
         identity_hash_preserved=args.identity_hash_preserved,
-        relay_flags_observed=args.relay_flags_observed,
+        relay_flags_observed=(
+            args.relay_flags_observed or args.effective_flags_observed
+        ),
+        role=args.expected_role,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["ok"] else 1

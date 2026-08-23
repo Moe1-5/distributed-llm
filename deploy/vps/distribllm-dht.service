@@ -1,20 +1,22 @@
 [Unit]
-Description=DistribLLM transactional swarm placement service
-Documentation=file://@REPO_ROOT@/docs/DEPLOYMENT_AND_LIVE_TESTING.md
+Description=DistribLLM full DHT bootstrap peer
+Documentation=file://@REPO_ROOT@/docs/VPS_RELAY_OPERATIONS.md
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-User=distribllm-placement
-Group=distribllm-placement
+User=distribllm-dht
+Group=distribllm-dht
 WorkingDirectory=@REPO_ROOT@/backend
-EnvironmentFile=/etc/distribllm-placement/service.env
+EnvironmentFile=/etc/distribllm-dht/service.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-StateDirectory=distribllm-placement
+RuntimeDirectory=distribllm-dht
+RuntimeDirectoryMode=0750
+StateDirectory=distribllm-dht
 StateDirectoryMode=0750
-ExecStart=@REPO_ROOT@/deploy/vps/run-placement.sh
+ExecStart=@REPO_ROOT@/deploy/vps/run-infrastructure-peer.sh
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
@@ -24,7 +26,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/distribllm-placement
+ReadWritePaths=/var/lib/distribllm-dht /run/distribllm-dht
 RestrictSUIDSGID=true
 
 [Install]

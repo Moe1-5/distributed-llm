@@ -1,5 +1,9 @@
 # VPS Relay Operations
 
+> The combined bootstrap/relay procedure below is retained for the Sprint 16
+> baseline and rollback. New resilient deployments must use the separated
+> role procedure in [Infrastructure Redundancy And Architecture Acceptance](INFRASTRUCTURE_REDUNDANCY_ACCEPTANCE.md).
+
 **Status:** Service implementation complete; live VPS restart validation pending
 **Last updated:** 2026-08-16
 

@@ -6,13 +6,13 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=distribllm
-Group=distribllm
+User=distribllm-settlement
+Group=distribllm-settlement
 WorkingDirectory=@REPO_ROOT@/backend
-EnvironmentFile=/etc/distribllm/settlement.env
+EnvironmentFile=/etc/distribllm-settlement/service.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-StateDirectory=distribllm
+StateDirectory=distribllm-settlement
 StateDirectoryMode=0750
 ExecStart=@REPO_ROOT@/deploy/vps/run-settlement.sh
 Restart=on-failure
@@ -24,7 +24,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/distribllm
+ReadWritePaths=/var/lib/distribllm-settlement
 RestrictSUIDSGID=true
 
 [Install]

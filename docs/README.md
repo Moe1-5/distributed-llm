@@ -12,6 +12,7 @@ This folder documents the current codebase, the intended distributed inference f
 - [Errors and Debugging](./ERRORS_AND_DEBUGGING.md) - current errors, symptoms, root causes, and where to inspect.
 - [Validation and Test Plan](./VALIDATION_AND_TEST_PLAN.md) - checks needed before trusting distributed inference.
 - [Deployment and Live Testing](./DEPLOYMENT_AND_LIVE_TESTING.md) - executable rebuild rules, VPS bootstrap commands, participant setup, and future backend-bundled packaging notes.
+- [Infrastructure Redundancy and Acceptance](./INFRASTRUCTURE_REDUNDANCY_ACCEPTANCE.md) - separated DHT/relay services, independent failure domains, controlled outage tests, and final architecture evidence.
 - [System Code Analysis and Finalization Report](./SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md) - current implementation inventory, ranked source findings, settlement outage analysis, unfinished work, and final desktop release gates.
 
 The running issue log is kept at the repository root: [../ISSUES.md](../ISSUES.md).

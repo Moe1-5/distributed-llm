@@ -3,15 +3,15 @@
 ## 1. Bootstrap Operations
 
 ```text
-operator starts backend/bootstrap.py with persistent bootstrap.id
-  -> bootstrap listens on configured TCP port
-  -> relay support and the direct-reachability checker start
-  -> loopback and public multiaddresses are printed
-  -> public address is placed in DISTRIBLLM_INITIAL_PEERS
-  -> serving nodes and generators use it for discovery and relay fallback
+operator starts two independent backend/bootstrap.py role=dht peers
+  -> each full DHT server stores replicated provider records without forwarding circuits
+operator starts two independent backend/bootstrap.py role=relay peers
+  -> each non-storage DHT client joins the full peers and forwards participant circuits
+  -> DHT addresses go in DISTRIBLLM_INITIAL_PEERS
+  -> relay addresses go in DISTRIBLLM_TRUSTED_RELAYS
 ```
 
-The bootstrap is infrastructure, not a model-serving node or normal client tab. Preserve `bootstrap.id`; replacing it changes the peer ID. Processes on the VPS may use its loopback address, while laptops, Colab, and other machines must use the public address. The same first VPS process may provide both bootstrap discovery and circuit forwarding, although those are separate responsibilities.
+Infrastructure is not a model-serving node or normal client tab. Preserve every role identity; replacing one changes that peer ID. Participants receive ordered full-DHT and trusted-relay lists. Legacy combined mode remains a rollback option, but it is explicitly a single failure domain and cannot satisfy Sprint 32 acceptance.
 
 ## 2. Public Model Serving
 

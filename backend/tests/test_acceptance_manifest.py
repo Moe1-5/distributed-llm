@@ -10,6 +10,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 from acceptance_manifest import main, validate_acceptance_set
+from tests.test_architecture_acceptance import matrix as architecture_matrix
 
 RELAY = "/ip4/203.0.113.10/tcp/7001/p2p/QmRelay"
 VPS_REPORT_SHA256 = "a" * 64
@@ -230,6 +231,26 @@ class AcceptanceManifestTests(unittest.TestCase):
         self.assertIn(
             "Relay probe is not bound to the supplied VPS validation report",
             report["errors"],
+        )
+
+    def test_architecture_matrix_is_bound_to_windows_artifact_commit(self) -> None:
+        architecture = architecture_matrix()
+        architecture["participant_source_commit"] = SOURCE_COMMIT
+        for component in architecture["components"]:
+            component["deployment_commit"] = SOURCE_COMMIT
+
+        report = validate(architecture_report=architecture)
+
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["schema_version"], 2)
+        self.assertTrue(report["architecture"]["ok"])
+        self.assertEqual(len(report["manual_gates"]), 5)
+
+        architecture["participant_source_commit"] = "d" * 40
+        rejected = validate(architecture_report=architecture)
+        self.assertFalse(rejected["ok"])
+        self.assertTrue(
+            any("does not match the Windows artifact" in error for error in rejected["errors"])
         )
 
     def test_malformed_numeric_evidence_becomes_errors_instead_of_exceptions(self) -> None:

@@ -85,6 +85,7 @@ from constants import (
     SUPPORTED_MODELS,
     DHT_PREFIX,
     get_initial_peers,
+    get_p2p_network_config,
     get_role_identity_path,
 )
 
@@ -557,6 +558,7 @@ def _record_network_event(**kwargs) -> dict:
 
 network_supervisor = NetworkSupervisor(
     initial_peers=get_initial_peers(),
+    trusted_relays=list(get_p2p_network_config().trusted_relays),
     dht_prefix=DHT_PREFIX,
     identity_path=get_role_identity_path("control-plane"),
     event_sink=_record_network_event,

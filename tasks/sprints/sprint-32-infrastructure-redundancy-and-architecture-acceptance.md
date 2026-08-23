@@ -3,7 +3,7 @@
 **Goal:** Remove the combined bootstrap, DHT-storage, and relay failure domain, then prove the revised architecture under controlled failures.
 **Start:** 2026-08-23
 **End:** TBD
-**Status:** Planned as the architecture-program integration and acceptance sprint.
+**Status:** Source implementation complete; independent-host deployment and physical failure acceptance remain open.
 
 ---
 
@@ -25,10 +25,10 @@ Relay-mode participants run as DHT clients, while the current VPS combines boots
 - [ ] Add a second full DHT/bootstrap peer in an independent failure domain.
 - [ ] Add an alternate relay before claiming relay fault tolerance.
 - [ ] Configure participants with ordered, validated infrastructure peers and explicit degraded states.
-- [ ] Extend artifact and acceptance evidence to bind participant, coordinator, DHT, relay, and protocol revisions.
-- [ ] Add controlled coordinator, DHT, relay, worker, and generator failure-injection procedures.
+- [x] Extend artifact and acceptance evidence to bind participant, coordinator, DHT, relay, and protocol revisions.
+- [x] Add controlled coordinator, DHT, relay, worker, and generator failure-injection procedures.
 - [ ] Test complementary split execution separately from a redundant three-provider topology.
-- [ ] Define recovery objectives for existing leases, new placement, in-flight work, and later requests.
+- [x] Define recovery objectives for existing leases, new placement, in-flight work, and later requests.
 - [ ] Complete incentives-off acceptance before shadow receipt and settlement evidence.
 
 ## Test Plan
@@ -58,3 +58,9 @@ Relay-mode participants run as DHT clients, while the current VPS combines boots
 - What changed: created the integration sprint for separated infrastructure roles, independent DHT and relay redundancy, failure injection, artifact binding, and the final dependency-ordered physical matrix.
 - Why: the current VPS is simultaneously the only full DHT storage peer and relay fallback, while a two-worker complementary split has no provider redundancy.
 - Status: planning is complete and depends on the preceding architecture sprints; no deployment or runtime source changed in this session.
+
+### 2026-08-23 - Implement separated infrastructure and bound failure evidence
+
+- What changed: split the pinned Hivemind runtime into full-DHT, non-storage relay, and legacy combined roles; added role-specific hardened systemd units, users, state, identities, environment templates, installers, restart/flag validation, and failure-domain status; isolated placement and settlement service accounts/state and added component/protocol/deployment health; exposed ordered DHT/relay redundancy configuration in the participant supervisor; added the architecture failure-matrix validator and bound it optionally into final Windows/VPS acceptance; documented migration, outage injection, complementary versus truly redundant provider tests, recovery objectives, evidence hashing, and incentives-off-before-shadow ordering.
+- Why: the old public VPS stored the only DHT records and forwarded every relayed tensor stream in one process and host, while the previous two-provider split had no route capable of surviving either worker loss. Process roles, identities, revisions, and physical proof needed separate contracts before resilience could be claimed.
+- Status: local source and validation tooling are implemented against Hivemind 1.1.12. All 448 backend tests pass, including real local Hivemind expert, session, and receipt RPC tests; shell syntax, Python compilation, JSON validation, diff checks, 20 launcher tests, 4 renderer-flow tests, frontend typechecking/build, and lint with zero errors also pass. The first three deployment/configuration items and every acceptance checkbox remain open until two independent DHT hosts, two independent relay hosts, two physical participants, and a three-provider redundant route execute the documented failure matrix.

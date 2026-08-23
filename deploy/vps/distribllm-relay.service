@@ -1,0 +1,33 @@
+[Unit]
+Description=DistribLLM non-storage circuit relay peer
+Documentation=file://@REPO_ROOT@/docs/VPS_RELAY_OPERATIONS.md
+Wants=network-online.target
+After=network-online.target distribllm-dht.service
+
+[Service]
+Type=simple
+User=distribllm-relay
+Group=distribllm-relay
+WorkingDirectory=@REPO_ROOT@/backend
+EnvironmentFile=/etc/distribllm-relay/service.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+RuntimeDirectory=distribllm-relay
+RuntimeDirectoryMode=0750
+StateDirectory=distribllm-relay
+StateDirectoryMode=0750
+ExecStart=@REPO_ROOT@/deploy/vps/run-infrastructure-peer.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/distribllm-relay /run/distribllm-relay
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

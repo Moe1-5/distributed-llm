@@ -5,7 +5,9 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 ## Backend Entry Points
 
 - `backend/main.py`: starts FastAPI/Uvicorn; defaults to port 8000.
-- `backend/bootstrap.py`: stable Hivemind bootstrap, circuit-relay peer, and direct-reachability checker using `bootstrap.id`.
+- `backend/bootstrap.py`: pinned-Hivemind infrastructure peer with separated full-DHT, non-storage relay, and legacy combined roles plus stable identities and status evidence.
+- `backend/architecture_acceptance.py`: validates independent infrastructure identities/domains, protocol revisions, topology proofs, failure scenarios, and rollout ordering.
+- `backend/control_service_validate.py`: validates coordinator/settlement health, revisions, failure domains, journald evidence, and independent restart results.
 - `backend/colab_worker.py`: headless serving worker with model/layer/device/peer arguments and optional Hugging Face device OAuth.
 
 ## Backend API and Configuration
@@ -31,6 +33,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `backend/client/sequential.py`: DHT metadata validation, coverage-aware route planning, exact stateless/receipt/session RPC dispatch, safe session rebuild, settlement submission, and route traces.
 - `backend/client/coverage.py`: pure contiguous coverage plans plus exclusive-range recommendation used by the placement authority.
 - `backend/client/health.py`: typed provider health state, DHT/protocol/transport signals, revision snapshots, and lifecycle-owned bounded metadata probes.
+- `backend/network/infrastructure.py`: ordered bootstrap/relay configuration summary with explicit unconfigured, single-failure-domain, and redundancy-configured states.
 - `backend/placement/service.py`: authenticated SQLite placement authority with atomic reservations, lease transitions, expiry, revisions, idempotency, and bounded audit reads.
 - `backend/placement/client.py`: participant coordinator client, private lease ownership, heartbeats, and local pre-expiry safety shutdown.
 - `backend/client/generation.py`: tokenizer/local components, architecture preparation, stateless or session-aware autoregressive generation, one-position decode, bounded rebuild, sampling, cancellation, parity probes, and traces.
@@ -78,7 +81,10 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `tasks/archive/`: immutable historical sprint records.
 - `tasks/lessons.md`: active assistant corrections and internalized lessons.
 - `docs/`: architecture, flows, roadmap, validation, troubleshooting, comparison, and decisions.
-- `deploy/vps/distribllm-placement.service`, `placement.env.example`, `run-placement.sh`, and `install-placement-service.sh`: loopback placement service deployment with locked dependencies, durable state, and systemd hardening.
+- `deploy/vps/distribllm-dht.service`, `distribllm-relay.service`, role environment templates, and the infrastructure installer/validator: separate full-DHT and non-storage-relay deployments with distinct users, identities, state, ports, logs, and restart evidence.
+- `deploy/vps/distribllm-placement.service`, `placement.env.example`, `run-placement.sh`, and `install-placement-service.sh`: separately permissioned loopback placement service deployment with locked dependencies, durable state, health revision evidence, and systemd hardening.
+- `deploy/vps/distribllm-settlement.service`, `settlement.env.example`, `run-settlement.sh`, and `install-settlement-service.sh`: separately permissioned settlement deployment with durable state, protocol health evidence, and shadow-first defaults.
+- `deploy/vps/validate-control-service.sh`: captures coordinator or settlement health, journal presence, and optional PID-changing restart evidence.
 
 ## Never Commit or Share
 

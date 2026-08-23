@@ -27,29 +27,45 @@ if [[ ! -x "$uv_bin" ]]; then
   exit 69
 fi
 
-id -u distribllm >/dev/null 2>&1 || \
-  useradd --system --home-dir /var/lib/distribllm --shell /usr/sbin/nologin distribllm
-install -d -m 0750 -o distribllm -g distribllm /var/lib/distribllm
-install -d -m 0750 -o distribllm -g distribllm /var/lib/distribllm/.cache
-install -d -m 0750 -o distribllm -g distribllm /var/lib/distribllm/uv-cache
-install -d -m 0750 -o distribllm -g distribllm /var/lib/distribllm/uv-python
-install -d -m 0750 -o root -g distribllm /etc/distribllm
+service_user=distribllm-settlement
+state_dir=/var/lib/distribllm-settlement
+config_dir=/etc/distribllm-settlement
+environment_file="$config_dir/service.env"
+id -u "$service_user" >/dev/null 2>&1 || \
+  useradd --system --home-dir "$state_dir" --shell /usr/sbin/nologin "$service_user"
+install -d -m 0750 -o "$service_user" -g "$service_user" "$state_dir"
+install -d -m 0750 -o "$service_user" -g "$service_user" "$state_dir/.cache"
+install -d -m 0750 -o "$service_user" -g "$service_user" "$state_dir/uv-cache"
+install -d -m 0750 -o "$service_user" -g "$service_user" "$state_dir/uv-python"
+install -d -m 0750 -o root -g "$service_user" "$config_dir"
 install -d -m 0755 -o root -g root /usr/local/libexec/distribllm
 install -m 0755 -o root -g root "$uv_bin" /usr/local/libexec/distribllm/uv
-if [[ ! -f /etc/distribllm/settlement.env ]]; then
-  install -m 0640 -o root -g distribllm \
-    "$repo_root/deploy/vps/settlement.env.example" /etc/distribllm/settlement.env
+if [[ ! -f "$environment_file" ]]; then
+  install -m 0640 -o root -g "$service_user" \
+    "$repo_root/deploy/vps/settlement.env.example" "$environment_file"
 fi
 
-runuser -u distribllm -- env \
-  HOME=/var/lib/distribllm \
-  XDG_CACHE_HOME=/var/lib/distribllm/.cache \
-  UV_CACHE_DIR=/var/lib/distribllm/uv-cache \
-  UV_PYTHON_INSTALL_DIR=/var/lib/distribllm/uv-python \
-  UV_PROJECT_ENVIRONMENT=/var/lib/distribllm/settlement-venv \
+commit="$(git -C "$repo_root" rev-parse HEAD)"
+environment_tmp="$(mktemp)"
+awk -v commit="$commit" '
+  BEGIN { updated = 0 }
+  /^DISTRIBLLM_DEPLOY_COMMIT=/ { print "DISTRIBLLM_DEPLOY_COMMIT=" commit; updated = 1; next }
+  { print }
+  END { if (!updated) print "DISTRIBLLM_DEPLOY_COMMIT=" commit }
+' "$environment_file" > "$environment_tmp"
+install -m 0640 -o root -g "$service_user" "$environment_tmp" "$environment_file"
+rm -f "$environment_tmp"
+
+runuser -u "$service_user" -- env \
+  HOME="$state_dir" \
+  XDG_CACHE_HOME="$state_dir/.cache" \
+  UV_CACHE_DIR="$state_dir/uv-cache" \
+  UV_PYTHON_INSTALL_DIR="$state_dir/uv-python" \
+  UV_PROJECT_ENVIRONMENT="$state_dir/venv" \
   /usr/local/libexec/distribllm/uv \
   sync --frozen --python 3.12 --project "$repo_root/backend"
 chmod 0755 "$repo_root/deploy/vps/run-settlement.sh"
+chmod 0755 "$repo_root/deploy/vps/validate-control-service.sh"
 
 unit_tmp="$(mktemp)"
 sed "s|@REPO_ROOT@|$repo_root|g" \
@@ -58,6 +74,10 @@ install -m 0644 "$unit_tmp" /etc/systemd/system/distribllm-settlement.service
 rm -f "$unit_tmp"
 
 systemctl daemon-reload
+if grep -q 'REPLACE_' "$environment_file"; then
+  echo "Settlement unit installed but not started; replace its failure-domain placeholder first." >&2
+  exit 0
+fi
 systemctl enable distribllm-settlement.service
 systemctl restart distribllm-settlement.service
-echo "Settlement service installed in shadow mode by default."
+echo "Settlement service installed at commit $commit in shadow mode by default."

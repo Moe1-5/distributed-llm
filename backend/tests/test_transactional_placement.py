@@ -392,6 +392,23 @@ class TransactionalPlacementTests(unittest.TestCase):
         self.assertEqual(plan.status_code, 200)
         self.assertNotIn("idempotency_key", plan.text)
 
+    def test_health_binds_coordinator_protocol_and_deployment(self) -> None:
+        app = create_placement_app(
+            self.database_path,
+            auth_token=AUTH_TOKEN,
+            token_secret=TOKEN_SECRET,
+            deployment_commit="abc1234",
+            failure_domain="provider-one",
+        )
+
+        response = request_asgi(app, "GET", "/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["component_role"], "coordinator")
+        self.assertEqual(response.json()["service_protocol_version"], 1)
+        self.assertEqual(response.json()["deployment_commit"], "abc1234")
+        self.assertEqual(response.json()["failure_domain"], "provider-one")
+
 
 if __name__ == "__main__":
     unittest.main()

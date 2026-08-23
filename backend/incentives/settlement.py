@@ -618,12 +618,29 @@ def create_settlement_app(
     mode: SettlementMode = "off",
     *,
     timestamp_window_seconds: int = 300,
+    deployment_commit: str | None = None,
+    failure_domain: str | None = None,
 ) -> FastAPI:
     store = SettlementStore(database_path)
     app = FastAPI(title="DistribLLM Useful-Work Settlement", version="1.0.0")
     app.state.store = store
     app.state.mode = parse_incentives_mode(mode)
     app.state.timestamp_window_seconds = timestamp_window_seconds
+
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        policy = store.active_policy()
+        return {
+            "status": "ok",
+            "component_role": "settlement",
+            "service_protocol_version": 1,
+            "schema_version": SCHEMA_VERSION,
+            "receipt_protocol_version": PROTOCOL_VERSION,
+            "reward_version": policy["reward_version"],
+            "mode": app.state.mode,
+            "deployment_commit": deployment_commit,
+            "failure_domain": failure_domain,
+        }
 
     @app.post("/v1/receipts")
     async def submit_receipt(
@@ -680,4 +697,6 @@ def create_default_settlement_app() -> FastAPI:
         timestamp_window_seconds=int(
             os.environ.get("DISTRIBLLM_RECEIPT_TIMESTAMP_WINDOW", "300")
         ),
+        deployment_commit=os.environ.get("DISTRIBLLM_DEPLOY_COMMIT") or None,
+        failure_domain=os.environ.get("DISTRIBLLM_FAILURE_DOMAIN") or None,
     )

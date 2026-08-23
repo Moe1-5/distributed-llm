@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from acceptance_evidence import EvidenceError, load_documents, write_private_json
+from architecture_acceptance import validate_architecture_matrix
 
 SCHEMA_VERSION = 1
 REQUIRED_WINDOWS_CHECKS = (
@@ -291,6 +292,7 @@ def validate_acceptance_set(
     expected_hivemind_version: str = "1.1.12",
     max_relay_seconds: float = 90.0,
     vps_report_sha256: str,
+    architecture_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not model_name.strip():
         raise EvidenceError("Model name must not be empty")
@@ -326,8 +328,20 @@ def validate_acceptance_set(
     if set(relay_summary["participants"]) != set(direct_summary["participants"]):
         errors.append("Relay and direct reports use different participant labels")
 
+    architecture_summary: dict[str, Any] | None = None
+    if architecture_report is not None:
+        source_commits = windows_summary["source_commits"]
+        architecture_summary = validate_architecture_matrix(
+            architecture_report,
+            expected_source_commit=(source_commits[0] if len(source_commits) == 1 else None),
+            expected_hivemind_version=expected_hivemind_version,
+        )
+        errors.extend(
+            f"Architecture: {error}" for error in architecture_summary["errors"]
+        )
+
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": 2 if architecture_report is not None else SCHEMA_VERSION,
         "kind": "cross_sprint_live_acceptance",
         "validated_at": _utc_now(),
         "ok": not errors,
@@ -337,11 +351,17 @@ def validate_acceptance_set(
         "vps": vps_summary,
         "relay_inference": relay_summary,
         "direct_inference": direct_summary,
+        "architecture": architecture_summary,
         "manual_gates": [
             "Confirm the reports came from two separate physical Windows devices.",
             "Confirm each device launched the reviewed portable artifact hash.",
             "Review generated output and monitoring on both devices.",
             "Explicitly approve sprint closure and any move from shadow to credit mode.",
+            *(
+                ["Confirm failure domains refer to independent physical hosts or providers."]
+                if architecture_report is not None
+                else []
+            ),
         ],
         "errors": errors,
     }
@@ -354,6 +374,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--relay-probe", type=Path, required=True)
     parser.add_argument("--relay-report", type=Path, required=True)
     parser.add_argument("--direct-report", type=Path, required=True)
+    parser.add_argument("--architecture-report", type=Path)
     parser.add_argument("--model", required=True)
     parser.add_argument("--expected-app-version")
     parser.add_argument("--expected-hivemind-version", default="1.1.12")
@@ -377,6 +398,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         vps_report, relay_probe, relay_report, direct_report = load_documents(
             [args.vps_report, args.relay_probe, args.relay_report, args.direct_report]
         )
+        architecture_report = None
+        if args.architecture_report:
+            (architecture_report,) = load_documents([args.architecture_report])
         report = validate_acceptance_set(
             windows_reports=windows_reports,
             vps_report=vps_report,
@@ -388,6 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_hivemind_version=args.expected_hivemind_version,
             max_relay_seconds=args.max_relay_seconds,
             vps_report_sha256=vps_report_sha256,
+            architecture_report=architecture_report,
         )
         write_private_json(args.output, report)
         print(json.dumps(report, indent=2, sort_keys=True))

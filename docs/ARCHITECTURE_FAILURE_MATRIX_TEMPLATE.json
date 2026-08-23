@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "kind": "distributed_architecture_failure_matrix",
+  "participant_source_commit": "REPLACE_WITH_40_CHARACTER_COMMIT",
+  "protocols": {
+    "hivemind_version": "1.1.12",
+    "infrastructure_protocol_version": 1,
+    "expert_uid_protocol": "peer-addressed-v1",
+    "placement_protocol_version": 1,
+    "session_protocol_version": 1,
+    "receipt_protocol_version": 1
+  },
+  "components": [
+    {
+      "role": "dht",
+      "instance_id": "dht-one",
+      "failure_domain": "REPLACE_WITH_DOMAIN_ONE",
+      "peer_id": "REPLACE_WITH_DHT_ONE_PEER_ID",
+      "deployment_commit": "REPLACE_WITH_40_CHARACTER_COMMIT",
+      "service_protocol_version": 1
+    },
+    {
+      "role": "dht",
+      "instance_id": "dht-two",
+      "failure_domain": "REPLACE_WITH_DOMAIN_TWO",
+      "peer_id": "REPLACE_WITH_DHT_TWO_PEER_ID",
+      "deployment_commit": "REPLACE_WITH_40_CHARACTER_COMMIT",
+      "service_protocol_version": 1
+    },
+    {
+      "role": "relay",
+      "instance_id": "relay-one",
+      "failure_domain": "REPLACE_WITH_DOMAIN_ONE",
+      "peer_id": "REPLACE_WITH_RELAY_ONE_PEER_ID",
+      "deployment_commit": "REPLACE_WITH_40_CHARACTER_COMMIT",
+      "service_protocol_version": 1
+    },
+    {
+      "role": "relay",
+      "instance_id": "relay-two",
+      "failure_domain": "REPLACE_WITH_DOMAIN_TWO",
+      "peer_id": "REPLACE_WITH_RELAY_TWO_PEER_ID",
+      "deployment_commit": "REPLACE_WITH_40_CHARACTER_COMMIT",
+      "service_protocol_version": 1
+    },
+    {
+      "role": "coordinator",
+      "instance_id": "coordinator-one",
+      "failure_domain": "REPLACE_WITH_COORDINATOR_DOMAIN",
+      "peer_id": null,
+      "deployment_commit": "REPLACE_WITH_40_CHARACTER_COMMIT",
+      "service_protocol_version": 1
+    },
+    {
+      "role": "settlement",
+      "instance_id": "settlement-one",
+      "failure_domain": "REPLACE_WITH_SETTLEMENT_DOMAIN",
+      "peer_id": null,
+      "deployment_commit": "REPLACE_WITH_40_CHARACTER_COMMIT",
+      "service_protocol_version": 1
+    }
+  ],
+  "scenarios": {
+    "coordinator_outage": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "dht_loss": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "relay_loss": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "worker_loss": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "generator_recovery": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"}
+  },
+  "topologies": {
+    "direct": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "relay": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "complementary_split": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256", "complete_alternate": false},
+    "redundant": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256", "complete_alternate": false, "provider_count": 0},
+    "session": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "package": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "incentives_off": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "shadow_accounting": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"}
+  },
+  "rollout_phases": {
+    "incentives_off_passed": false,
+    "shadow_passed": false,
+    "shadow_started_after_off": false
+  }
+}

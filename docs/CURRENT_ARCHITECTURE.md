@@ -71,9 +71,11 @@ The control plane, every worker, and the generator use distinct stable identity 
 
 ## Bootstrap Configuration
 
-`backend/bootstrap.py` binds a stable identity, enables Hivemind/libp2p circuit-relay support, hosts the independent direct-reachability check protocol, and prints loopback/public multiaddresses. Remote clients must use the public address. Runtime peers come from the comma- or newline-separated `DISTRIBLLM_INITIAL_PEERS` environment value, with development defaults in `backend/constants.py`.
+`backend/bootstrap.py` has explicit `dht`, `relay`, and legacy `combined` roles. A DHT peer is a full Hivemind 1.1.12 DHT server with relay disabled. A relay is a non-storage DHT client with circuit forwarding enabled and must join through a full DHT peer. Each role publishes schema-two runtime status with its identity, role, failure-domain label, protocol version, pinned Hivemind version, deployment commit, and effective addresses. Remote clients use ordered comma- or newline-separated DHT and relay lists.
 
-The stable `bootstrap.id` is a private identity file. It must not be committed or shared. A VPS bootstrap should run under a persistent process manager and expose its TCP port through both host and provider firewalls.
+Production acceptance requires two full DHT peers and two relays in independent failure domains. The participant supervisor reports whether these lists are unconfigured, a single failure domain, or redundancy-configured without falsely treating configuration count as live failover proof. The architecture failure matrix supplies that physical proof.
+
+Every infrastructure identity file is private and role-specific. It must not be committed, shared, or copied between hosts. The coordinator and settlement also run under distinct Unix accounts with distinct writable state directories and expose non-secret component/protocol/deployment health documents.
 
 ## Model Registry and Access
 

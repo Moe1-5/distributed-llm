@@ -11,8 +11,14 @@ Key behaviour:
 
     use_ipfs=False   keeps us off the Petals/IPFS public network.
 
-    use_relay=True   lets NAT-separated workers reserve circuit-relay paths.
-                     The bootstrap remains a non-compute infrastructure peer.
+    --role dht       runs a full DHT storage/bootstrap peer without relay.
+
+    --role relay     runs a circuit relay as a DHT client, so it does not
+                     store provider records. It must join through one or more
+                     full DHT peers supplied with --initial-peer.
+
+    --role combined  preserves the legacy single-process deployment for
+                     rollback only.
 
 Usage:
     First run (generates identity):
@@ -42,18 +48,42 @@ from node.reachability import ReachabilityProtocol
 
 logger = get_logger(__name__)
 
+INFRASTRUCTURE_PROTOCOL_VERSION = 1
+VALID_ROLES = {"dht", "relay", "combined"}
+
+
+def _storage_enabled(args: argparse.Namespace) -> bool:
+    return args.role in {"dht", "combined"}
+
+
+def _relay_enabled(args: argparse.Namespace) -> bool:
+    return args.role in {"relay", "combined"} and bool(args.use_relay)
+
+
+def _validate_role_args(args: argparse.Namespace) -> None:
+    if args.role not in VALID_ROLES:
+        raise ValueError(f"Unsupported infrastructure role: {args.role}")
+    if args.role == "relay" and not args.initial_peer:
+        raise ValueError("Relay role requires at least one --initial-peer DHT address")
+    if args.role == "relay" and not args.use_relay:
+        raise ValueError("Relay role cannot be combined with --no-relay")
+
 
 def _bootstrap_dht_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     """Build the public infrastructure peer's Hivemind transport options."""
+    _validate_role_args(args)
+    storage_enabled = _storage_enabled(args)
     return {
         "host_maddrs": [f"/ip4/{args.host}/tcp/{args.port}"],
         "announce_maddrs": args.announce_maddr or None,
         "start": True,
         "identity_path": args.identity_path,
         "use_ipfs": False,
-        "initial_peers": [],
-        "use_relay": args.use_relay,
+        "initial_peers": list(args.initial_peer),
+        "use_relay": _relay_enabled(args),
         "force_reachability": "public" if args.announce_maddr else None,
+        "client_mode": not storage_enabled,
+        "cache_locally": storage_enabled,
     }
 
 
@@ -63,7 +93,9 @@ def _bootstrap_status(
     visible_maddrs: list[str],
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "infrastructure_protocol_version": INFRASTRUCTURE_PROTOCOL_VERSION,
+        "role": args.role,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "pid": os.getpid(),
         "peer_id": peer_id,
@@ -71,12 +103,15 @@ def _bootstrap_status(
         "python_version": platform.python_version(),
         "hivemind_version": hivemind.__version__,
         "deployment_commit": args.deployment_commit or None,
+        "failure_domain": args.failure_domain or None,
         "identity_path": str(Path(args.identity_path).resolve()),
-        "relay_enabled": bool(args.use_relay),
+        "relay_enabled": _relay_enabled(args),
+        "dht_storage_enabled": _storage_enabled(args),
         "force_reachability": "public" if args.announce_maddr else "automatic",
         "host": args.host,
         "port": args.port,
         "announce_maddrs": list(args.announce_maddr),
+        "initial_peers": list(args.initial_peer),
     }
 
 
@@ -92,8 +127,20 @@ def _write_status(path: str, status: dict[str, Any]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="DistribLLM Bootstrap Node")
     parser.add_argument(
+        "--role",
+        choices=sorted(VALID_ROLES),
+        default="combined",
+        help="Infrastructure responsibility (default: combined rollback mode).",
+    )
+    parser.add_argument(
         "--port", type=int, default=7001,
         help="TCP port to listen on (default: 7001)"
+    )
+    parser.add_argument(
+        "--initial-peer",
+        action="append",
+        default=[],
+        help="Full DHT peer multiaddress; required by relay role and repeatable.",
     )
     parser.add_argument(
         "--status-path",
@@ -106,6 +153,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="",
         help="Commit identifier recorded in runtime status for operator validation.",
+    )
+    parser.add_argument(
+        "--failure-domain",
+        type=str,
+        default="",
+        help="Stable operator label for the host/provider failure domain.",
     )
     parser.add_argument(
         "--identity_path", type=str, default="bootstrap.id",
@@ -136,9 +189,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    try:
+        _validate_role_args(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     print("=" * 60)
-    print("  DistribLLM Bootstrap Node")
+    print(f"  DistribLLM Infrastructure Peer ({args.role})")
     print("=" * 60)
 
     first_run = not os.path.exists(args.identity_path)
@@ -153,8 +210,12 @@ def main() -> None:
         f"Hivemind {hivemind.__version__}"
     )
     print(
+        "  DHT storage: "
+        f"{'enabled' if _storage_enabled(args) else 'disabled (client mode)'}"
+    )
+    print(
         "  Relay transport/service: "
-        f"{'enabled' if args.use_relay else 'disabled'}"
+        f"{'enabled' if _relay_enabled(args) else 'disabled'}"
     )
     print(
         "  Forced reachability: "
@@ -181,8 +242,12 @@ def main() -> None:
     for addr in visible:
         print(f"    {addr}")
     print()
-    print("  Configure one address as DISTRIBLLM_INITIAL_PEERS")
-    print("  and DISTRIBLLM_TRUSTED_RELAYS on participants.")
+    if args.role == "dht":
+        print("  Add this address to participant DISTRIBLLM_INITIAL_PEERS.")
+    elif args.role == "relay":
+        print("  Add this address to participant DISTRIBLLM_TRUSTED_RELAYS.")
+    else:
+        print("  Legacy combined mode: use this address in both peer lists.")
     print()
     print("  Keep this process running — nodes need it to join the swarm.")
     print("=" * 60)

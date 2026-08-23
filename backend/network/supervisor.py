@@ -33,6 +33,7 @@ from network.publication import (
     classify_publication,
     unverified_outcome,
 )
+from network.infrastructure import summarize_infrastructure
 
 
 logger = get_logger(__name__)
@@ -174,6 +175,7 @@ class NetworkSupervisor:
         self,
         *,
         initial_peers: Optional[list[str]] = None,
+        trusted_relays: Optional[list[str]] = None,
         dht_prefix: str = DHT_PREFIX,
         identity_path: Optional[Path | str] = None,
         refresh_interval: float = DEFAULT_REFRESH_INTERVAL_SECONDS,
@@ -189,6 +191,7 @@ class NetworkSupervisor:
         if disappearance_grace < 0:
             raise ValueError("disappearance_grace must not be negative")
         self.initial_peers = list(initial_peers or [])
+        self.trusted_relays = list(trusted_relays or [])
         self.dht_prefix = dht_prefix
         self.identity_path = Path(
             identity_path
@@ -1210,6 +1213,11 @@ class NetworkSupervisor:
                 "failure": copy.deepcopy(self._last_failure),
                 "validation_errors": copy.deepcopy(self._validation_errors),
                 "nodes": copy.deepcopy(self._nodes),
+                "infrastructure": summarize_infrastructure(
+                    self.initial_peers,
+                    self.trusted_relays,
+                    network_state=self._state,
+                ),
                 "roles": {"workers": workers, "generator": generator},
                 "resources": {
                     "control_dht": self._dht is not None,
