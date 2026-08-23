@@ -155,6 +155,20 @@ sudo /opt/distribllm/deploy/vps/install-bootstrap-service.sh /opt/distribllm
 
 On first installation, the script creates `/etc/distribllm/bootstrap.env`. Review it before participant testing. On later installations, operator edits are preserved and only `DISTRIBLLM_DEPLOY_COMMIT` is updated to the deployed Git commit.
 
+Because upgrades preserve operator configuration, reconcile an intentionally
+changed project peer expectation before reinstalling. For the 2026-08-23
+identity correction, run:
+
+```bash
+sudo sed -i \
+  's/^DISTRIBLLM_EXPECTED_PEER_ID=.*/DISTRIBLLM_EXPECTED_PEER_ID=QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y/' \
+  /etc/distribllm/bootstrap.env
+sudo grep '^DISTRIBLLM_EXPECTED_PEER_ID=' /etc/distribllm/bootstrap.env
+```
+
+This changes validation configuration only. It does not modify the private
+identity file or change the running peer ID.
+
 The managed identity must remain under `/var/lib/distribllm` and runtime status under `/run/distribllm`, matching the unit's write restrictions. If the identity already exists from the foreground deployment, the installer keeps its contents and normalizes ownership to the service account with mode `0600`.
 
 5. Inspect service state and the startup evidence:
@@ -204,9 +218,10 @@ The validator writes only its versioned JSON report to standard output after run
 
 1. Fetch and check out the approved feature branch or commit under `/opt/distribllm`.
 2. Record the previous commit with `git rev-parse HEAD` before changing it.
-3. Run the installer again. It performs a locked backend sync, records the new commit, regenerates the unit with the checkout path, and restarts the enabled service.
-4. Run normal validation, restart validation, and an external participant relay probe.
-5. Keep the previous commit available until the external probe and two-device inference gate pass.
+3. Compare the checked-in environment example with `/etc/distribllm/bootstrap.env` and explicitly reconcile reviewed project defaults such as the expected peer ID. The installer preserves operator configuration.
+4. Run the installer again. It performs a locked backend sync, records the new commit, regenerates the unit with the checkout path, and restarts the enabled service.
+5. Run normal validation, restart validation, and an external participant relay probe.
+6. Keep the previous commit available until the external probe and two-device inference gate pass.
 
 Do not copy `.env`, model caches, participant tokens, or desktop application state to the VPS relay checkout.
 
