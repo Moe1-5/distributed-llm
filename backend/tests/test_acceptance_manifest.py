@@ -26,7 +26,7 @@ def windows_report(
     artifact_sha256: str = ARTIFACT_SHA256,
 ) -> dict:
     return {
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "capturedAt": "2026-08-13T00:00:00.000Z",
         "ok": True,
         "application": {
@@ -43,10 +43,11 @@ def windows_report(
         "backendRuntime": {
             "sourceCommit": source_commit,
             "sourceClean": True,
+            "kind": "packaged",
         },
         "configuration": {
             "distroName": "Ubuntu",
-            "backendPathConfigured": True,
+            "developerBackendOverrideConfigured": False,
             "backendUrl": "http://127.0.0.1:8000",
             "syncDependencies": True,
             "networkMode": mode,
@@ -67,6 +68,7 @@ def windows_report(
             "packagedApplication": True,
             "sourceCommitIdentified": True,
             "backendSourceMatchesApplication": True,
+            "packagedBackendInstalled": True,
             "artifactIdentified": True,
             "wslAvailable": True,
             "distroPresent": True,
@@ -242,6 +244,19 @@ class AcceptanceManifestTests(unittest.TestCase):
             rendered,
         )
         self.assertIn("backendSourceMatchesApplication", rendered)
+
+    def test_rejects_developer_override_as_final_packaged_evidence(self) -> None:
+        developer = windows_report()
+        developer["backendRuntime"]["kind"] = "developer"
+        developer["configuration"]["developerBackendOverrideConfigured"] = True
+        developer["checks"]["packagedBackendInstalled"] = False
+
+        report = validate(windows_reports=[windows_report(), developer])
+
+        self.assertFalse(report["ok"])
+        rendered = "\n".join(report["errors"])
+        self.assertIn("did not execute the packaged backend runtime", rendered)
+        self.assertIn("packagedBackendInstalled", rendered)
 
     def test_rejects_probe_not_bound_to_validated_vps(self) -> None:
         probe = relay_probe()

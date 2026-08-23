@@ -12,6 +12,7 @@ import {
   WslBackendLauncher,
   buildWindowsAcceptanceReport,
   buildBackendLaunchScript,
+  buildPackagedBackendInstallScript,
   buildBackendSourceIdentityScript,
   buildDependencySyncScript,
   buildBackendStopScript,
@@ -34,6 +35,7 @@ import {
 
 const TEST_COMMIT = 'a'.repeat(40)
 const TEST_ARTIFACT_SHA256 = 'b'.repeat(64)
+const TEST_MANIFEST_SHA256 = 'd'.repeat(64)
 
 function packagedApplication(
   overrides: Partial<WindowsAcceptanceApplication> = {}
@@ -99,6 +101,18 @@ function fakeRuntime(
           stdout: '  NAME      STATE           VERSION\n* Ubuntu    Running         2\n',
           stderr: ''
         }
+      }
+      if (args.includes('wslpath')) {
+        return { stdout: '/mnt/c/Program Files/DistribLLM/resources/backend-runtime\n', stderr: '' }
+      }
+      if (args.includes('-lc') && decodeWslScript(args).includes('runtime_source=')) {
+        return {
+          stdout: `/home/test/.local/state/distribllm/runtimes/${TEST_COMMIT}/backend\n`,
+          stderr: ''
+        }
+      }
+      if (args.includes('-lc') && decodeWslScript(args).includes('.distribllm-source-commit')) {
+        return { stdout: `${TEST_COMMIT}\nclean\n`, stderr: '' }
       }
       if (args.includes('-lc') && decodeWslScript(args).includes('git rev-parse HEAD')) {
         return { stdout: `${TEST_COMMIT}\nclean\n`, stderr: '' }
@@ -221,6 +235,22 @@ test('requires a safe local backend configuration', () => {
   assert.ok(errors.some((error) => error.includes('trusted relay')))
 })
 
+test('packaged runtime does not require a developer backend path', () => {
+  assert.deepEqual(
+    validateBackendLauncherConfig(
+      validConfig({ backendPath: '', useDeveloperBackendOverride: false }),
+      true
+    ),
+    []
+  )
+  assert.ok(
+    validateBackendLauncherConfig(
+      validConfig({ backendPath: '', useDeveloperBackendOverride: true }),
+      true
+    ).some((error) => error.includes('developer override'))
+  )
+})
+
 test('rejects malformed persisted configuration without throwing', () => {
   const malformed = {
     ...validConfig(),
@@ -255,7 +285,10 @@ test('quotes backend paths and passes relay configuration through env', () => {
 
   assert.match(script, /export XDG_CACHE_HOME="\$\{XDG_CACHE_HOME:-\$HOME\/\.cache\}"/)
   assert.match(script, /export UV_CACHE_DIR="\$\{UV_CACHE_DIR:-\$XDG_CACHE_HOME\/uv\}"/)
-  assert.match(script, /mkdir -p "\$XDG_CACHE_HOME" "\$XDG_STATE_HOME" "\$UV_CACHE_DIR"/)
+  assert.match(
+    script,
+    /mkdir -p "\$XDG_CACHE_HOME" "\$XDG_CONFIG_HOME" "\$XDG_STATE_HOME" "\$UV_CACHE_DIR"/
+  )
   assert.match(script, /cd -- '\/home\/test\/distrib'"'"'llm\/backend'/)
   assert.match(script, /DISTRIBLLM_NETWORK_MODE='auto'/)
   assert.match(script, /DISTRIBLLM_RELAY_WAIT_TIMEOUT='120'/)
@@ -268,8 +301,11 @@ test('sync and stop scripts guard WSL runtime directories before using uv or pid
 
   assert.match(syncScript, /export XDG_CACHE_HOME="\$\{XDG_CACHE_HOME:-\$HOME\/\.cache\}"/)
   assert.match(syncScript, /export UV_CACHE_DIR="\$\{UV_CACHE_DIR:-\$XDG_CACHE_HOME\/uv\}"/)
-  assert.match(syncScript, /mkdir -p "\$XDG_CACHE_HOME" "\$XDG_STATE_HOME" "\$UV_CACHE_DIR"/)
-  assert.match(syncScript, /uv sync --python 3\.12/)
+  assert.match(
+    syncScript,
+    /mkdir -p "\$XDG_CACHE_HOME" "\$XDG_CONFIG_HOME" "\$XDG_STATE_HOME" "\$UV_CACHE_DIR"/
+  )
+  assert.match(syncScript, /uv sync --frozen --python 3\.12/)
   assert.match(stopScript, /export XDG_STATE_HOME="\$\{XDG_STATE_HOME:-\$HOME\/\.local\/state\}"/)
   assert.match(stopScript, /pid_file="\$XDG_STATE_HOME\/distribllm\/backend\.pid"/)
 })
@@ -280,6 +316,22 @@ test('source identity script reports the tracked-clean backend Git revision', ()
   assert.match(script, /git rev-parse HEAD/)
   assert.match(script, /git status --porcelain --untracked-files=no/)
   assert.doesNotMatch(script, /git status --porcelain\s*$/m)
+})
+
+test('packaged runtime install is versioned, integrity checked, and atomic', () => {
+  const script = buildPackagedBackendInstallScript(
+    '/mnt/c/Program Files/DistribLLM/backend',
+    TEST_COMMIT,
+    TEST_MANIFEST_SHA256
+  )
+
+  assert.match(script, /runtime_root=.*distribllm\/runtimes/)
+  assert.match(script, /sha256sum --check --strict/)
+  assert.match(script, new RegExp(TEST_MANIFEST_SHA256))
+  assert.match(script, /mktemp -d/)
+  assert.match(script, /mv "\$staging_dir" "\$runtime_dir"/)
+  assert.match(script, /chmod -R a-w/)
+  assert.doesNotMatch(script, /git (pull|clone)/)
 })
 
 test('transports multiline WSL scripts without relying on Windows preserving newlines', () => {
@@ -357,7 +409,10 @@ test('reaches ready after WSL checks, process launch, and health success', async
   assert.deepEqual(states, ['checking', 'starting_backend', 'ready'])
   const launch = runtime.calls.find(([, args]) => args.includes('bash') && args.includes('-lc'))
   assert.ok(launch)
-  assert.match(decodeWslScript(launch[1]), /uv run --python 3\.12 python main\.py/)
+  assert.match(
+    decodeWslScript(launch[1]),
+    /uv run --frozen --no-sync --python 3\.12 python main\.py/
+  )
 })
 
 test('rejects an occupied backend port before starting a managed process', async () => {
@@ -415,10 +470,18 @@ test('does not restart after managed shutdown fails', async () => {
   assert.equal(runCalls, callsBeforeRestart + 1)
 })
 
-test('exports sanitized acceptance evidence after a complete managed lifecycle', async () => {
-  const config = validConfig({ syncDependencies: true })
+test('exports sanitized acceptance evidence after a complete packaged lifecycle', async () => {
+  const config = validConfig({
+    backendPath: '',
+    useDeveloperBackendOverride: false,
+    syncDependencies: true
+  })
   const runtime = fakeRuntime()
-  const launcher = new WslBackendLauncher(config, runtime, TEST_COMMIT)
+  const launcher = new WslBackendLauncher(config, runtime, TEST_COMMIT, {
+    windowsSourcePath: 'C:\\Program Files\\DistribLLM\\resources\\backend-runtime',
+    sourceCommit: TEST_COMMIT,
+    manifestSha256: TEST_MANIFEST_SHA256
+  })
 
   await launcher.start()
   await launcher.stop()
@@ -431,16 +494,27 @@ test('exports sanitized acceptance evidence after a complete managed lifecycle',
   assert.equal(report.checks.backendStoppedCleanly, true)
   assert.equal(report.checks.sourceCommitIdentified, true)
   assert.equal(report.checks.backendSourceMatchesApplication, true)
+  assert.equal(report.checks.packagedBackendInstalled, true)
   assert.equal(report.checks.artifactIdentified, true)
-  assert.equal(report.configuration.backendPathConfigured, true)
+  assert.equal(report.configuration.developerBackendOverrideConfigured, false)
   assert.equal(report.configuration.initialPeerCount, 1)
   assert.equal(report.launcher.currentStatus.state, 'idle')
-  assert.equal(report.schemaVersion, 3)
+  assert.equal(report.schemaVersion, 4)
   assert.equal(report.backendRuntime.sourceCommit, TEST_COMMIT)
   assert.equal(report.backendRuntime.sourceClean, true)
+  assert.equal(report.backendRuntime.kind, 'packaged')
   assert.deepEqual(
     report.launcher.transitions.map((transition) => transition.state),
-    ['idle', 'checking', 'installing_backend', 'starting_backend', 'ready', 'stopping', 'idle']
+    [
+      'idle',
+      'checking',
+      'installing_backend',
+      'installing_backend',
+      'starting_backend',
+      'ready',
+      'stopping',
+      'idle'
+    ]
   )
   const serialized = JSON.stringify(report)
   assert.doesNotMatch(serialized, /\/home\/test/)
@@ -470,7 +544,8 @@ test('acceptance report cannot pass outside a packaged Windows lifecycle', () =>
       backendHealthReady: true,
       backendStoppedCleanly: true,
       backendSourceCommit: null,
-      backendSourceClean: false
+      backendSourceClean: false,
+      backendRuntimeKind: null
     },
     packagedApplication({
       packaged: false,
@@ -488,6 +563,7 @@ test('acceptance report cannot pass outside a packaged Windows lifecycle', () =>
   assert.equal(report.checks.packagedApplication, false)
   assert.equal(report.checks.sourceCommitIdentified, false)
   assert.equal(report.checks.backendSourceMatchesApplication, false)
+  assert.equal(report.checks.packagedBackendInstalled, false)
   assert.equal(report.checks.artifactIdentified, false)
 })
 

@@ -5,3 +5,4 @@ package-lock.json
 .DS_Store
 .eslintcache
 *.log*
+/build/backend-runtime/

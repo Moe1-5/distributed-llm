@@ -21,6 +21,7 @@ REQUIRED_WINDOWS_CHECKS = (
     "packagedApplication",
     "sourceCommitIdentified",
     "backendSourceMatchesApplication",
+    "packagedBackendInstalled",
     "artifactIdentified",
     "wslAvailable",
     "distroPresent",
@@ -90,7 +91,7 @@ def _validate_windows_reports(
 
     for index, report in enumerate(reports, start=1):
         prefix = f"Windows report {index}"
-        if report.get("schemaVersion") != 3:
+        if report.get("schemaVersion") != 4:
             errors.append(f"{prefix} has an unsupported schema version")
         if report.get("ok") is not True:
             errors.append(f"{prefix} did not pass its managed WSL lifecycle")
@@ -117,7 +118,9 @@ def _validate_windows_reports(
                 f"{prefix} WSL backend source does not match its application commit"
             )
         if backend_runtime.get("sourceClean") is not True:
-            errors.append(f"{prefix} WSL backend has dirty tracked source")
+            errors.append(f"{prefix} WSL backend runtime did not pass integrity validation")
+        if backend_runtime.get("kind") != "packaged":
+            errors.append(f"{prefix} did not execute the packaged backend runtime")
         artifact_sha256 = str(application.get("artifactSha256", "")).strip()
         if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256):
             artifact_hashes.add(artifact_sha256)

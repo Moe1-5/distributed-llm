@@ -150,7 +150,7 @@ cannot silently omit earlier lifecycle and control-plane gates:
 
 | Scenario | Evidence that must be hashed |
 |---|---|
-| `packaged_lifecycle` | Both schema-three Windows reports from the same EXE, including one observed clean-Windows first run, dependency sync, ready state, managed stop, and no orphan backend. |
+| `packaged_lifecycle` | Both schema-four Windows reports from the same backend-bundled EXE, including one observed clean-Windows first run, payload integrity, dependency sync, ready state, managed stop, and no orphan backend. |
 | `discovery_before_roles` | A packaged participant diagnostic export showing an existing remote provider before that participant starts either a worker or generator role. |
 | `role_identity` | Before/after diagnostics showing co-located worker and generator peer IDs are distinct and stable across one completed request and generator restart. |
 | `placement_race` | Correlated coordinator and participant records from two simultaneous six-layer Recommended starts showing atomic non-overlapping reservations, followed by expiry/recovery evidence. |
@@ -276,7 +276,7 @@ the incentives-off baseline.
 
 The legacy VPS restart report supplied to the final manifest must also expose
 the full reviewed 40-character deployment commit. The manifest rejects it if
-that commit differs from the schema-three Windows application and WSL backend
+that commit differs from the schema-four Windows application and packaged WSL backend
 commit.
 
 The architecture validator applies the same equality rule to every separated

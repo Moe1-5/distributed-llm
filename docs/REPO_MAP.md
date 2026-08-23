@@ -13,7 +13,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 ## Backend API and Configuration
 
 - `backend/api/server.py`: HTTP/WebSocket API, node registry, generator/client DHT lifecycle, route/readiness/status endpoints, parity/trace endpoints, settings, OAuth/download APIs, and bounded failed-start cleanup.
-- `backend/api/env_loader.py`: loads the gitignored root `.env` for local backend processes.
+- `backend/api/env_loader.py`: loads an explicit operator environment file, the packaged XDG `backend.env`, or the gitignored checkout-root `.env` fallback without overriding process variables.
 - `backend/api/hf_oauth.py`: Hugging Face device OAuth, redacted connection state, managed snapshot-download jobs, cancellation, and download-to-import handoff.
 - `backend/api/local_models.py`: local snapshot inspection, validation, registry, revalidation, and safe managed-cache deletion.
 - `backend/api/settings.py`: OAuth token storage outside the repository by default, with a documented path override.
@@ -50,8 +50,9 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `backend/tests/test_placement_client.py`: authenticated client, exact online attestation, heartbeat rejection, secret hiding, and local expiry safety coverage.
 - `backend/tests/test_session_cache.py`: cache lifecycle, OPT parity, exact session routing, safe/ambiguous recovery, generator payload bounds, and real Hivemind 1.1.12 session RPC coverage.
 - `backend/tests/test_placement_backend_integration.py`: serving-plan authority, fail-closed startup, allocation override, and failed-load release integration.
+- `backend/tests/test_env_loader.py`: packaged XDG environment precedence, explicit operator-file selection, and process-environment precedence.
 - `backend/pyproject.toml` and `backend/uv.lock`: Python 3.12+ dependency contract and locked environment.
-- `backend/.local_models.json`: gitignored local import registry.
+- `backend/.local_models.json`: legacy gitignored local import registry used when present in a developer checkout; packaged runs use the XDG config state path.
 - User config Hugging Face token file: gitignored and outside the repository by default.
 - `backend/traces/`: gitignored diagnostic JSON.
 - Hugging Face cache: downloaded model snapshots; never committed.
@@ -89,6 +90,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 ## Never Commit or Share
 
 - `.env` files containing local values
+- managed WSL `backend.env` files containing participant values
 - `.hf_token` or user config tokens
 - `bootstrap.id`
 - `.local_models.json`

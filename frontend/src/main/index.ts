@@ -13,7 +13,8 @@ import {
   validateBackendLauncherConfig,
   type BackendLauncherConfig,
   type BackendLauncherRuntime,
-  type LauncherChild
+  type LauncherChild,
+  type PackagedBackendRuntime
 } from './backendLauncher'
 import {
   readArtifactIdentity,
@@ -28,6 +29,7 @@ import {
 
 declare const __DISTRIBLLM_SOURCE_COMMIT__: string
 declare const __DISTRIBLLM_SOURCE_DIRTY__: boolean
+declare const __DISTRIBLLM_BACKEND_MANIFEST_SHA256__: string
 
 const PACKAGED_RENDERER_URL = 'distribllm://app/index.html'
 
@@ -132,8 +134,11 @@ async function loadBackendConfig(): Promise<BackendLauncherConfig> {
   }
 }
 
-async function saveBackendConfig(config: BackendLauncherConfig): Promise<void> {
-  const errors = validateBackendLauncherConfig(config)
+async function saveBackendConfig(
+  config: BackendLauncherConfig,
+  packagedRuntimeAvailable: boolean
+): Promise<void> {
+  const errors = validateBackendLauncherConfig(config, packagedRuntimeAvailable)
   if (errors.length > 0) throw new Error(errors.join(' '))
 
   const target = backendConfigPath()
@@ -237,10 +242,22 @@ app.whenReady().then(async () => {
     /^[0-9a-f]{40}$/.test(__DISTRIBLLM_SOURCE_COMMIT__)
       ? __DISTRIBLLM_SOURCE_COMMIT__
       : null
+  const packagedBackendPath = join(process.resourcesPath, 'backend-runtime')
+  const packagedBackendRuntime: PackagedBackendRuntime | null =
+    expectedBackendSourceCommit &&
+    /^[0-9a-f]{64}$/.test(__DISTRIBLLM_BACKEND_MANIFEST_SHA256__) &&
+    existsSync(packagedBackendPath)
+      ? {
+          windowsSourcePath: packagedBackendPath,
+          sourceCommit: expectedBackendSourceCommit,
+          manifestSha256: __DISTRIBLLM_BACKEND_MANIFEST_SHA256__
+        }
+      : null
   backendLauncher = new WslBackendLauncher(
     backendConfig,
     createBackendRuntime(),
-    expectedBackendSourceCommit
+    expectedBackendSourceCommit,
+    packagedBackendRuntime
   )
   backendLauncher.on('status', broadcastBackendStatus)
 
@@ -254,7 +271,7 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('backend-launcher:save-config', async (event, config: BackendLauncherConfig) => {
     assertTrustedIpcSender(event)
-    await saveBackendConfig(config)
+    await saveBackendConfig(config, packagedBackendRuntime !== null)
     backendLauncher?.setConfig(config)
     return backendLauncher?.getConfig()
   })

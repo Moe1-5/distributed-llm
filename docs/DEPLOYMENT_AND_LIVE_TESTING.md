@@ -3,7 +3,7 @@
 **Status:** Active operator runbook
 **Last updated:** 2026-08-22
 
-This document is the practical checklist for rebuilding the Windows executable, running the VPS bootstrap relay, updating the local WSL backend, and preparing the later backend-bundled package.
+This document is the practical checklist for rebuilding the backend-bundled Windows executable, running the VPS bootstrap relay, and validating the managed WSL runtime.
 
 The single combined VPS procedure is the established baseline. For the Sprint
 32 separated full-DHT and relay topology, isolated coordinator/settlement
@@ -21,18 +21,7 @@ Create a new executable when you want to test any latest Electron, renderer, set
 
 Do not rebuild the executable just because the VPS bootstrap service changed. The VPS bootstrap is external infrastructure.
 
-For backend-only Python changes, the current executable is not enough by itself. Today the packaged Electron app launches an existing backend checkout inside WSL. That means backend fixes require:
-
-1. Update the backend source checkout in WSL.
-2. Sync backend dependencies if needed.
-3. Restart the managed backend from Electron Settings or from the terminal.
-4. Rebuild the executable only if the Electron app or launcher also changed.
-
-Acceptance packages now verify this boundary before startup: the configured
-WSL backend must be a tracked-clean Git checkout at the exact commit embedded
-in the EXE. A mismatch fails with `backend_source_mismatch` before dependency
-sync or backend launch, preventing a new renderer from silently testing an old
-backend branch.
+Backend-only Python changes now require a rebuilt executable because the package contains the sanitized backend payload. The build stamps that payload with the exact Git commit and a SHA-256 manifest. Before startup, Electron verifies the manifest and installs it atomically under the matching commit inside WSL. This prevents a new renderer from silently testing an old backend checkout.
 
 For final two-device acceptance, build one fresh executable after all accepted fixes are committed. Both devices should run that same artifact hash.
 
@@ -44,10 +33,10 @@ The current Windows executable packages:
 - React renderer UI
 - managed WSL backend launcher
 - package audit and executable identity support
+- sanitized tracked backend application source with an embedded checksum manifest
 
 The current Windows executable does not package:
 
-- the Python backend source
 - the backend virtual environment
 - model caches
 - Hugging Face tokens
@@ -55,11 +44,7 @@ The current Windows executable does not package:
 - traces
 - useful-work receipts
 
-During testing, Settings must point to a real WSL backend path, for example:
-
-```text
-/home/albad/FYP/fyp-projects/backend
-```
+During normal testing, leave the developer backend override off. The package installs the verified source beneath the WSL XDG state directory and synchronizes its frozen environment there. A manual checkout path is only an advanced developer override and cannot produce a passing final acceptance report.
 
 The VPS is used only as the DHT bootstrap and circuit relay. It should not run participant model-serving nodes unless you intentionally set up a separate worker there.
 
@@ -72,6 +57,7 @@ cd /home/albad/FYP/fyp-projects/frontend
 bun install --frozen-lockfile
 bun run typecheck
 bun run test:launcher
+bun run test:backend-runtime
 bun run test:renderer-flow
 bun run build:win
 bun run audit:win-package
@@ -97,7 +83,7 @@ Expected result:
 
 - `bun run typecheck` passes.
 - launcher and renderer tests pass.
-- package audit reports zero forbidden entries.
+- package audit reports zero forbidden ASAR and backend-runtime entries and verifies every backend checksum.
 - both physical devices use the same executable hash for acceptance.
 
 ### Current Identity-Preserving-Recovery Test Artifact
@@ -111,13 +97,11 @@ The 2026-08-22 identity-preserving-recovery build is:
 - SHA-256: `816893d26e6d12e6aae261a5cc15c574268e612cd1aadf4942a69b27d7a2dbba`
 - package audit: 36 ASAR entries and zero forbidden entries
 
-This executable supersedes the earlier remote-lease-recovery and incentives-recovery artifacts. Both physical
-devices must run this exact hash and the backend checkout at the embedded source
-commit before recording the remote lease soak and final acceptance evidence.
+This historical executable is superseded by the next schema-four backend-bundled candidate. Do not use it for new final acceptance evidence.
 
-## Update The Local WSL Backend
+## Developer Backend Override
 
-Use this when backend Python code changed and the executable is still pointing to an external WSL checkout.
+Normal packaged testing does not update or point at a local checkout. Use this section only when intentionally debugging source outside the acceptance path: enable the developer override in Settings, provide an absolute WSL backend path, and accept that the exported final report will remain false.
 
 From Windows PowerShell:
 
@@ -134,13 +118,13 @@ wsl -d Ubuntu -- bash -lc "cd /home/albad/FYP/fyp-projects && git fetch origin &
 Then sync backend dependencies:
 
 ```powershell
-wsl -d Ubuntu -- bash -lc "cd /home/albad/FYP/fyp-projects/backend && uv sync --python 3.12"
+wsl -d Ubuntu -- bash -lc "cd /home/albad/FYP/fyp-projects/backend && uv sync --frozen --python 3.12"
 ```
 
 Restart the backend from Electron Settings, or run it manually for debugging:
 
 ```powershell
-wsl -d Ubuntu -- bash -lc "cd /home/albad/FYP/fyp-projects/backend && uv run --python 3.12 uvicorn main:app --host 127.0.0.1 --port 8000"
+wsl -d Ubuntu -- bash -lc "cd /home/albad/FYP/fyp-projects/backend && uv run --frozen --python 3.12 python main.py"
 ```
 
 Expected result:
@@ -367,13 +351,17 @@ For a durable public deployment, replace the tunnel with an authenticated HTTPS 
 
 ### 4. Configure Every Participant Backend
 
-Add these values to the root `.env` beside each participant's backend checkout. Keep a separate identity file per device and do not copy identities between participants.
+For a normal packaged run, add these values to
+`${XDG_CONFIG_HOME:-$HOME/.config}/distribllm/backend.env` inside each selected
+WSL distro and set the file mode to `0600`. A developer checkout may continue
+to use its repository-root `.env` fallback. Keep a separate identity file per
+device and do not copy identities between participants.
 
 ```text
 DISTRIBLLM_INCENTIVES_MODE=shadow
 DISTRIBLLM_SETTLEMENT_URL=http://127.0.0.1:7101
 DISTRIBLLM_IDENTITY_PATH=
-DISTRIBLLM_MODEL_REVISION=main
+DISTRIBLLM_MODEL_REVISION=
 DISTRIBLLM_API_ACCESS_MODE=off
 DISTRIBLLM_DHT_EXPIRY_SECONDS=90
 DISTRIBLLM_ANNOUNCE_INTERVAL_SECONDS=20
@@ -385,7 +373,13 @@ DISTRIBLLM_P2P_IDENTITY_DIR=
 
 Leave `DISTRIBLLM_P2P_IDENTITY_DIR` empty to use the private WSL-local default at `~/.distribllm/p2p-identities`. Every local worker receives a separate key file. Do not copy this directory between devices, do not put it in Git, and do not confuse it with `DISTRIBLLM_IDENTITY_PATH`, which is the application key used to sign useful-work receipts.
 
-Restart the managed backend after changing `.env`. Both serving workers and the generator must run in shadow mode for receipt-capable RPC and countersigned acceptance to be exercised.
+Leave `DISTRIBLLM_MODEL_REVISION` blank so the worker uses the immutable commit
+resolved by the loader. It may instead be the exact reviewed lowercase
+forty-character checkpoint hash as an additional assertion, but it must never
+be `main`. Restart the managed backend through the EXE after changing the
+managed environment file. Both serving workers and the generator must run in
+shadow mode for receipt-capable RPC and countersigned acceptance to be
+exercised.
 
 Deploy the matching settlement retry/idempotency source to both sides before
 testing an outage: the participant backend supplies bounded retries and the VPS
@@ -505,19 +499,16 @@ Interpretation:
 - If `/models` or serving-plan times out, the backend is overloaded or blocked and needs backend logs before another UI retry.
 - If relay probe passes but generator route fails, focus on RPC health and route selection, not the VPS bootstrap.
 
-## Future Backend-Bundled Packaging Plan
+## Backend-Bundled Runtime Behavior
 
-The later packaged architecture should remove the need for users to manually point Electron at an existing backend checkout.
+The implemented package removes the normal backend-checkout dependency:
 
-Recommended direction:
+1. The build copies only the explicit tracked runtime allowlist and excludes tests and mutable state.
+2. It writes the exact source commit and a checksum manifest; Electron embeds the manifest digest.
+3. First launch verifies and atomically installs the payload into `${XDG_STATE_HOME:-$HOME/.local/state}/distribllm/runtimes/<commit>/backend`.
+4. `uv sync --frozen --python 3.12` provisions `${XDG_STATE_HOME:-$HOME/.local/state}/distribllm/environments/<commit>`.
+5. Traces, local-model registration, model cache, OAuth tokens, identities, receipts, and API keys remain outside the read-only source.
+6. Older commit directories remain available for rollback by launching the older reviewed package.
+7. The explicit developer override remains available for debugging but fails the packaged-runtime acceptance check.
 
-1. Package a sanitized backend source archive with the Electron app resources.
-2. On first launch, extract it into a versioned WSL app directory such as `~/.distribllm/runtime/<app-version>/backend`.
-3. Run `uv sync --python 3.12` inside that managed runtime directory.
-4. Store mutable runtime state outside the extracted source directory, for example under `~/.distribllm/state`.
-5. Keep model caches, Hugging Face tokens, p2p identities, traces, receipts, and API keys out of the executable.
-6. Record both executable identity and backend source identity in the acceptance report.
-7. Support upgrades by extracting a new versioned backend directory while preserving user state.
-8. Keep a manual advanced setting for developers to point at a source checkout during debugging.
-
-This future package still should not embed private tokens, model weights, or relay identities. Those remain user/runtime data.
+The package still requires WSL 2, an Ubuntu distro, `uv`, and network access for the first locked dependency sync. Fully offline dependency images and administrator-level WSL installation remain deferred Sprint 15 work, not hidden package behavior.

@@ -35,7 +35,7 @@ All currently planned repository source work is implemented and locally verified
 - **Explicitly deferred product work:** Sprint 13's claim/payout UI remains gated until real multi-machine settlement mechanics pass and the user approves a later payout sprint. Credit mode remains prohibited.
 - **Closure rule:** every sprint stays in this active table until the user explicitly says to close that sprint, even after its source and physical evidence pass.
 
-The physical gates are consolidated in `docs/INFRASTRUCTURE_REDUNDANCY_ACCEPTANCE.md`, `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md`, and `docs/WINDOWS_MANAGED_WSL_PACKAGING.md`. Full completion requires a second independent VPS/failure domain, the two existing Windows participants, a three-provider topology, one identical reviewed package with matching tracked-clean WSL checkouts, and the dependency-ordered incentives-off then shadow matrix.
+The physical gates are consolidated in `docs/INFRASTRUCTURE_REDUNDANCY_ACCEPTANCE.md`, `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md`, and `docs/WINDOWS_MANAGED_WSL_PACKAGING.md`. Full completion requires a second independent VPS/failure domain, the two existing Windows participants, a three-provider topology, one identical reviewed backend-bundled package with matching schema-four packaged-runtime evidence, and the dependency-ordered incentives-off then shadow matrix.
 
 ## Completed Sprints
 

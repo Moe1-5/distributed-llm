@@ -49,5 +49,5 @@ bun run build:linux
 - Hugging Face OAuth opens only approved Hugging Face URLs; WSL falls back to the Windows browser when Linux has no browser.
 - Gated model folders are selected through Electron folder-picker IPC.
 - The Inference page depends on backend generator and route readiness, not WebSocket state alone.
-- Packaged Windows mode defaults to the project VPS in `auto` mode and requires an absolute WSL backend path on first run.
+- Packaged Windows mode defaults to the project VPS in `auto` mode and installs its integrity-verified backend payload automatically; an absolute WSL path is only an explicit developer override.
 - Launcher configuration contains no Hugging Face credentials, model data, P2P identity, traces, or receipts.

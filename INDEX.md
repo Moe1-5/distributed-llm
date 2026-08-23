@@ -37,10 +37,10 @@
 | Architectural decision history            | `docs/decisions.md`                       |
 | Sprint-log hook scripts                   | `scripts/sprint-log/`                     |
 | Backend API                               | `backend/api/server.py`                   |
-| Backend env loading                      | `backend/api/env_loader.py`              |
+| Backend checkout/packaged XDG env loading | `backend/api/env_loader.py`             |
 | Backend Hugging Face OAuth/download       | `backend/api/hf_oauth.py`                 |
 | Backend settings/token storage            | `backend/api/settings.py`                 |
-| Backend local model import registry       | `backend/api/local_models.py`             |
+| Local model import registry and packaged XDG state | `backend/api/local_models.py`       |
 | Backend constants/model registry          | `backend/constants.py`                    |
 | Node serving lifecycle                    | `backend/node/node.py`                    |
 | Public RPC safety policy                  | `backend/node/rpc_safety.py`              |
@@ -200,7 +200,7 @@
 | `backend/architecture_acceptance.py` | Validates redundant infrastructure, controlled failures, packaged lifecycle, pre-role discovery, role identity, placement race, protocol revisions, topology evidence, and rollout ordering. |
 | `backend/control_service_validate.py` | Validates coordinator/settlement component health, revisions, failure domain, logs, and restart evidence. |
 | `backend/acceptance_evidence.py` | Captures sanitized participant evidence and validates two-device route, transport, timing, receipts, ownership, and optional standby non-payment. |
-| `backend/acceptance_manifest.py` | Cross-validates schema-three packaged Windows and matching WSL revisions, VPS restart, bound relay probe, relay/direct inference, hash-bound incentives-off session ordering, and architecture artifacts while preserving manual approval gates. |
+| `backend/acceptance_manifest.py` | Cross-validates schema-four packaged Windows and integrity-verified WSL runtime revisions, VPS restart, bound relay probe, relay/direct inference, hash-bound incentives-off session ordering, and architecture artifacts while preserving manual approval gates. |
 | `backend/local_split_probe.py` | Runs cached-model local split inference through two real Hivemind serving peers and records parity, accounting, and cleanup evidence. |
 | `backend/tinyllama_performance_probe.py` | Runs a bounded cached TinyLlama distributed timing, accounting, resource, and cleanup baseline. |
 | `backend/relay_probe.py` | Minimal Hivemind-only circuit-relay reservation probe for Sprint 16 diagnostics.     |
@@ -232,6 +232,7 @@
 | `backend/tests/test_placement_client.py` | Authenticated client payload, publication attestation, heartbeat ownership, and secret-safe status regressions. |
 | `backend/tests/test_placement_backend_integration.py` | Backend authoritative-plan, coordinator range override, failed-load release, and fail-closed integration regressions. |
 | `backend/tests/test_api_access.py` | Hashed API-key eligibility, revocation, shared atomic credit reservations, shadow accounting, and signed capability regressions. |
+| `backend/tests/test_env_loader.py` | Managed packaged-XDG and explicit operator environment loading without overriding process variables. |
 
 ---
 
@@ -242,7 +243,9 @@
 | `frontend/package.json`                 | Frontend dependencies and scripts.            |
 | `frontend/README.md`                    | Frontend development, validation, Windows packaging, and launcher runtime notes. |
 | `frontend/src/main/`                    | Electron main process and managed WSL backend launcher. |
-| `frontend/src/main/backendLauncher.ts`  | Validated WSL detection, packaged-to-backend source revision binding, dependency sync, FastAPI health, diagnostics, PID lifecycle, and sanitized schema-three Windows acceptance evidence. |
+| `frontend/src/main/backendLauncher.ts`  | Validated WSL detection, commit-versioned packaged backend installation, frozen isolated dependency sync, FastAPI health, diagnostics, PID lifecycle, developer override, and sanitized schema-four Windows acceptance evidence. |
+| `frontend/scripts/prepare-backend-runtime.mjs` | Builds the sanitized tracked backend resource with an exact commit marker and per-file SHA-256 manifest. |
+| `frontend/tests/backendRuntimePayload.test.mjs` | Verifies the backend runtime allowlist, commit stamp, exclusions, and checksum manifest. |
 | `frontend/src/preload/`                 | Electron preload bridge.                      |
 | `frontend/src/renderer/`                | React renderer application.                   |
 | `frontend/src/renderer/src/api/`        | HTTP/WebSocket client, persistent sanitized diagnostics, independent refresh, serving-plan freshness, and explicit model/runtime presentation state. |

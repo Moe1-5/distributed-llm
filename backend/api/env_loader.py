@@ -1,8 +1,7 @@
-"""
-Project environment loader.
+"""Backend operator environment loader.
 
-Keeps backend local development aligned with the root .env file without adding
-an extra dependency just for simple KEY=VALUE parsing.
+Supports packaged XDG configuration and checkout-local development without
+adding a dependency just for simple KEY=VALUE parsing.
 """
 
 from __future__ import annotations
@@ -18,8 +17,20 @@ def _unquote(value: str) -> str:
 
 
 def load_project_env() -> Path | None:
-    env_path = Path(__file__).resolve().parents[2] / ".env"
-    if not env_path.is_file():
+    configured = os.environ.get("DISTRIBLLM_ENV_FILE", "").strip()
+    config_root = Path(
+        os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    ).expanduser()
+    candidates = (
+        [Path(configured).expanduser()]
+        if configured
+        else [
+            config_root / "distribllm" / "backend.env",
+            Path(__file__).resolve().parents[2] / ".env",
+        ]
+    )
+    env_path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if env_path is None:
         return None
 
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():

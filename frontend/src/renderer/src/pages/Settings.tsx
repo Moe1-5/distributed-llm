@@ -370,14 +370,30 @@ export default function Settings(): React.JSX.Element {
                   className="h-10 rounded border border-border-bright bg-bg-surface px-3 font-mono text-[12px] text-text-primary outline-none focus:border-cyan/40"
                 />
               </label>
+              <label className="flex items-center gap-2 font-mono text-[10px] text-text-secondary md:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={launcherConfig.useDeveloperBackendOverride}
+                  onChange={(event) =>
+                    updateLauncherConfig('useDeveloperBackendOverride', event.target.checked)
+                  }
+                  className="h-4 w-4 accent-cyan"
+                />
+                Use developer backend checkout instead of the packaged runtime
+              </label>
               <label className="flex flex-col gap-1.5 font-mono text-[10px] text-text-dim uppercase md:col-span-2">
-                Backend Path in WSL
+                Developer Backend Path in WSL
                 <input
                   value={launcherConfig.backendPath}
                   onChange={(event) => updateLauncherConfig('backendPath', event.target.value)}
+                  disabled={!launcherConfig.useDeveloperBackendOverride}
                   placeholder="/home/user/distribllm/backend"
-                  className="h-10 rounded border border-border-bright bg-bg-surface px-3 font-mono text-[12px] text-text-primary outline-none placeholder:text-text-dim focus:border-cyan/40"
+                  className="h-10 rounded border border-border-bright bg-bg-surface px-3 font-mono text-[12px] text-text-primary outline-none placeholder:text-text-dim focus:border-cyan/40 disabled:cursor-not-allowed disabled:opacity-40"
                 />
+                <span className="normal-case">
+                  Leave the override off for normal use. The packaged app installs its verified
+                  backend automatically inside WSL.
+                </span>
               </label>
               <label className="flex flex-col gap-1.5 font-mono text-[10px] text-text-dim uppercase">
                 Network Mode

@@ -54,19 +54,19 @@ Consequences:
 
 Electron owns the desktop window, local settings, acceptance report export, and managed backend lifecycle. The renderer provides Nodes, Network, Inference, Monitoring, Incentives, and Settings views. The preload bridge exposes a small typed IPC API.
 
-The managed launcher currently:
+The managed launcher now:
 
 1. checks that `wsl.exe` exists;
 2. validates the selected distro and requires WSL version two;
-3. validates an absolute backend path inside WSL;
-4. optionally runs `uv sync --python 3.12`;
+3. verifies and atomically installs the sanitized backend payload embedded in the application into a commit-versioned WSL runtime;
+4. runs `uv sync --frozen --python 3.12` into a separate commit-versioned environment;
 5. launches FastAPI through WSL;
 6. polls the loopback backend status endpoint;
 7. records launcher state and a backend PID;
 8. stops only the backend process it owns;
 9. exports sanitized Windows acceptance evidence.
 
-The portable executable and NSIS target already exist. The NSIS configuration already requests a desktop shortcut. The current package does not contain or provision the Python backend.
+The portable executable and NSIS target include the backend application source, checksum manifest, and exact source commit while excluding tests and mutable state. The selected WSL 2 Ubuntu distro and `uv` remain explicit prerequisites; automatic administrator-level WSL installation and a fully offline dependency image are outside the approved Sprint 15 boundary.
 
 ### 3.2 Participant Backend
 
@@ -353,17 +353,9 @@ unsupported until a separately authenticated TLS gateway is implemented.
 
 ### High 3 - Final Installer Does Not Include The Backend
 
-The NSIS target and desktop shortcut exist, but normal users must already have WSL 2, Ubuntu, `uv`, Python, a backend checkout, and an absolute backend path.
+Resolved in source on 2026-08-23 within the approved existing-Ubuntu WSL boundary. The package build now copies only an explicit allowlist of tracked backend application files, writes a commit marker and SHA-256 manifest, and audits the unpacked resource. Electron embeds that manifest digest, converts the Windows resource path through `wslpath`, verifies the payload, and atomically copies it to a commit-versioned WSL runtime. It uses `uv sync --frozen` with a separate commit-versioned environment, keeps traces and local-model metadata under XDG state/config paths, preserves older runtimes for rollback, and exposes the old checkout path only behind an explicit developer override. A schema-four report can pass only when the packaged runtime—not the override—was executed and its full payload matched the application commit.
 
-Required action:
-
-- bundle a sanitized backend payload;
-- extract it into a versioned WSL runtime directory;
-- provision a locked Python environment;
-- preserve mutable state separately;
-- automate upgrade and rollback;
-- remove backend path entry from the normal first-run flow;
-- retain a developer override.
+WSL 2, an existing Ubuntu distro, network access for locked dependency downloads, and `uv` remain documented prerequisites. Fully offline dependency bundling and administrator-level WSL installation remain explicitly deferred rather than being represented as completed.
 
 ### High 4 - Fundamental Two-Device Generation Is Still Unaccepted
 

@@ -20,7 +20,20 @@ from constants import SUPPORTED_MODELS
 
 logger = get_logger(__name__)
 
-_REGISTRY_FILE = Path(__file__).parent.parent / ".local_models.json"
+def _default_registry_file() -> Path:
+    configured = os.environ.get("DISTRIBLLM_LOCAL_MODEL_REGISTRY_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    legacy_path = Path(__file__).parent.parent / ".local_models.json"
+    if legacy_path.exists():
+        return legacy_path
+    config_root = Path(
+        os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    ).expanduser()
+    return config_root / "distribllm" / "local-models.json"
+
+
+_REGISTRY_FILE = _default_registry_file()
 
 
 class LocalModelValidationError(ValueError):
@@ -81,6 +94,7 @@ def _load_registry() -> dict[str, Any]:
 
 
 def _save_registry(payload: dict[str, Any]) -> None:
+    _REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     _REGISTRY_FILE.write_text(
         json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
