@@ -116,6 +116,17 @@ class ArchitectureAcceptanceTests(unittest.TestCase):
             report["errors"],
         )
 
+    def test_rejects_infrastructure_commit_drift(self) -> None:
+        document = matrix()
+        document["components"][2]["deployment_commit"] = "c" * 40
+
+        report = validate_architecture_matrix(document)
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("deployment commit does not match" in error for error in report["errors"])
+        )
+
     def test_cli_writes_private_validation_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

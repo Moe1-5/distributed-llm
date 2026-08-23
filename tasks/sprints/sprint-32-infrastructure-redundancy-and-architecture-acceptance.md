@@ -82,3 +82,9 @@ Relay-mode participants run as DHT clients, while the current VPS combines boots
 - What changed: made packaged lifecycle, discovery before local roles, co-located role identity, transactional placement race, and cross-service restart isolation mandatory architecture-matrix scenarios in addition to coordinator, DHT, relay, worker, and generator failures; required the legacy VPS validation to expose the same full deployment commit as the schema-three Windows and WSL runtime; expanded manual review to include a clean-Windows first run and request-correlated participant/VPS debug logs.
 - Why: those gates remained open in Sprints 15, 16, 24, 29, and 30 but were only prose instructions, so the former final matrix could pass without evidence for them.
 - Status: the focused architecture/manifest suite passes all sixteen tests and the complete backend suite passes all 453 tests. Validation tooling now fails closed when any cross-sprint scenario or deployment revision is absent. Physical evidence generation remains open.
+
+### 2026-08-23 - Reject mixed infrastructure source revisions
+
+- What changed: required every DHT, relay, coordinator, and settlement component in the architecture matrix to use the same full Git commit as the reviewed participant application and WSL backend; added regression coverage and documented the coherent-release rule.
+- Why: validating only the shape of each component commit allowed an older but protocol-compatible infrastructure deployment to pass a final matrix for a newer participant build.
+- Status: all five focused architecture tests and all 457 backend tests pass. The local validator now fails closed on any mixed infrastructure revision. The existing VPS inspection found commit `047679040d61992f93bdd6176fcae4c623c97ce1` with only the legacy bootstrap and settlement units, so deployment of the reviewed candidate plus the second independent failure domain remains open.

@@ -69,6 +69,9 @@ The validator checks the pinned Hivemind version, deployment commit, peer ID,
 public multiaddress, role, failure-domain label, persistent identity continuity,
 and effective p2pd flags. A DHT report must show DHT-server and relay-disabled
 flags. A relay report must show DHT-client and relay-enabled flags.
+Every DHT, relay, coordinator, and settlement report placed in the final matrix
+must use the same full reviewed commit as the participant application and WSL
+backend. A merely well-formed but different component revision fails validation.
 
 ## Coordinator And Settlement Permission Migration
 
@@ -275,6 +278,10 @@ The legacy VPS restart report supplied to the final manifest must also expose
 the full reviewed 40-character deployment commit. The manifest rejects it if
 that commit differs from the schema-three Windows application and WSL backend
 commit.
+
+The architecture validator applies the same equality rule to every separated
+DHT, relay, coordinator, and settlement component; protocol compatibility alone
+does not permit mixed deployment revisions in final acceptance.
 
 The `topologies.incentives_off.evidence_sha256` value must be the SHA-256 of
 the actual passing `relay-off-report.json`, not a combined folder or manually

@@ -21,7 +21,7 @@
 | Relay tensor RPC reset handoff and test chronology | `RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md` | Physical test steps and outcome ledger, common sustained relay-path boundary, controlled tensor-probe runbook, correlated evidence, isolation matrix, and next-agent fix decision tree |
 | System analysis and finalization | `SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md` | Full source, runtime, security, deployment, validation, incentive-outage, and final desktop readiness audit |
 | Windows managed WSL packaging | `WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed distro strategy, launcher contract, schema-three EXE-to-WSL revision binding, sanitized acceptance report, and clean-Windows runbook |
-| Useful-work incentives | `USEFUL_WORK_INCENTIVES.md` | Signed receipt protocol, SQLite settlement rules, read-only credits, VPS rollout, and remaining two-device acceptance |
+| Useful-work incentives | `USEFUL_WORK_INCENTIVES.md` | Signed receipt protocol, durable participant outbox, SQLite settlement rules, read-only credits, VPS rollout, and remaining two-device acceptance |
 | Two-device acceptance evidence | `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized incentives-off-first relay/direct captures, Windows and VPS artifact assembly, hash-bound session and off-to-shadow validation, complete-route checks, standby non-payment, and manual gates |
 | Local split acceptance | `LOCAL_SPLIT_ACCEPTANCE.md` | One-command real two-peer OPT split inference, parity, accounting, cleanup, and recorded evidence |
 | TinyLlama performance baseline | `TINYLLAMA_PERFORMANCE_BASELINE.md` | Bounded real distributed timing probe and the current Transformers chat-template compatibility blocker |

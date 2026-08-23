@@ -154,7 +154,7 @@
 | `docs/RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md` | Physical test chronology, common sustained relay-path boundary, request-correlated diagnostics, outcome ledger, controlled isolation matrix, and next-agent fix decision tree. |
 | `docs/SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md` | Full codebase and runtime-state audit, ranked technical findings, settlement connection-refused repair, unfinished work, and final desktop release sequence. |
 | `docs/WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed WSL distro strategy, launcher contract, sanitized acceptance report, and clean-Windows runbook. |
-| `docs/USEFUL_WORK_INCENTIVES.md` | Signed useful-work receipt protocol, SQLite settlement policy, rollout modes, VPS deployment, and remaining acceptance gates. |
+| `docs/USEFUL_WORK_INCENTIVES.md` | Signed useful-work receipt protocol, durable participant outbox, SQLite settlement policy, rollout modes, VPS deployment, and remaining acceptance gates. |
 | `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized off-first relay/direct capture commands, hash-bound cross-sprint artifact assembly, route and ownership validation, later shadow receipts, and manual gates. |
 | `docs/LOCAL_SPLIT_ACCEPTANCE.md` | Isolated real two-peer OPT split inference, direct parity, accounting evidence, cleanup, and recorded local result. |
 | `docs/TINYLLAMA_PERFORMANCE_BASELINE.md` | Bounded cached TinyLlama distributed timing probe and the active chat-template compatibility finding. |
@@ -180,7 +180,8 @@
 | `backend/node/session_cache.py` | Bounded provider-owned OPT key/value cache lifecycle and process-shared diagnostics. |
 | `backend/client/coverage.py` | Pure adjacent-range route planning, provider segmentation, snapshot revision, and serving recommendation logic. |
 | `backend/client/rpc_policy.py` | Validated remote-expert attempt policy, failure classification, and safe receipt fallback rules. |
-| `backend/incentives/` | Ed25519 identities, canonical BLAKE3 receipts, SQLite settlement, hashed developer API keys, credit reservations, and signed inference capabilities. |
+| `backend/incentives/` | Ed25519 identities, canonical BLAKE3 receipts, durable submission state, SQLite settlement, hashed developer API keys, credit reservations, and signed inference capabilities. |
+| `backend/incentives/outbox.py` | Private identity-bound SQLite WAL outbox with restart recovery, expiry-safe rejection, active capacity, and bounded terminal history. |
 | `backend/network/` | Persistent control-plane discovery, immutable last-good topology, role state, publication verification, and typed publication outcomes. |
 | `backend/network/supervisor.py` | Backend-lifespan network supervisor with an independent cache-disabled DHT, passive topology snapshots, structured failures, role identities, and exact-handle cleanup/quarantine. |
 | `backend/network/infrastructure.py` | Ordered participant DHT/relay configuration diagnostics and explicit redundancy/degraded state. |

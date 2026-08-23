@@ -40,7 +40,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `backend/client/distributed_model.py`: reserved model-level facade; currently not the primary runtime path.
 - `backend/models/architecture_adapter.py`: explicit OPT and Llama-family adapter behavior used by generation/handler paths.
 - `backend/models/llama/`: Llama-family extension placeholders.
-- `backend/incentives/`: persistent application identity, canonical signed documents, BLAKE3 commitments, receipt construction, settlement runtime, and SQLite ledger service.
+- `backend/incentives/`: persistent application identity, canonical signed documents, BLAKE3 commitments, receipt construction, identity-bound durable submission outbox, settlement runtime, and SQLite ledger service.
 
 ## Backend Tests and Local Artifacts
 

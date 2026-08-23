@@ -45,6 +45,7 @@ Sprints 10 and 11 completed gated-model local import and instruction-ready model
 - [x] Define non-payment rules for failed, stale, malformed, standby, or unverifiable work; slashing remains out of scope for non-transferable credits.
 - [x] Use a project-owned off-chain FastAPI and SQLite settlement service first, with no transfer, withdrawal, conversion, or model-access gate.
 - [x] Add backend tests for receipt validation, accounting aggregation, and abuse cases.
+- [x] Persist pending settlement submissions across backend restarts with bounded retention and expiry-safe terminal reasons.
 - [x] Add a read-only rewards/accounting UI only after backend semantics are validated.
 - [ ] Add claim/payout UI only in a later approved sprint after settlement mechanics are proven.
 
@@ -147,3 +148,9 @@ Sprints 10 and 11 completed gated-model local import and instruction-ready model
 - Why: the composite status endpoint can legitimately exceed 1.5 seconds while collecting generator, node, GPU, token, and model state. Electron Builder also needs one unambiguous dependency manager when producing the Windows package.
 - Verification: a real Uvicorn TCP smoke test accepted a signed shadow receipt, returned the same result for an idempotent replay, and left the ledger unchanged; a second real TCP test queued a receipt while settlement was absent, reported retrying, then drained it successfully after settlement started. The 186-test focused backend regression set passes, including all 17 incentives tests and the real Hivemind receipt RPC. Frontend type checking, 20 launcher tests, 2 renderer-flow tests, the portable Windows build, and the package audit also pass. The artifact is 87,658,394 bytes with SHA-256 `4bf954e4325f12e9e3227bd63d483c39d44c05e1cd1a8e8a1b06f6d1b02480e1`; the audit found 36 ASAR entries and zero forbidden entries.
 - Status: the source retry and idempotency issue is fixed and locally proven. `RETRYING` with connection refused now specifically means the participant's local port 7101 tunnel is absent; pending receipts recover when that tunnel becomes reachable without restarting the backend. Physical two-device receipt evidence, restart-durable queue storage, authenticated public settlement transport, and approval before credit mode remain open, so Sprint 13 is not closed.
+
+### 2026-08-23 - Make participant settlement submissions restart-durable
+
+- What changed: added a private SQLite participant outbox that commits canonical signed submissions before network delivery, binds the database to the application identity, recovers pending and retrying rows after restart, preserves stable idempotency keys and attempt counts, rejects work before the freshness window closes, records structured terminal reasons, caps active rows, and prunes terminal history to a configured bound; exposed sanitized outbox counters and added recovery, expiry, permission, and retention regressions.
+- Why: the bounded in-memory retry queue still lost accepted useful-work receipts whenever a participant backend restarted during a settlement outage, making restart evidence and eventual shadow accounting unreliable.
+- Status: the focused incentives suite passes all twenty-three tests, including real Hivemind receipt RPC and durable restart recovery, and the complete backend suite passes all 457 tests. Physical two-device outage/restart evidence, authenticated public settlement transport, and approval before credit mode remain open.

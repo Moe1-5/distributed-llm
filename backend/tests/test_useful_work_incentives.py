@@ -21,6 +21,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 from incentives.identity import load_application_identity
+from incentives.outbox import SubmissionOutbox
 from incentives.protocol import (
     ProtocolError,
     canonical_json,
@@ -916,6 +917,139 @@ class SettlementTests(unittest.TestCase):
             self.assertEqual(snapshot["rejected_submissions"], 0)
             self.assertEqual(snapshot["submission_retry_attempts"], 1)
             self.assertEqual(snapshot["settlement_connectivity"], "connected")
+
+    def test_runtime_recovers_durable_submission_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = ReceiptFixture(root, request_id="restart-recovery")
+            identity = load_application_identity(root / "runtime-recovery.json")
+            outbox_path = root / "participant-outbox.sqlite3"
+            outbox = SubmissionOutbox(
+                outbox_path,
+                capacity=8,
+                owner_public_key=identity.public_key,
+            )
+            self.assertEqual(outbox.enqueue(fixture.submission), "inserted")
+
+            class Response:
+                def __init__(self, body: dict) -> None:
+                    self.body = body
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return None
+
+                def read(self) -> bytes:
+                    return json.dumps(self.body).encode()
+
+            def opener(request, timeout):
+                if request.full_url.endswith("/v1/receipts"):
+                    return Response({"status": "shadow_accepted"})
+                return Response(
+                    {
+                        "verified_credits": 0,
+                        "ledger_entries": 0,
+                        "accepted_receipts": 1,
+                        "useful_positions_served": 3,
+                    }
+                )
+
+            runtime = UsefulWorkRuntime(
+                IncentivesConfig("shadow", "https://settlement.example", "main"),
+                identity,
+                opener,
+                sleeper=lambda _: None,
+                outbox_path=outbox_path,
+            )
+            runtime._queue.join()
+            snapshot = runtime.snapshot()
+
+            self.assertEqual(snapshot["outbox_recovered_submissions"], 1)
+            self.assertEqual(snapshot["pending_submissions"], 0)
+            self.assertEqual(snapshot["accepted_submissions"], 1)
+            self.assertEqual(snapshot["outbox_retained_accepted"], 1)
+
+    def test_outbox_expires_before_retry_and_bounds_terminal_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bounded-outbox.sqlite3"
+            now = 1_000
+            outbox = SubmissionOutbox(
+                path,
+                capacity=2,
+                retention_rows=1,
+                timestamp_window_seconds=100,
+                expiry_safety_seconds=10,
+                owner_public_key="expiry-owner",
+                clock=lambda: now,
+            )
+            stale = {
+                "worker_receipt": {"payload": {"timestamp": 900}},
+                "generator_acceptance": {"payload": {"timestamp": 900}},
+                "worker_presence": {"payload": {"timestamp": 900}},
+                "generator_presence": {"payload": {"timestamp": 900}},
+            }
+            self.assertEqual(outbox.enqueue(stale, now=900), "inserted")
+            recovered, expired = outbox.recover(now=now)
+
+            self.assertEqual(recovered, [])
+            self.assertEqual(expired, 1)
+            self.assertEqual(outbox.summary()["rejected"], 1)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+            with sqlite3.connect(path) as connection:
+                encoded_reason = connection.execute(
+                    "SELECT terminal_reason_json FROM submissions "
+                    "WHERE state = 'rejected'"
+                ).fetchone()[0]
+            reason = json.loads(encoded_reason)
+            self.assertEqual(reason["code"], "receipt_expired_before_submission")
+            self.assertIn("message", reason)
+
+            fresh = {"receipt": "fresh"}
+            self.assertEqual(outbox.enqueue(fresh, now=now), "inserted")
+            outbox.mark_accepted(hash_document(fresh), attempt=1)
+            summary = outbox.summary()
+            self.assertEqual(summary["accepted"] + summary["rejected"], 1)
+
+    def test_outbox_is_capacity_bounded_and_identity_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "identity-bound-outbox.sqlite3"
+            outbox = SubmissionOutbox(
+                path,
+                capacity=1,
+                owner_public_key="owner-a",
+            )
+            first = {"receipt": "first"}
+            second = {"receipt": "second"}
+
+            self.assertEqual(outbox.enqueue(first), "inserted")
+            self.assertEqual(outbox.enqueue(first), "active")
+            self.assertEqual(outbox.enqueue(second), "full")
+            outbox.mark_rejected(
+                hash_document(first),
+                attempt=1,
+                code="test_rejection",
+                message="terminal",
+            )
+            self.assertEqual(outbox.enqueue(first), "rejected")
+
+            with self.assertRaisesRegex(RuntimeError, "different application identity"):
+                SubmissionOutbox(
+                    path,
+                    capacity=1,
+                    owner_public_key="owner-b",
+                )
+
+            symlink = Path(directory) / "outbox-link.sqlite3"
+            symlink.symlink_to(path)
+            with self.assertRaisesRegex(RuntimeError, "regular file"):
+                SubmissionOutbox(
+                    symlink,
+                    capacity=1,
+                    owner_public_key="owner-a",
+                )
 
     def test_settlement_idempotency_key_accepts_only_exact_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

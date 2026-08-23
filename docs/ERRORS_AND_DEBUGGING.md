@@ -57,10 +57,12 @@ with a stable idempotency key. The matching VPS endpoint returns the prior resul
 only for an exact duplicate and cannot create a second credit entry. Update both
 the participant backend and VPS settlement source before relying on this repair.
 
-Pending retries are still memory-only. Keep the backend running while they drain,
-and treat a durable local receipt outbox as remaining work. For a final public
-deployment, replace the manual tunnel with an authenticated, rate-limited HTTPS
-reverse proxy; never expose the unauthenticated plain HTTP listener directly.
+Pending retries are stored in a private SQLite outbox and recover after a backend
+restart with the same application identity. The Incentives status reports
+recovered, expired, and retained terminal counts. An expired receipt is rejected
+locally rather than sent outside the settlement freshness window. For a final
+public deployment, replace the manual tunnel with an authenticated, rate-limited
+HTTPS reverse proxy; never expose the unauthenticated plain HTTP listener directly.
 
 ## Backend or WebSocket Unreachable
 

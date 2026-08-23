@@ -23,18 +23,26 @@ The worker verifies the signature, tensor commitment, selected-route membership,
 
 The FastAPI service stores SQLite in WAL mode with append-only policy versions, identities, signed presence bindings, receipt pairs, and ledger entries. It rejects duplicate request IDs, receipt hashes, worker nonces, invalid signatures, stale timestamps, self-dealing identities, altered counters, incomplete routes, workers outside the route, unsupported revisions, and out-of-bounds ranges.
 
-Participant submission is fail-open for inference and uses a bounded in-memory
-queue. Connection failures, timeouts, HTTP 408, HTTP 425, HTTP 429, and HTTP 5xx
-responses are retried with bounded exponential backoff. Each receipt POST sends
-a BLAKE3 idempotency key. Settlement accepts a repeated request only when the
-request ID, receipt hash, nonce, and canonical signed payload exactly match an
-already committed row; it returns the existing result without adding another
-ledger entry. Altered collisions and duplicate requests without the
-idempotency contract remain replay errors.
+Participant submission is fail-open for inference and uses a bounded local
+SQLite outbox plus a process-local worker queue. The database is private,
+WAL-backed, bound to the application public key, and stores the canonical signed
+payload before network submission. Connection failures, timeouts, HTTP 408,
+HTTP 425, HTTP 429, and HTTP 5xx responses are retried with bounded exponential
+backoff. Each receipt POST sends the payload's stable BLAKE3 idempotency key.
+Settlement accepts a repeated request only when the request ID, receipt hash,
+nonce, and canonical signed payload exactly match an already committed row; it
+returns the existing result without adding another ledger entry. Altered
+collisions and duplicate requests without the idempotency contract remain replay
+errors.
 
-The retry queue is not durable. A participant backend restart discards pending
-submissions, and a long outage can make receipts exceed the settlement timestamp
-window. A local SQLite outbox with restart recovery remains future work.
+Pending and retrying entries recover automatically after backend restart. An
+entry is permanently rejected before a retry that would cross the settlement
+timestamp window, with a structured reason retained in the outbox. Active rows
+are capped by `DISTRIBLLM_SETTLEMENT_QUEUE_CAPACITY`; accepted and rejected
+history is pruned to `DISTRIBLLM_SETTLEMENT_OUTBOX_RETENTION`. Set
+`DISTRIBLLM_SETTLEMENT_OUTBOX_PATH` only when the default database beside the
+application identity is unsuitable. Replacing the identity without moving its
+outbox fails closed rather than submitting another identity's receipts.
 
 Reward policy version one uses:
 

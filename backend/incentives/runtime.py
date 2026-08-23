@@ -1,4 +1,4 @@
-"""Process-local identity, settlement submission queue, and public status."""
+"""Process-local identity, durable settlement submission queue, and public status."""
 
 from __future__ import annotations
 
@@ -11,10 +11,12 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from incentives.config import IncentivesConfig, get_incentives_config
 from incentives.identity import ApplicationIdentity, load_application_identity
+from incentives.outbox import SubmissionOutbox, default_outbox_path
 from incentives.protocol import hash_document
 
 UrlOpener = Callable[..., Any]
@@ -27,8 +29,10 @@ class SettlementTransientError(RuntimeError):
 
 @dataclass(frozen=True)
 class _QueuedSubmission:
+    idempotency_key: str
     payload: dict[str, Any]
     attempt: int = 1
+    expires_at: int = 0
 
 
 def _env_int(name: str, default: int, *, minimum: int) -> int:
@@ -64,6 +68,9 @@ class UsefulWorkRuntime:
         retry_base_seconds: float | None = None,
         retry_max_seconds: float | None = None,
         queue_capacity: int | None = None,
+        outbox_path: str | Path | None = None,
+        outbox_retention_rows: int | None = None,
+        receipt_timestamp_window: int | None = None,
     ) -> None:
         self.config = config or get_incentives_config()
         self.identity = (
@@ -119,6 +126,7 @@ class UsefulWorkRuntime:
         self._peer_id: str | None = None
         self._queue: queue.Queue[_QueuedSubmission] = queue.Queue(maxsize=capacity)
         self._lock = threading.Lock()
+        self._queued_keys: set[str] = set()
         self._worker: threading.Thread | None = None
         self._accepted = 0
         self._rejected = 0
@@ -135,6 +143,60 @@ class UsefulWorkRuntime:
             "accepted_receipts": 0,
             "useful_positions_served": 0,
         }
+        self._outbox: SubmissionOutbox | None = None
+        self._outbox_recovered = 0
+        self._outbox_expired = 0
+        if self.enabled and self.config.settlement_url and self.identity is not None:
+            retention = (
+                outbox_retention_rows
+                if outbox_retention_rows is not None
+                else _env_int("DISTRIBLLM_SETTLEMENT_OUTBOX_RETENTION", 4096, minimum=0)
+            )
+            window = (
+                receipt_timestamp_window
+                if receipt_timestamp_window is not None
+                else _env_int("DISTRIBLLM_RECEIPT_TIMESTAMP_WINDOW", 300, minimum=1)
+            )
+            target = (
+                Path(outbox_path).expanduser().absolute()
+                if outbox_path is not None
+                else default_outbox_path(self.identity.path)
+            )
+            self._outbox = SubmissionOutbox(
+                target,
+                capacity=capacity,
+                retention_rows=retention,
+                timestamp_window_seconds=window,
+                expiry_safety_seconds=min(15, window - 1),
+                owner_public_key=self.identity.public_key,
+            )
+            recovered, expired = self._outbox.recover()
+            self._outbox_recovered = len(recovered)
+            self._outbox_expired = expired
+            for item in recovered:
+                self._queue.put_nowait(
+                    _QueuedSubmission(
+                        item.idempotency_key,
+                        item.payload,
+                        item.attempt,
+                        item.expires_at,
+                    )
+                )
+                self._queued_keys.add(item.idempotency_key)
+            if recovered:
+                self._connectivity = "retrying"
+                self._last_error = (
+                    f"Recovered {len(recovered)} durable settlement submission(s) "
+                    "after backend restart."
+                )
+                self._ensure_worker_locked()
+            elif expired:
+                self._rejected += expired
+                self._connectivity = "error"
+                self._last_error = (
+                    f"Rejected {expired} durable settlement submission(s) that "
+                    "expired before a safe retry."
+                )
 
     @property
     def enabled(self) -> bool:
@@ -158,9 +220,53 @@ class UsefulWorkRuntime:
                 )
             return False
         with self._lock:
+            key = hash_document(submission)
+            if key in self._queued_keys:
+                return True
+            if self._outbox is None:
+                self._rejected += 1
+                self._connectivity = "error"
+                self._last_error = "Settlement outbox is unavailable."
+                return False
+            outbox_result = self._outbox.enqueue(dict(submission))
+            if outbox_result == "active":
+                return True
+            if outbox_result == "accepted":
+                return True
+            if outbox_result == "rejected":
+                self._rejected += 1
+                self._connectivity = "error"
+                self._last_error = (
+                    "This settlement submission already has a permanent rejection."
+                )
+                return False
+            if outbox_result == "full":
+                self._rejected += 1
+                self._connectivity = "error"
+                self._last_error = (
+                    "Settlement submission outbox is full; this receipt was not queued. "
+                    "Restore settlement connectivity before generating more work."
+                )
+                return False
+            recovered, _ = self._outbox.recover()
+            queued = next(item for item in recovered if item.idempotency_key == key)
             try:
-                self._queue.put_nowait(_QueuedSubmission(dict(submission)))
+                self._queue.put_nowait(
+                    _QueuedSubmission(
+                        queued.idempotency_key,
+                        queued.payload,
+                        queued.attempt,
+                        queued.expires_at,
+                    )
+                )
+                self._queued_keys.add(key)
             except queue.Full:
+                self._outbox.mark_rejected(
+                    key,
+                    attempt=1,
+                    code="runtime_queue_full",
+                    message="Runtime queue was full after durable insertion.",
+                )
                 self._rejected += 1
                 self._connectivity = "error"
                 self._last_error = (
@@ -191,8 +297,29 @@ class UsefulWorkRuntime:
                         self._worker = None
                         return
                 continue
+            requeued = False
             try:
+                if queued.expires_at <= int(time.time()):
+                    if self._outbox is not None:
+                        self._outbox.mark_rejected(
+                            queued.idempotency_key,
+                            attempt=queued.attempt,
+                            code="receipt_expired_before_submission",
+                            message="Receipt expired before a safe settlement retry.",
+                        )
+                    with self._lock:
+                        self._rejected += 1
+                        self._connectivity = "error"
+                        self._last_error = (
+                            "Receipt expired before a safe settlement retry."
+                        )
+                    continue
                 self._post_json("/v1/receipts", queued.payload)
+                if self._outbox is not None:
+                    self._outbox.mark_accepted(
+                        queued.idempotency_key,
+                        attempt=queued.attempt,
+                    )
                 with self._lock:
                     self._accepted += 1
                     self._connectivity = "connected"
@@ -204,20 +331,53 @@ class UsefulWorkRuntime:
                         self._retry_base_seconds * (2 ** (queued.attempt - 1)),
                         self._retry_max_seconds,
                     )
+                    if queued.expires_at <= int(time.time() + delay):
+                        if self._outbox is not None:
+                            self._outbox.mark_rejected(
+                                queued.idempotency_key,
+                                attempt=queued.attempt,
+                                code="receipt_expired_before_retry",
+                                message="Receipt would expire before the next retry.",
+                            )
+                        with self._lock:
+                            self._rejected += 1
+                            self._connectivity = "error"
+                            self._last_error = "Receipt would expire before the next retry."
+                        continue
+                    message = self._retry_message(
+                        exc,
+                        attempt=queued.attempt + 1,
+                        delay=delay,
+                    )
+                    if self._outbox is not None:
+                        self._outbox.mark_retry(
+                            queued.idempotency_key,
+                            attempt=queued.attempt + 1,
+                            message=message,
+                        )
                     with self._lock:
                         self._retry_attempts += 1
                         self._connectivity = "retrying"
-                        self._last_error = self._retry_message(
-                            exc,
-                            attempt=queued.attempt + 1,
-                            delay=delay,
-                        )
+                        self._last_error = message
                     self._sleeper(delay)
                     try:
                         self._queue.put_nowait(
-                            _QueuedSubmission(queued.payload, queued.attempt + 1)
+                            _QueuedSubmission(
+                                queued.idempotency_key,
+                                queued.payload,
+                                queued.attempt + 1,
+                                queued.expires_at,
+                            )
                         )
+                        requeued = True
                     except queue.Full:
+                        if self._outbox is not None:
+                            self._outbox.mark_rejected(
+                                queued.idempotency_key,
+                                attempt=queued.attempt,
+                                code="runtime_retry_queue_full",
+                                message="Runtime retry queue became full.",
+                            )
                         with self._lock:
                             self._rejected += 1
                             self._connectivity = "error"
@@ -226,6 +386,13 @@ class UsefulWorkRuntime:
                                 "not retained."
                             )
                 else:
+                    if self._outbox is not None:
+                        self._outbox.mark_rejected(
+                            queued.idempotency_key,
+                            attempt=queued.attempt,
+                            code="retry_attempts_exhausted",
+                            message=str(exc),
+                        )
                     with self._lock:
                         self._rejected += 1
                         self._connectivity = "error"
@@ -234,11 +401,21 @@ class UsefulWorkRuntime:
                             f"{self._max_submission_attempts} attempts."
                         )
             except Exception as exc:
+                if self._outbox is not None:
+                    self._outbox.mark_rejected(
+                        queued.idempotency_key,
+                        attempt=queued.attempt,
+                        code="permanent_settlement_failure",
+                        message=str(exc),
+                    )
                 with self._lock:
                     self._rejected += 1
                     self._connectivity = "error"
                     self._last_error = str(exc)
             finally:
+                with self._lock:
+                    if not requeued:
+                        self._queued_keys.discard(queued.idempotency_key)
                 self._queue.task_done()
 
     def _retry_message(
@@ -316,13 +493,20 @@ class UsefulWorkRuntime:
         except Exception as exc:
             with self._lock:
                 self._connectivity = (
-                    "retrying" if self._queue.unfinished_tasks > 0 else "error"
+                    "retrying"
+                    if self._outbox is not None and self._outbox.summary()["pending"] > 0
+                    else "error"
                 )
                 self._last_error = f"{exc} {self._connectivity_guidance()}"
             return False
 
     def snapshot(self, *, display_peer_id: str | None = None) -> dict[str, Any]:
         with self._lock:
+            outbox = (
+                self._outbox.summary()
+                if self._outbox is not None
+                else {"pending": 0, "accepted": 0, "rejected": 0}
+            )
             return {
                 "mode": self.config.mode,
                 "protocol_version": 1,
@@ -332,11 +516,16 @@ class UsefulWorkRuntime:
                 "p2p_peer_id": self._peer_id or display_peer_id,
                 "settlement_url_configured": bool(self.config.settlement_url),
                 "settlement_connectivity": self._connectivity,
-                "pending_submissions": self._queue.unfinished_tasks,
+                "pending_submissions": outbox["pending"],
                 "accepted_submissions": self._accepted,
                 "rejected_submissions": self._rejected,
                 "submission_retry_attempts": self._retry_attempts,
                 "submission_max_attempts": self._max_submission_attempts,
+                "outbox_schema_version": 1,
+                "outbox_recovered_submissions": self._outbox_recovered,
+                "outbox_expired_submissions": self._outbox_expired,
+                "outbox_retained_accepted": outbox["accepted"],
+                "outbox_retained_rejected": outbox["rejected"],
                 "last_error": self._last_error,
                 **self._account,
             }

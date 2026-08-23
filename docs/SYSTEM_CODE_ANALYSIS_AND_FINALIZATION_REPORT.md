@@ -268,8 +268,8 @@ Limits:
 - Sybil resistance and independent result verification remain unsolved;
 - no transfer, withdrawal, conversion, or payout system exists;
 - settlement schema upgrades currently require a new database rather than migrations;
-- client submission state was memory-only and discarded temporary connection failures before the 2026-08-19 retry hardening;
-- even after bounded retries, a process restart can lose queued submissions until a durable outbox is implemented.
+- submissions discarded before the 2026-08-19 retry hardening cannot be reconstructed;
+- current submissions use an identity-bound, bounded SQLite outbox, but live two-device restart recovery still requires physical evidence.
 
 ### 4.8 VPS Operations
 
@@ -421,16 +421,16 @@ Required action:
 - advertise the resolved revision in worker metadata;
 - maintain explicit policy allowlists for those immutable revisions.
 
-### Medium 1 - Settlement Outbox Is Not Durable
+### Medium 1 - Settlement Outbox Durability
 
-The 2026-08-19 fix adds bounded retry and exact idempotency, but queued submissions still live only in process memory.
-
-Required action:
-
-- add a local SQLite outbox with states for pending, retrying, accepted, and permanently rejected;
-- recover pending entries after restart;
-- expire entries before the receipt timestamp window;
-- cap disk growth and retain structured rejection reasons.
+Resolved in source on 2026-08-23. The participant now commits canonical signed
+submissions to a private, application-identity-bound SQLite WAL outbox before
+network delivery. Pending and retrying entries recover after restart with their
+stable idempotency key and attempt count. Entries that cannot be retried safely
+inside the receipt timestamp window become permanently rejected with structured
+reasons. Active rows are capacity-limited and terminal history is pruned to a
+configured bound. The remaining gate is physical settlement-outage and restart
+evidence on the two participant devices.
 
 ### Medium 2 - Hivemind Compatibility Depends On Private Internals
 
@@ -567,7 +567,10 @@ The failed attempts in the screenshot occurred while no WSL-side listener/tunnel
 
 ### Remaining Limitation
 
-Retries are still process-local. Restarting the backend discards queued work. The already lost 58 submissions cannot be reconstructed because the old process discarded their signed payloads. Restarting the backend resets those local counters; only new inference after connectivity is restored can produce accepted submissions.
+The already lost 58 submissions cannot be reconstructed because the older
+process discarded their signed payloads before the durable outbox existed.
+New pending submissions survive backend restart, but that recovery still needs
+live two-device outage evidence before settlement rollout is approved.
 
 ### Operator Recovery
 

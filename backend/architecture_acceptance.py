@@ -123,8 +123,14 @@ def validate_architecture_matrix(
         instance_ids.add(instance_id)
         if not str(component.get("failure_domain", "")).strip():
             errors.append(f"Architecture component {index} has no failure domain")
-        if not _valid_hash(component.get("deployment_commit"), 40):
+        deployment_commit = component.get("deployment_commit")
+        if not _valid_hash(deployment_commit, 40):
             errors.append(f"Architecture component {index} has no valid deployment commit")
+        elif _valid_hash(source_commit, 40) and deployment_commit != source_commit:
+            errors.append(
+                f"Architecture component {index} deployment commit does not match "
+                "the reviewed participant source commit"
+            )
         if component.get("service_protocol_version") != 1:
             errors.append(f"Architecture component {index} has an unsupported service protocol")
         if role in REDUNDANT_ROLES and not str(component.get("peer_id", "")).strip():
