@@ -26,7 +26,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `backend/node/block_loader.py`: architecture-aware selective safetensors planning/materialization, strict tensor validation, load-memory diagnostics, and explicit binary-format fallback policy.
 - `backend/node/handler.py`: validated stateless execution plus OPT session-aware cached execution, dtype/device conversion, cleanup, and accounting.
 - `backend/node/session_protocol.py`: fixed-frame version-one open/prefill/decode/close/cancel metadata and exact peer/range targeting.
-- `backend/node/session_cache.py`: bounded provider-owned dynamic key/value caches, process-shared metrics, expiry, eviction, and replay rejection.
+- `backend/node/session_cache.py`: bounded provider-owned dynamic key/value caches, process-shared metrics, expiry, eviction, and exact retained-result recovery.
 - `backend/node/rpc_server.py`: stateless, receipt, and OPT session Hivemind experts with peer-scoped UIDs and bounded shutdown helpers.
 - `backend/node/rpc_safety.py`: typed public-expert limits, pre-execution tensor/metadata validation, bounded admission, cooperative deadline errors, and multiprocessing-safe counters.
 - `backend/node/gpu_monitor.py`: CPU, RAM, GPU, and VRAM sampling.

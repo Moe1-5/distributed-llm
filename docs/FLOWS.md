@@ -168,7 +168,7 @@ Inference page opens /stream WebSocket
   -> sends route trace and completion metrics
 ```
 
-The user can request cancellation between token steps. A session route that fails before dispatch may rebuild once from known token history on a different complete route; an in-flight ambiguous failure stops without replay. Diagnostic endpoints can compare next-token logits/generated output with direct Hugging Face execution and write redacted JSON traces. Monitoring shows session wire bytes, decode latency, provider cache use, evictions, admission rejection, and rebuild count.
+The user can request cancellation between token steps. A session route that fails before dispatch may rebuild once from known token history on a different complete route. An in-flight ambiguous transport reset may reconnect once to the same exact worker with the same operation identity and fingerprint; that worker can return its bounded retained completion without recomputing. Any unavailable or mismatched completion stops without route failover. Diagnostic endpoints can compare next-token logits/generated output with direct Hugging Face execution and write redacted JSON traces. Monitoring shows session wire bytes, decode latency, provider cache use, retained-result recovery, evictions, admission rejection, and rebuild count.
 
 ## 9. Remote Worker Flow
 

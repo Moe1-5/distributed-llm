@@ -520,12 +520,13 @@ class _SessionHandlerModule(nn.Module):
             }
             logger.info(
                 "Session RPC complete | request=%s session=%s operation=%s "
-                "next_position=%s cache_bytes=%s",
+                "next_position=%s cache_bytes=%s retained_replay=%s",
                 operation["request_id"],
                 operation["session_id"],
                 action,
                 session.get("expected_position"),
                 session.get("estimated_bytes"),
+                bool(session.get("operation_replayed")),
             )
             return output, encode_session_metadata(response)
 

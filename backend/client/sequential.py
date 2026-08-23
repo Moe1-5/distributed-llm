@@ -91,6 +91,12 @@ from node.session_protocol import (
  
 logger = get_logger(__name__)
 
+# A retry is allowed only for the exact same operation identity after an
+# ambiguous transport failure. The provider binds that identity to a
+# fingerprint of the original tensors and either returns its retained result
+# or rejects the retry; route failover and broad replays remain forbidden.
+SESSION_AMBIGUOUS_REPLAY_ATTEMPTS = 1
+
 
 class SessionRouteError(RuntimeError):
     """Base error for versioned stateful route operations."""
@@ -101,7 +107,7 @@ class SessionPreDispatchError(SessionRouteError):
 
 
 class SessionAmbiguousError(SessionRouteError):
-    """At least one session expert may have executed; never replay blindly."""
+    """A session operation may have executed but had no verified completion."""
 
     def __init__(self, message: str, *, diagnostic: Optional[dict] = None) -> None:
         super().__init__(message)
@@ -1112,6 +1118,8 @@ class RemoteSequential:
         for hop_index, (node, expert) in enumerate(zip(self._session_route, experts)):
             self._raise_if_cancelled(cancel_event)
             hop_started_at = time.perf_counter()
+            hop_input = current
+            recovery: Optional[dict[str, Any]] = None
             logger.info(
                 "Session hop dispatch | request=%s session=%s operation=%s "
                 "operation_id=%s position=%s tokens=%s hop=%s peer=%s layers=%s-%s",
@@ -1134,50 +1142,118 @@ class RemoteSequential:
                     route_id=self._session_route_id,
                     operation_id=operation_id,
                     position_start=self._session_position,
-                    hidden_states=current,
+                    hidden_states=hop_input,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                 )
             except Exception as exc:
-                elapsed_ms = (time.perf_counter() - hop_started_at) * 1000
-                failure = {
-                    "request_id": self._session_request_id,
-                    "session_id": self._session_id,
-                    "route_id": self._session_route_id,
-                    "operation": operation,
-                    "operation_id": operation_id,
-                    "position_start": self._session_position,
-                    "token_count": token_count,
-                    "hop_index": hop_index + 1,
-                    "hop_count": len(self._session_route),
-                    "peer_id": str(node["peer_id"]),
-                    "rpc_uid": str(node["session_rpc_uid"]),
-                    "layer_start": int(node["layer_start"]),
-                    "layer_end": int(node["layer_end"]),
-                    "input_bytes": initial_bytes,
-                    "elapsed_ms": elapsed_ms,
-                    "failure_class": classify_rpc_error(exc),
-                    "exception_type": type(exc).__name__,
-                    "reason": str(exc),
-                }
-                self._last_session_metrics = {
-                    "operation": operation,
-                    "session_id": self._session_id,
-                    "request_id": self._session_request_id,
-                    "route_id": self._session_route_id,
-                    "position_start": self._session_position,
-                    "token_count": token_count,
-                    "input_bytes": initial_bytes * (hop_index + 1),
-                    "elapsed_ms": (time.perf_counter() - started_at) * 1000,
-                    "hops": hop_metrics,
-                    "route": [dict(route_node) for route_node in self._session_route],
-                    "failure": failure,
-                }
-                raise SessionAmbiguousError(
-                    f"Session {operation} may have executed through hop {hop_index + 1}; "
-                    "automatic replay is suppressed: " + str(exc),
-                    diagnostic=failure,
-                ) from exc
+                failure_class = classify_rpc_error(exc)
+                recovery_error: Optional[Exception] = None
+                if failure_class == "ambiguous_transport":
+                    recovery = {
+                        "policy": "exact_operation_result_replay",
+                        "attempted": True,
+                        "max_attempts": SESSION_AMBIGUOUS_REPLAY_ATTEMPTS,
+                        "initial_exception_type": type(exc).__name__,
+                        "initial_reason": str(exc),
+                    }
+                    try:
+                        # Build a fresh exact-peer RPC client.  Re-use only the
+                        # operation ID and tensor bytes; never replay another
+                        # hop or switch to an alternate route after dispatch.
+                        replay_expert = get_ready_peer_expert(
+                            self.dht,
+                            str(node["session_rpc_uid"]),
+                            str(node["peer_id"]),
+                            rpc_role="session",
+                        )
+                        current, response = self._session_expert_call(
+                            expert=replay_expert,
+                            node=node,
+                            operation=operation,
+                            route_id=self._session_route_id,
+                            operation_id=operation_id,
+                            position_start=self._session_position,
+                            hidden_states=hop_input,
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                        )
+                    except Exception as retry_exc:
+                        recovery_error = retry_exc
+                        recovery.update(
+                            {
+                                "succeeded": False,
+                                "retry_exception_type": type(retry_exc).__name__,
+                                "retry_reason": str(retry_exc),
+                            }
+                        )
+                    else:
+                        recovery.update(
+                            {
+                                "succeeded": True,
+                                "provider_operation_replayed": bool(
+                                    response.get("operation_replayed")
+                                ),
+                            }
+                        )
+                        logger.warning(
+                            "Session hop recovered by exact-operation replay | "
+                            "request=%s session=%s operation=%s operation_id=%s "
+                            "hop=%s peer=%s provider_replayed=%s",
+                            self._session_request_id,
+                            self._session_id,
+                            operation,
+                            operation_id,
+                            hop_index + 1,
+                            str(node["peer_id"]),
+                            recovery["provider_operation_replayed"],
+                        )
+                if recovery is not None and recovery.get("succeeded"):
+                    pass
+                else:
+                    elapsed_ms = (time.perf_counter() - hop_started_at) * 1000
+                    reported_error = recovery_error or exc
+                    failure = {
+                        "request_id": self._session_request_id,
+                        "session_id": self._session_id,
+                        "route_id": self._session_route_id,
+                        "operation": operation,
+                        "operation_id": operation_id,
+                        "position_start": self._session_position,
+                        "token_count": token_count,
+                        "hop_index": hop_index + 1,
+                        "hop_count": len(self._session_route),
+                        "peer_id": str(node["peer_id"]),
+                        "rpc_uid": str(node["session_rpc_uid"]),
+                        "layer_start": int(node["layer_start"]),
+                        "layer_end": int(node["layer_end"]),
+                        "input_bytes": initial_bytes,
+                        "elapsed_ms": elapsed_ms,
+                        "failure_class": failure_class,
+                        "exception_type": type(reported_error).__name__,
+                        "reason": str(reported_error),
+                    }
+                    if recovery is not None:
+                        failure["recovery"] = recovery
+                    self._last_session_metrics = {
+                        "operation": operation,
+                        "session_id": self._session_id,
+                        "request_id": self._session_request_id,
+                        "route_id": self._session_route_id,
+                        "position_start": self._session_position,
+                        "token_count": token_count,
+                        "input_bytes": initial_bytes * (hop_index + 1),
+                        "elapsed_ms": (time.perf_counter() - started_at) * 1000,
+                        "hops": hop_metrics,
+                        "route": [dict(route_node) for route_node in self._session_route],
+                        "failure": failure,
+                    }
+                    raise SessionAmbiguousError(
+                        f"Session {operation} may have executed through hop {hop_index + 1}; "
+                        "exact-operation recovery did not return a verified result: "
+                        + str(reported_error),
+                        diagnostic=failure,
+                    ) from reported_error
             elapsed_ms = (time.perf_counter() - hop_started_at) * 1000
             node_trace.append(
                 f"{str(node['peer_id'])[:8]} ({node['layer_start']}-{node['layer_end']})"
@@ -1192,6 +1268,8 @@ class RemoteSequential:
                     "input_bytes": initial_bytes,
                     "expected_position": response.get("expected_position"),
                     "estimated_cache_bytes": response.get("estimated_bytes"),
+                    "operation_replayed": bool(response.get("operation_replayed")),
+                    "recovery": recovery,
                 }
             )
         self._session_position += token_count

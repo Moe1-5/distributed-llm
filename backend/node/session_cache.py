@@ -7,7 +7,7 @@ import multiprocessing as mp
 import os
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, TypeVar
 
@@ -31,6 +31,9 @@ class SessionCacheConfig:
     max_positions: int = 2048
     ttl_seconds: float = 300.0
     operation_history_limit: int = 128
+    # Zero derives a safe per-session value.  This keeps small test and
+    # development budgets valid while production defaults to sixteen MiB.
+    max_replay_result_bytes: int = 0
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_sessions <= 1024:
@@ -47,6 +50,17 @@ class SessionCacheConfig:
             raise ValueError("session ttl_seconds must be between 5 and 86400")
         if not 8 <= self.operation_history_limit <= 4096:
             raise ValueError("session operation_history_limit must be between 8 and 4096")
+        if self.max_replay_result_bytes == 0:
+            object.__setattr__(
+                self,
+                "max_replay_result_bytes",
+                min(16 * 1024**2, self.max_session_bytes),
+            )
+        if not 1024 <= self.max_replay_result_bytes <= self.max_session_bytes:
+            raise ValueError(
+                "session max_replay_result_bytes must be at least 1024 and no larger than "
+                "max_session_bytes"
+            )
 
     def public_dict(self) -> dict[str, int | float]:
         return {
@@ -56,6 +70,7 @@ class SessionCacheConfig:
             "max_positions": self.max_positions,
             "ttl_seconds": self.ttl_seconds,
             "operation_history_limit": self.operation_history_limit,
+            "max_replay_result_bytes": self.max_replay_result_bytes,
         }
 
 
@@ -72,7 +87,25 @@ class _SessionState:
     active: bool = False
     operation_ids: deque[str] = field(default_factory=deque)
     operation_id_set: set[str] = field(default_factory=set)
+    replay_results: OrderedDict[str, "_RetainedOperationResult"] = field(
+        default_factory=OrderedDict
+    )
+    replay_result_bytes: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@dataclass(frozen=True)
+class _RetainedOperationResult:
+    """A bounded CPU response that makes an ambiguous session RPC idempotent."""
+
+    operation: str
+    position_start: int
+    token_count: int
+    input_bytes: int
+    input_fingerprint: str
+    output: torch.Tensor
+    state: dict[str, Any]
+    output_bytes: int
 
 
 class SessionCacheManager:
@@ -114,6 +147,11 @@ class SessionCacheManager:
                 "evicted_sessions",
                 "admission_rejections",
                 "replay_rejections",
+                "replay_results_served",
+                "replay_result_rejections",
+                "replay_result_evictions",
+                "retained_replay_bytes",
+                "retained_replay_results",
                 "prefill_operations",
                 "decode_operations",
                 "prefill_input_bytes",
@@ -173,12 +211,14 @@ class SessionCacheManager:
         position_start: int,
         token_count: int,
         input_bytes: int,
+        input_fingerprint: str,
         target: Callable[[DynamicCache], T],
     ) -> tuple[T, dict[str, Any]]:
         if operation not in {"prefill", "decode"}:
             raise ValueError("session execution operation must be prefill or decode")
         if token_count <= 0 or input_bytes < 0:
             raise SessionCacheError("invalid_work", "token_count and input_bytes are invalid")
+        self._validate_fingerprint(input_fingerprint)
         now = self.clock()
         with self._lock:
             self._expire_locked(now)
@@ -188,6 +228,25 @@ class SessionCacheManager:
                 current = self._require_owned_locked(session_id, route_id, request_id)
                 if current is not state:
                     raise SessionCacheError("session_replaced", "session ownership changed")
+                retained = state.replay_results.get(operation_id)
+                if retained is not None:
+                    self._validate_retained_operation(
+                        retained,
+                        operation=operation,
+                        position_start=position_start,
+                        token_count=token_count,
+                        input_bytes=input_bytes,
+                        input_fingerprint=input_fingerprint,
+                    )
+                    state.replay_results.move_to_end(operation_id)
+                    state.last_access_at = now
+                    self._increment_metric("replay_results_served")
+                    replay_state = {
+                        **retained.state,
+                        "idempotent_replay": True,
+                        "operation_replayed": True,
+                    }
+                    return retained.output.clone(), replay_state
                 self._remember_operation_locked(state, operation_id, allow_replay=False)
                 if state.active:
                     raise SessionCacheError("session_busy", "another operation owns the session")
@@ -222,6 +281,18 @@ class SessionCacheManager:
                 state.expected_position = new_position
                 state.estimated_bytes = estimated_bytes
                 state.last_access_at = self.clock()
+                response_state = self._state_public(state, idempotent_replay=False)
+                self._retain_operation_result_locked(
+                    state,
+                    operation_id=operation_id,
+                    operation=operation,
+                    position_start=position_start,
+                    token_count=token_count,
+                    input_bytes=input_bytes,
+                    input_fingerprint=input_fingerprint,
+                    result=result,
+                    response_state=response_state,
+                )
                 if operation == "prefill":
                     self._increment_metric("prefill_operations")
                     self._increment_metric("prefill_input_bytes", input_bytes)
@@ -229,7 +300,7 @@ class SessionCacheManager:
                     self._increment_metric("decode_operations")
                     self._increment_metric("decode_input_bytes", input_bytes)
                 self._refresh_shared_usage_locked()
-                return result, self._state_public(state, idempotent_replay=False)
+                return result, response_state
 
     def close(
         self,
@@ -303,7 +374,7 @@ class SessionCacheManager:
         estimated_bytes: int,
         now: float,
     ) -> None:
-        if estimated_bytes > self.config.max_session_bytes:
+        if estimated_bytes + state.replay_result_bytes > self.config.max_session_bytes:
             self._increment_metric("admission_rejections")
             raise SessionCacheError(
                 "session_memory_limit",
@@ -343,7 +414,7 @@ class SessionCacheManager:
 
     def _total_bytes_locked(self, *, exclude: Optional[str] = None) -> int:
         return sum(
-            state.estimated_bytes
+            state.estimated_bytes + state.replay_result_bytes
             for state in self._sessions.values()
             if state.session_id != exclude
         )
@@ -397,6 +468,91 @@ class SessionCacheManager:
         while len(state.operation_ids) > self.config.operation_history_limit:
             removed = state.operation_ids.popleft()
             state.operation_id_set.discard(removed)
+            removed_result = state.replay_results.pop(removed, None)
+            if removed_result is not None:
+                state.replay_result_bytes -= removed_result.output_bytes
+
+    def _retain_operation_result_locked(
+        self,
+        state: _SessionState,
+        *,
+        operation_id: str,
+        operation: str,
+        position_start: int,
+        token_count: int,
+        input_bytes: int,
+        input_fingerprint: str,
+        result: T,
+        response_state: dict[str, Any],
+    ) -> None:
+        """Retain only a small completed tensor result; never retain activation inputs."""
+        if not isinstance(result, torch.Tensor):
+            return
+        output_bytes = result.numel() * result.element_size()
+        if output_bytes > self.config.max_replay_result_bytes:
+            self._increment_metric("replay_result_rejections")
+            return
+        if state.estimated_bytes + output_bytes > self.config.max_session_bytes:
+            self._increment_metric("replay_result_rejections")
+            return
+        while state.replay_result_bytes + output_bytes > self.config.max_replay_result_bytes:
+            _removed_id, removed = state.replay_results.popitem(last=False)
+            state.replay_result_bytes -= removed.output_bytes
+            self._increment_metric("replay_result_evictions")
+        if self._total_bytes_locked() + output_bytes > self.config.max_total_bytes:
+            self._increment_metric("replay_result_rejections")
+            return
+        # Check the source tensor before copying it to CPU: an oversized
+        # response must not create a transient unbounded duplicate.
+        retained_output = result.detach().to(device="cpu").contiguous().clone()
+        state.replay_results[operation_id] = _RetainedOperationResult(
+            operation=operation,
+            position_start=position_start,
+            token_count=token_count,
+            input_bytes=input_bytes,
+            input_fingerprint=input_fingerprint,
+            output=retained_output,
+            state=dict(response_state),
+            output_bytes=output_bytes,
+        )
+        state.replay_result_bytes += output_bytes
+
+    @staticmethod
+    def _validate_retained_operation(
+        retained: _RetainedOperationResult,
+        *,
+        operation: str,
+        position_start: int,
+        token_count: int,
+        input_bytes: int,
+        input_fingerprint: str,
+    ) -> None:
+        if (
+            retained.operation != operation
+            or retained.position_start != position_start
+            or retained.token_count != token_count
+            or retained.input_bytes != input_bytes
+            or retained.input_fingerprint != input_fingerprint
+        ):
+            raise SessionCacheError(
+                "operation_identity_conflict",
+                "operation ID was reused with different session work",
+            )
+
+    @staticmethod
+    def _validate_fingerprint(value: str) -> None:
+        if not isinstance(value, str) or len(value) != 64:
+            raise SessionCacheError(
+                "invalid_fingerprint",
+                "input_fingerprint must be a SHA-256 hexadecimal digest",
+            )
+        try:
+            int(value, 16)
+        except ValueError as exc:
+            raise SessionCacheError(
+                "invalid_fingerprint",
+                "input_fingerprint must be a SHA-256 hexadecimal digest",
+            ) from exc
 
     def _increment_metric(self, name: str, amount: int = 1) -> None:
         metric = self._shared_metrics[name]
@@ -413,6 +569,14 @@ class SessionCacheManager:
         self._set_metric(
             "estimated_cache_bytes",
             sum(state.estimated_bytes for state in self._sessions.values()),
+        )
+        self._set_metric(
+            "retained_replay_bytes",
+            sum(state.replay_result_bytes for state in self._sessions.values()),
+        )
+        self._set_metric(
+            "retained_replay_results",
+            sum(len(state.replay_results) for state in self._sessions.values()),
         )
 
     def _shared_metric_snapshot(self) -> dict[str, int]:
@@ -475,6 +639,8 @@ class SessionCacheManager:
             "last_access_at_monotonic": state.last_access_at,
             "active": state.active,
             "idempotent_replay": idempotent_replay,
+            "retained_replay_bytes": state.replay_result_bytes,
+            "retained_replay_results": len(state.replay_results),
         }
 
 
@@ -514,5 +680,9 @@ def get_session_cache_config() -> SessionCacheConfig:
         operation_history_limit=_env_int(
             "DISTRIBLLM_SESSION_OPERATION_HISTORY",
             128,
+        ),
+        max_replay_result_bytes=_env_int(
+            "DISTRIBLLM_SESSION_MAX_REPLAY_RESULT_BYTES",
+            0,
         ),
     )

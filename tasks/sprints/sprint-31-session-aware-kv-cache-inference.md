@@ -30,6 +30,7 @@ This is a protocol change, not a performance flag. Cache ownership, model semant
 - [x] Send full context only during prefill and only new positions during decode.
 - [x] Add OPT adapter support for remote cached attention state with Hugging Face parity.
 - [x] Define cancellation and ambiguous-outcome semantics for every session operation.
+- [x] Recover one ambiguous transport reset through an exact operation identity and provider-retained result.
 - [x] Rebuild state on a safe alternate from known token history without blind ambiguous replay.
 - [x] Preserve useful-work idempotency by retaining stateless receipt RPC whenever incentives are enabled; signed session receipts remain a future protocol version.
 - [x] Expose prefill/decode bytes, cache use, eviction, first-token time, and per-token timing.
@@ -40,7 +41,7 @@ This is a protocol change, not a performance flag. Cache ownership, model semant
 - Prove decode payload remains bounded as total sequence length grows.
 - Exercise cache admission, expiry, eviction, explicit close, cancellation, worker unload, and backend shutdown.
 - Fail the selected provider before dispatch and rebuild once on an exact healthy alternate.
-- Produce an ambiguous in-flight failure and prove there is no blind replay or duplicate accepted work.
+- Produce an ambiguous in-flight failure and prove an exact one-time replay returns the provider-retained result without duplicate accepted work.
 - Run local real-Hivemind and physical relayed session generation with request-correlated evidence.
 
 ## Acceptance Criteria
@@ -49,7 +50,7 @@ This is a protocol change, not a performance flag. Cache ownership, model semant
 - [x] Decode traffic no longer grows with the full accumulated sequence.
 - [x] Cache memory and concurrency are bounded and observable.
 - [x] Cancellation, timeout, unload, and peer loss have bounded release through cancel, runtime expiry, and shutdown cleanup.
-- [x] Safe alternate recovery rebuilds once; ambiguous execution never triggers blind replay.
+- [x] Safe alternate recovery rebuilds once; ambiguous execution never changes route or replays blindly. One reset may retry the exact fingerprint-bound operation once when the provider can return its retained completion.
 - [ ] One real two-device relayed session completes with correlated prefill and decode evidence.
 
 ## Physical Test Gate
@@ -63,8 +64,8 @@ Run this only after both devices and the VPS use the same committed source and t
 5. Start inference on device one and generate at least eight tokens. Record the first-token result and keep both applications running.
 6. In Monitoring, verify `Session Protocol v1`, one prefill, one-position decode activity, non-growing decode wire bytes, and provider session cache counters. Export diagnostics from both devices immediately after the request.
 7. Repeat with device two as generator and device one still serving its half. Export diagnostics again.
-8. For failure recovery, add a fully disjoint standby route, stop one active provider before a decode dispatch, and verify exactly one `rebuilt_from_known_history` event. Do not repeat an ambiguous stream-reset request automatically.
-9. Save the device-one, device-two, and VPS logs under one test identifier. A pass requires a complete response in both generator directions, matching exact peers and ranges, no ambiguous replay, and zero active provider sessions after close.
+8. For failure recovery, add a fully disjoint standby route, stop one active provider before a decode dispatch, and verify exactly one `rebuilt_from_known_history` event. For an ambiguous reset, verify at most one `exact_operation_result_replay` on the same peer, same range, same operation ID, and no duplicate provider token positions.
+9. Save the device-one, device-two, and VPS logs under one test identifier. A pass requires a complete response in both generator directions, matching exact peers and ranges, any recovery to be exact-operation-only, and zero active provider sessions after close.
 
 ---
 
@@ -91,3 +92,10 @@ Run this only after both devices and the VPS use the same committed source and t
 - What changed: added an acceptance validator mode that requires a minimum generated-token count and preserves and validates session protocol version, prefill bytes and duration, decode bytes, duration, average latency and call count, peak provider cache bytes, and rebuild count; made the final architecture manifest require this session evidence in the hash-bound incentives-off relay report.
 - Why: diagnostics captured the session fields, but the prior combined report discarded them and allowed the Sprint 31 topology gate to rely only on an operator-entered matrix hash.
 - Status: twenty-two focused evidence and manifest tests and all 451 backend tests pass. The validator now rejects missing or invalid session metrics; a real two-device relayed session is still required before this sprint can close.
+
+### 2026-08-24 - Add bounded idempotent session-operation recovery
+
+- What changed: each provider retains a bounded CPU copy of a completed prefill or decode result together with its operation, route, position, byte count, and SHA-256 input fingerprint. After only an ambiguous transport reset, the generator creates one fresh exact-peer RPC client and retries the same operation identifier and same tensors once.
+- Safety: the retry cannot select another provider, another layer range, a new operation identifier, a changed tensor, or an unbounded number of attempts. A provider returns the retained completion without running model layers again; mismatched identity, expired cache, oversized retained result, and any retry failure remain terminal and visible in diagnostics. Replay responses do not increment served-request or token-position accounting twice.
+- Observability: session metrics now expose retained-result bytes/count, served retained results, retention rejection/eviction, per-hop recovery metadata, and whether a provider returned a retained operation.
+- Verification: 33 focused session and coverage-serving tests pass, including completed-response loss followed by exact retained-result recovery, input-identity conflict rejection, cache limits, and no duplicate worker accounting. Two-device relayed acceptance remains the release gate.

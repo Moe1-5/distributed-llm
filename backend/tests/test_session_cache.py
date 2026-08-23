@@ -164,14 +164,14 @@ class SessionCacheManagerTests(unittest.TestCase):
             position_start=position,
             token_count=1,
             input_bytes=64,
+            input_fingerprint="a" * 64,
             target=lambda _cache: torch.zeros((1, 1, 8)),
         )
 
     def test_admission_eviction_expiry_close_and_replay_are_bounded(self) -> None:
         self.open("one")
         self.execute("one", "prefill-one", 0)
-        with self.assertRaisesRegex(SessionCacheError, "already applied"):
-            self.execute("one", "prefill-one", 1)
+        self.execute("one", "prefill-one", 0)
 
         self.clock.advance(1)
         self.open("two")
@@ -180,7 +180,7 @@ class SessionCacheManagerTests(unittest.TestCase):
         snapshot = self.manager.snapshot()
         self.assertEqual(snapshot["active_sessions"], 2)
         self.assertEqual(snapshot["evicted_sessions"], 1)
-        self.assertEqual(snapshot["replay_rejections"], 1)
+        self.assertEqual(snapshot["replay_results_served"], 1)
 
         self.clock.advance(5)
         snapshot = self.manager.snapshot()
@@ -216,12 +216,111 @@ class SessionCacheManagerTests(unittest.TestCase):
                 position_start=0,
                 token_count=32,
                 input_bytes=1024,
+                input_fingerprint="b" * 64,
                 target=target,
             )
         self.assertFalse(executed)
 
+    def test_retained_result_is_exactly_idempotent_and_binds_input_identity(self) -> None:
+        self.open("replay")
+        executions = 0
+
+        def target(_cache):
+            nonlocal executions
+            executions += 1
+            return torch.full((1, 1, 8), 7.0)
+
+        first, first_state = self.manager.execute(
+            session_id="replay",
+            route_id="route-replay",
+            request_id="request-replay",
+            operation_id="prefill-replay",
+            operation="prefill",
+            position_start=0,
+            token_count=1,
+            input_bytes=64,
+            input_fingerprint="c" * 64,
+            target=target,
+        )
+        replay, replay_state = self.manager.execute(
+            session_id="replay",
+            route_id="route-replay",
+            request_id="request-replay",
+            operation_id="prefill-replay",
+            operation="prefill",
+            position_start=0,
+            token_count=1,
+            input_bytes=64,
+            input_fingerprint="c" * 64,
+            target=lambda _cache: self.fail("retained operation must not recompute"),
+        )
+
+        self.assertEqual(executions, 1)
+        self.assertTrue(torch.equal(first, replay))
+        self.assertFalse(first_state["idempotent_replay"])
+        self.assertTrue(replay_state["idempotent_replay"])
+        self.assertTrue(replay_state["operation_replayed"])
+        self.assertEqual(self.manager.snapshot()["retained_replay_results"], 1)
+        with self.assertRaisesRegex(SessionCacheError, "different session work"):
+            self.manager.execute(
+                session_id="replay",
+                route_id="route-replay",
+                request_id="request-replay",
+                operation_id="prefill-replay",
+                operation="prefill",
+                position_start=0,
+                token_count=1,
+                input_bytes=64,
+                input_fingerprint="d" * 64,
+                target=target,
+            )
+
 
 class OPTSessionParityTests(unittest.TestCase):
+    def test_handler_replay_does_not_double_count_completed_work(self) -> None:
+        handler = tiny_opt_handler()
+        hidden_states = torch.randn((1, 2, 16))
+        attention_mask = torch.ones((1, 2), dtype=torch.bool)
+        position_ids = torch.arange(2).unsqueeze(0)
+        handler.session_open(
+            session_id="session-accounting",
+            route_id="route-accounting",
+            request_id="request-accounting",
+            operation_id="open-accounting",
+        )
+        first, first_session = handler.session_forward(
+            operation="prefill",
+            session_id="session-accounting",
+            route_id="route-accounting",
+            request_id="request-accounting",
+            operation_id="prefill-accounting",
+            position_start=0,
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
+        accounting_after_first = handler.get_accounting_snapshot()
+        replay, replay_session = handler.session_forward(
+            operation="prefill",
+            session_id="session-accounting",
+            route_id="route-accounting",
+            request_id="request-accounting",
+            operation_id="prefill-accounting",
+            position_start=0,
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
+
+        self.assertTrue(torch.equal(first, replay))
+        self.assertFalse(first_session.get("operation_replayed", False))
+        self.assertTrue(replay_session["operation_replayed"])
+        self.assertEqual(handler.get_accounting_snapshot(), accounting_after_first)
+        self.assertEqual(
+            handler.get_session_cache_snapshot()["replay_results_served"],
+            1,
+        )
+
     def test_cached_prefill_decode_matches_stateless_last_position(self) -> None:
         handler = tiny_opt_handler()
         hidden_states = torch.randn((1, 4, 16))
@@ -442,10 +541,18 @@ class RealHivemindSessionRPCTests(unittest.TestCase):
 
 
 class FakeSessionExpert:
-    def __init__(self, *, fail_forward: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_forward: bool = False,
+        lose_completed_response_once: bool = False,
+    ) -> None:
         self.fail_forward = fail_forward
+        self.lose_completed_response_once = lose_completed_response_once
         self.calls: list[dict] = []
         self.expected_position = 0
+        self._retained_responses: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self.replayed_operation_ids: list[str] = []
 
     def forward(
         self,
@@ -458,6 +565,11 @@ class FakeSessionExpert:
         if self.fail_forward:
             raise RuntimeError("stream reset after dispatch")
         document = decode_session_metadata(metadata)
+        retained = self._retained_responses.get(document["operation_id"])
+        if retained is not None:
+            self.replayed_operation_ids.append(document["operation_id"])
+            result, retained_metadata = retained
+            return result.clone(), retained_metadata.clone()
         self.calls.append(
             {
                 "operation": document["operation"],
@@ -480,7 +592,24 @@ class FakeSessionExpert:
                 "estimated_bytes": self.expected_position * 128,
             },
         }
-        return hidden_states + (1 if operation in {"prefill", "decode"} else 0), encode_session_metadata(response)
+        result = hidden_states + (1 if operation in {"prefill", "decode"} else 0)
+        response_metadata = encode_session_metadata(response)
+        if self.lose_completed_response_once and operation in {"prefill", "decode"}:
+            self.lose_completed_response_once = False
+            replay_response = {
+                **response,
+                "session": {
+                    **response["session"],
+                    "idempotent_replay": True,
+                    "operation_replayed": True,
+                },
+            }
+            self._retained_responses[document["operation_id"]] = (
+                result.clone(),
+                encode_session_metadata(replay_response),
+            )
+            raise RuntimeError("stream reset after dispatch")
+        return result, response_metadata
 
     def assert_position(self, document: dict) -> None:
         if int(document["position_start"]) != self.expected_position:
@@ -612,8 +741,38 @@ class RemoteSequentialSessionTests(unittest.TestCase):
         self.assertEqual(diagnostic["peer_id"], "peer-two")
         self.assertEqual(diagnostic["failure_class"], "ambiguous_transport")
         self.assertEqual(metrics["failure"], diagnostic)
+        self.assertTrue(diagnostic["recovery"]["attempted"])
+        self.assertFalse(diagnostic["recovery"]["succeeded"])
         self.assertEqual(len(metrics["hops"]), 1)
         self.assertEqual(metrics["hops"][0]["peer_id"], "peer-one")
+
+    def test_ambiguous_reset_retries_the_exact_operation_and_uses_retained_result(self) -> None:
+        experts = {
+            "peer-one": FakeSessionExpert(),
+            "peer-two": FakeSessionExpert(lose_completed_response_once=True),
+        }
+
+        def resolve(_dht, _uid, peer_id, rpc_role="normal"):
+            self.assertEqual(rpc_role, "session")
+            return experts[peer_id]
+
+        self.sequential.start_session("session-idempotent-replay")
+        with patch("client.sequential.get_ready_peer_expert", side_effect=resolve):
+            self.sequential.open_remote_session(16)
+            output, _trace = self.sequential.session_forward(
+                torch.zeros((1, 2, 16)),
+                operation="prefill",
+                attention_mask=torch.ones((1, 2), dtype=torch.bool),
+                position_ids=torch.arange(2).unsqueeze(0),
+            )
+
+        metrics = self.sequential.get_last_session_metrics()
+        self.assertTrue(torch.equal(output, torch.full_like(output, 2)))
+        self.assertEqual(experts["peer-one"].expected_position, 2)
+        self.assertEqual(experts["peer-two"].expected_position, 2)
+        self.assertEqual(len(experts["peer-two"].replayed_operation_ids), 1)
+        self.assertTrue(metrics["hops"][1]["recovery"]["succeeded"])
+        self.assertTrue(metrics["hops"][1]["recovery"]["provider_operation_replayed"])
 
     def test_rebuild_closes_old_route_and_prefills_a_different_route(self) -> None:
         alternate = [

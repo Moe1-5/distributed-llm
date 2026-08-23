@@ -4,6 +4,7 @@ Loads transformer layers and handles forward pass requests.
 Thread-safe — multiple requests queue via a lock.
 """
 
+import hashlib
 import threading
 import time
 from typing import Optional
@@ -18,6 +19,20 @@ from node.rpc_safety import RPCExecutionTimeout
 from node.session_cache import SessionCacheManager
 
 logger = get_logger(__name__)
+
+
+def _session_input_fingerprint(*values: Optional[torch.Tensor]) -> str:
+    """Bind an idempotent operation ID to its exact tensor inputs without retaining them."""
+    digest = hashlib.sha256()
+    for value in values:
+        if value is None:
+            digest.update(b"none\0")
+            continue
+        tensor = value.detach().to(device="cpu").contiguous()
+        digest.update(str(tensor.dtype).encode("ascii"))
+        digest.update(repr(tuple(tensor.shape)).encode("ascii"))
+        digest.update(tensor.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
 
 
 class InferenceHandler:
@@ -241,6 +256,11 @@ class InferenceHandler:
             for value in (hidden_states, attention_mask, position_ids)
             if value is not None
         )
+        input_fingerprint = _session_input_fingerprint(
+            hidden_states,
+            attention_mask,
+            position_ids,
+        )
 
         def execute(cache: DynamicCache) -> torch.Tensor:
             return self._forward_with_cache(
@@ -263,6 +283,7 @@ class InferenceHandler:
                 position_start=position_start,
                 token_count=int(hidden_states.shape[1]),
                 input_bytes=input_bytes,
+                input_fingerprint=input_fingerprint,
                 target=execute,
             )
         except Exception:
@@ -272,11 +293,20 @@ class InferenceHandler:
                 latency_ms=(time.perf_counter() - started_at) * 1000,
             )
             raise
-        self._record_accounting(
-            success=True,
-            token_positions=int(hidden_states.shape[1]),
-            latency_ms=(time.perf_counter() - started_at) * 1000,
-        )
+        if bool(session.get("operation_replayed")):
+            logger.info(
+                "Session operation returned retained result | session=%s operation=%s "
+                "operation_id=%s",
+                session_id,
+                operation,
+                operation_id,
+            )
+        else:
+            self._record_accounting(
+                success=True,
+                token_positions=int(hidden_states.shape[1]),
+                latency_ms=(time.perf_counter() - started_at) * 1000,
+            )
         return output, session
 
     def session_close(
