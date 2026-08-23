@@ -6,6 +6,7 @@ import threading
 from types import SimpleNamespace
 import unittest
 
+import httpx
 from fastapi import HTTPException
 
 from incentives.access import (
@@ -631,6 +632,80 @@ class ApiAccessTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 403)
         api_server._require_local_management_origin(
             SimpleNamespace(headers={"origin": "http://localhost:5173"})
+        )
+
+    def test_backend_browser_origin_allowlist_is_exact(self) -> None:
+        from api import server as api_server
+
+        self.assertTrue(api_server._browser_origin_is_allowed(None))
+        self.assertTrue(
+            api_server._browser_origin_is_allowed("distribllm://app")
+        )
+        self.assertFalse(api_server._browser_origin_is_allowed("null"))
+        self.assertTrue(
+            api_server._browser_origin_is_allowed("http://localhost:5173")
+        )
+        self.assertFalse(
+            api_server._browser_origin_is_allowed("http://localhost:5174")
+        )
+        self.assertFalse(
+            api_server._browser_origin_is_allowed("https://example.com")
+        )
+
+    def test_backend_management_bind_is_loopback_only(self) -> None:
+        from main import validate_backend_host
+
+        self.assertEqual(validate_backend_host("127.0.0.1"), "127.0.0.1")
+        self.assertEqual(validate_backend_host("::1"), "::1")
+        self.assertEqual(validate_backend_host("localhost"), "localhost")
+        with self.assertRaisesRegex(ValueError, "authenticated TLS gateway"):
+            validate_backend_host("0.0.0.0")
+
+    def test_http_origin_guard_rejects_foreign_pages_before_routing(self) -> None:
+        from api import server as api_server
+
+        async def request():
+            transport = httpx.ASGITransport(app=api_server.app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return await client.get(
+                    "/status",
+                    headers={"Origin": "https://example.com"},
+                )
+
+        response = asyncio.run(request())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json()["detail"]["error"],
+            "untrusted_browser_origin",
+        )
+
+    def test_cors_preflight_allows_only_packaged_origin(self) -> None:
+        from api import server as api_server
+
+        async def request():
+            transport = httpx.ASGITransport(app=api_server.app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return await client.options(
+                    "/status",
+                    headers={
+                        "Origin": "distribllm://app",
+                        "Access-Control-Request-Method": "GET",
+                    },
+                )
+
+        response = asyncio.run(request())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["access-control-allow-origin"],
+            "distribllm://app",
         )
 
 

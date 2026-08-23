@@ -69,6 +69,7 @@
 | Serving-plan freshness policy             | `frontend/src/renderer/src/api/servingPlanState.ts` |
 | Model and runtime presentation contract   | `frontend/src/renderer/src/api/presentationState.ts` |
 | Packaged executable identity capture      | `frontend/src/main/artifactIdentity.ts`   |
+| Electron renderer, navigation, and CSP trust policy | `frontend/src/main/securityPolicy.ts` |
 | Independent renderer refresh primitive    | `frontend/src/renderer/src/api/independentRefresh.ts` |
 | Renderer partial-state, diagnostics, and serving-plan freshness tests | `frontend/tests/independentRefresh.test.ts` |
 | Renderer partial-state test runner         | `frontend/scripts/test-renderer-flow.mjs`  |

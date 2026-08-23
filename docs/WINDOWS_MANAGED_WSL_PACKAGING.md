@@ -142,6 +142,14 @@ Diagnostic mapping:
 
 `npm run test:launcher` exercises configuration validation, WSL output parsing, shell quoting, missing prerequisites, process launch, health readiness, port conflict, and safe stop/restart behavior. `npm run audit:win-package` inspects the generated ASAR and rejects environment files, archives, model state, traces, tokens, identities, and receipts. The portable artifact is generated output under `frontend/dist` and is not committed.
 
+The packaged renderer runs from the privileged `distribllm://app` scheme with a
+path-confined asset resolver. Chromium sandboxing, context isolation, and web
+security remain enabled; renderer Node integration and the generic Electron
+preload API are disabled. CSP allows network connections only to loopback HTTP
+and WebSocket endpoints, and backend CORS accepts only the packaged origin plus
+explicit loopback development origins. IPC sender validation and navigation
+policy prevent an unrelated page from invoking managed-backend actions.
+
 The Settings page can export a versioned JSON acceptance report after a launcher lifecycle. Schema version three contains application metadata, the tracked-clean WSL backend commit, non-secret configuration counts, sanitized launcher state transitions, diagnostic codes, and boolean checks. It deliberately excludes the backend path, peer and relay addresses, process output, model data, tokens, identities, receipts, and local usernames.
 
 The report passes only when one unchanged configuration has completed all of these checks:

@@ -1,4 +1,3 @@
-import { ElectronAPI } from '@electron-toolkit/preload'
 import type {
   AcceptanceReportExportResult,
   BackendLauncherConfig,
@@ -20,7 +19,6 @@ export interface DistribLLMAPI {
 
 declare global {
   interface Window {
-    electron: ElectronAPI
     api: DistribLLMAPI
   }
 }

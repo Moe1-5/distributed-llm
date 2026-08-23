@@ -27,7 +27,7 @@ import hivemind
 import torch
 from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from huggingface_hub import HfApi
 from huggingface_hub.errors import (
     GatedRepoError,
@@ -2340,11 +2340,65 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+def _configured_browser_origins() -> tuple[str, ...]:
+    raw = os.environ.get(
+        "DISTRIBLLM_ALLOWED_BROWSER_ORIGINS",
+        "distribllm://app,http://localhost:5173,http://127.0.0.1:5173",
+    )
+    origins = tuple(
+        dict.fromkeys(value.strip() for value in raw.split(",") if value.strip())
+    )
+    if not origins:
+        raise ValueError("DISTRIBLLM_ALLOWED_BROWSER_ORIGINS must not be empty")
+    for origin in origins:
+        if origin == "distribllm://app":
+            continue
+        parsed = urlparse(origin)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+            or parsed.username
+            or parsed.password
+            or parsed.path not in {"", "/"}
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "DISTRIBLLM_ALLOWED_BROWSER_ORIGINS must contain only the exact "
+                "packaged distribllm://app origin or exact loopback HTTP(S) origins"
+            )
+    return origins
+
+
+ALLOWED_BROWSER_ORIGINS = _configured_browser_origins()
+
+
+def _browser_origin_is_allowed(origin: str | None) -> bool:
+    return origin is None or origin in ALLOWED_BROWSER_ORIGINS
+
+
+@app.middleware("http")
+async def reject_untrusted_browser_origin(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if not _browser_origin_is_allowed(origin):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": {
+                    "error": "untrusted_browser_origin",
+                    "message": "The browser origin is not allowed to manage this backend.",
+                }
+            },
+        )
+    return await call_next(request)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=list(ALLOWED_BROWSER_ORIGINS),
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -3465,14 +3519,7 @@ async def _verified_credit_snapshot() -> dict:
 
 def _require_local_management_origin(request: Request) -> None:
     origin = request.headers.get("origin")
-    if origin is None or origin in {"null", "file://"}:
-        return
-    parsed = urlparse(origin)
-    if parsed.scheme in {"http", "https"} and parsed.hostname in {
-        "localhost",
-        "127.0.0.1",
-        "::1",
-    }:
+    if _browser_origin_is_allowed(origin):
         return
     raise HTTPException(
         status_code=403,
@@ -5934,6 +5981,9 @@ def _record_generation_failure(
 
 @app.websocket("/stream")
 async def stream(websocket: WebSocket) -> None:
+    if not _browser_origin_is_allowed(websocket.headers.get("origin")):
+        await websocket.close(code=1008, reason="Untrusted browser origin")
+        return
     await websocket.accept()
     logger.info(f"WebSocket connected: {websocket.client}")
     try:

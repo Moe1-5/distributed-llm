@@ -1,9 +1,10 @@
-import { app, shell, BrowserWindow, ipcMain, session, dialog } from 'electron'
-import type { OpenDialogOptions, SaveDialogOptions } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, net, protocol } from 'electron'
+import type { IpcMainInvokeEvent, OpenDialogOptions, SaveDialogOptions } from 'electron'
 import { execFile, spawn } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { mkdir, readFile, rename, writeFile } from 'fs/promises'
 import { basename, join } from 'path'
+import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import {
@@ -19,16 +20,34 @@ import {
   resolvePackagedArtifactPath,
   type ArtifactIdentity
 } from './artifactIdentity'
+import {
+  isTrustedExternalUrl,
+  isTrustedRendererUrl,
+  resolveRendererAssetPath
+} from './securityPolicy'
 
 declare const __DISTRIBLLM_SOURCE_COMMIT__: string
 declare const __DISTRIBLLM_SOURCE_DIRTY__: boolean
+
+const PACKAGED_RENDERER_URL = 'distribllm://app/index.html'
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'distribllm',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true
+    }
+  }
+])
 
 // Fix WSL GPU process errors — disable GPU rendering in WSL
 // since WSL doesn't have proper GPU access for Chromium rendering
 app.commandLine.appendSwitch('disable-gpu')
 app.commandLine.appendSwitch('disable-gpu-compositing')
 app.commandLine.appendSwitch('disable-software-rasterizer')
-app.commandLine.appendSwitch('no-sandbox')
 app.commandLine.appendSwitch('disable-dev-shm-usage')
 
 function isWsl(): boolean {
@@ -130,6 +149,27 @@ async function saveBackendConfig(config: BackendLauncherConfig): Promise<void> {
 let backendLauncher: WslBackendLauncher | null = null
 let appShutdownStarted = false
 
+function packagedRendererUrl(): string {
+  return PACKAGED_RENDERER_URL
+}
+
+function installPackagedRendererProtocol(): void {
+  const rendererRoot = join(__dirname, '../renderer')
+  protocol.handle('distribllm', (request) => {
+    const target = resolveRendererAssetPath(rendererRoot, request.url)
+    if (!target) return new Response('Not found', { status: 404 })
+    return net.fetch(pathToFileURL(target).toString())
+  })
+}
+
+function assertTrustedIpcSender(event: IpcMainInvokeEvent): void {
+  const senderUrl = event.senderFrame?.url ?? ''
+  const developmentUrl = is.dev ? process.env['ELECTRON_RENDERER_URL'] : undefined
+  if (!isTrustedRendererUrl(senderUrl, packagedRendererUrl(), developmentUrl)) {
+    throw new Error('IPC request rejected from an untrusted renderer.')
+  }
+}
+
 function broadcastBackendStatus(): void {
   if (!backendLauncher) return
   const status = backendLauncher.getStatus()
@@ -149,9 +189,10 @@ function createWindow(): void {
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
-      // Allow renderer to make requests to localhost backend
-      webSecurity: false
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true
     }
   })
 
@@ -161,21 +202,33 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url).catch((error) => {
-      console.warn(`Failed to open external URL ${details.url}:`, error)
-    })
+    if (isTrustedExternalUrl(details.url)) {
+      shell.openExternal(details.url).catch((error) => {
+        console.warn(`Failed to open external URL ${details.url}:`, error)
+      })
+    }
     return { action: 'deny' }
+  })
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const developmentUrl = is.dev ? process.env['ELECTRON_RENDERER_URL'] : undefined
+    if (!isTrustedRendererUrl(url, packagedRendererUrl(), developmentUrl)) {
+      event.preventDefault()
+    }
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    mainWindow.loadURL(PACKAGED_RENDERER_URL)
   }
 }
 
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.electron')
+  if (!is.dev || !process.env['ELECTRON_RENDERER_URL']) {
+    installPackagedRendererProtocol()
+  }
 
   const backendConfig = await loadBackendConfig()
   const expectedBackendSourceCommit =
@@ -191,17 +244,34 @@ app.whenReady().then(async () => {
   )
   backendLauncher.on('status', broadcastBackendStatus)
 
-  ipcMain.handle('backend-launcher:get-status', () => backendLauncher?.getStatus())
-  ipcMain.handle('backend-launcher:get-config', () => backendLauncher?.getConfig())
-  ipcMain.handle('backend-launcher:save-config', async (_event, config: BackendLauncherConfig) => {
+  ipcMain.handle('backend-launcher:get-status', (event) => {
+    assertTrustedIpcSender(event)
+    return backendLauncher?.getStatus()
+  })
+  ipcMain.handle('backend-launcher:get-config', (event) => {
+    assertTrustedIpcSender(event)
+    return backendLauncher?.getConfig()
+  })
+  ipcMain.handle('backend-launcher:save-config', async (event, config: BackendLauncherConfig) => {
+    assertTrustedIpcSender(event)
     await saveBackendConfig(config)
     backendLauncher?.setConfig(config)
     return backendLauncher?.getConfig()
   })
-  ipcMain.handle('backend-launcher:start', () => backendLauncher?.start())
-  ipcMain.handle('backend-launcher:stop', () => backendLauncher?.stop())
-  ipcMain.handle('backend-launcher:restart', () => backendLauncher?.restart())
+  ipcMain.handle('backend-launcher:start', (event) => {
+    assertTrustedIpcSender(event)
+    return backendLauncher?.start()
+  })
+  ipcMain.handle('backend-launcher:stop', (event) => {
+    assertTrustedIpcSender(event)
+    return backendLauncher?.stop()
+  })
+  ipcMain.handle('backend-launcher:restart', (event) => {
+    assertTrustedIpcSender(event)
+    return backendLauncher?.restart()
+  })
   ipcMain.handle('backend-launcher:export-acceptance-report', async (event) => {
+    assertTrustedIpcSender(event)
     if (!backendLauncher) throw new Error('Managed backend launcher is unavailable.')
 
     const parentWindow = BrowserWindow.fromWebContents(event.sender)
@@ -248,6 +318,7 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('select-local-model-directory', async (event) => {
+    assertTrustedIpcSender(event)
     const parentWindow = BrowserWindow.fromWebContents(event.sender)
     const options: OpenDialogOptions = {
       title: 'Select downloaded model folder',
@@ -260,10 +331,9 @@ app.whenReady().then(async () => {
     return result.filePaths[0] ?? null
   })
 
-  ipcMain.handle('open-external-url', async (_event, url: string) => {
-    const parsed = new URL(url)
-    const allowedHosts = new Set(['huggingface.co', 'hf.co'])
-    if (parsed.protocol !== 'https:' || !allowedHosts.has(parsed.hostname)) {
+  ipcMain.handle('open-external-url', async (event, url: string) => {
+    assertTrustedIpcSender(event)
+    if (!isTrustedExternalUrl(url)) {
       throw new Error('Only Hugging Face URLs can be opened from this action.')
     }
     try {
@@ -275,36 +345,9 @@ app.whenReady().then(async () => {
     }
   })
 
-  // Allow all requests to localhost — needed for FastAPI backend
-  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
-    callback({
-      requestHeaders: {
-        ...details.requestHeaders,
-        Origin: 'http://localhost'
-      }
-    })
-  })
-
-  // Allow CORS responses from localhost backend
-  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Content-Security-Policy': [
-          "default-src 'self'; connect-src 'self' http://127.0.0.1:8000 ws://127.0.0.1:8000 http://localhost:8000 ws://localhost:8000; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'"
-        ],
-        'Access-Control-Allow-Origin': ['*'],
-        'Access-Control-Allow-Headers': ['*'],
-        'Access-Control-Allow-Methods': ['*']
-      }
-    })
-  })
-
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
-
-  ipcMain.on('ping', () => console.log('pong'))
 
   createWindow()
 

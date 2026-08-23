@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -26,6 +26,11 @@ import {
   type WindowsAcceptanceApplication
 } from '../src/main/backendLauncher'
 import { readArtifactIdentity, resolvePackagedArtifactPath } from '../src/main/artifactIdentity'
+import {
+  isTrustedExternalUrl,
+  isTrustedRendererUrl,
+  resolveRendererAssetPath
+} from '../src/main/securityPolicy'
 
 const TEST_COMMIT = 'a'.repeat(40)
 const TEST_ARTIFACT_SHA256 = 'b'.repeat(64)
@@ -159,6 +164,44 @@ test('hashes the selected packaged artifact without exposing its path', async ()
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('renderer trust is exact for packaged files and development origins', () => {
+  const packaged = 'distribllm://app/index.html'
+
+  assert.equal(isTrustedRendererUrl(packaged, packaged), true)
+  assert.equal(isTrustedRendererUrl(`${packaged}#injected`, packaged), false)
+  assert.equal(isTrustedRendererUrl('file:///tmp/attacker.html', packaged), false)
+  assert.equal(isTrustedRendererUrl('distribllm://evil/index.html', packaged), false)
+  assert.equal(
+    isTrustedRendererUrl('http://localhost:5173/settings', packaged, 'http://localhost:5173'),
+    true
+  )
+  assert.equal(
+    isTrustedRendererUrl('http://localhost:5174/settings', packaged, 'http://localhost:5173'),
+    false
+  )
+})
+
+test('packaged renderer protocol rejects host confusion and path traversal', () => {
+  const root = '/opt/distribllm/renderer'
+
+  assert.equal(
+    resolveRendererAssetPath(root, 'distribllm://app/assets/index.js'),
+    '/opt/distribllm/renderer/assets/index.js'
+  )
+  assert.equal(resolveRendererAssetPath(root, 'distribllm://app/%2e%2e/secret.txt'), null)
+  assert.equal(resolveRendererAssetPath(root, 'distribllm://attacker/assets/index.js'), null)
+})
+
+test('external navigation and CSP stay scoped to reviewed destinations', async () => {
+  assert.equal(isTrustedExternalUrl('https://huggingface.co/facebook/opt-125m'), true)
+  assert.equal(isTrustedExternalUrl('https://hf.co/model'), true)
+  assert.equal(isTrustedExternalUrl('http://huggingface.co/model'), false)
+  assert.equal(isTrustedExternalUrl('https://huggingface.co.evil.example/model'), false)
+  const rendererHtml = await readFile('src/renderer/index.html', 'utf8')
+  assert.doesNotMatch(rendererHtml, /unsafe-eval|script-src[^;]*unsafe-inline/)
+  assert.match(rendererHtml, /object-src 'none'/)
 })
 
 test('requires a safe local backend configuration', () => {

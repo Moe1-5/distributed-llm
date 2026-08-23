@@ -8,7 +8,24 @@ Usage:
 """
 
 import argparse
+import ipaddress
 import uvicorn
+
+
+def validate_backend_host(host: str) -> str:
+    """Reject network-exposed management binds until authenticated TLS exists."""
+    normalized = host.strip().lower()
+    if normalized == "localhost":
+        return normalized
+    try:
+        if ipaddress.ip_address(normalized).is_loopback:
+            return normalized
+    except ValueError:
+        pass
+    raise ValueError(
+        "DistribLLM management API must bind to localhost or a loopback IP; "
+        "non-loopback operation requires a separately authenticated TLS gateway"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,6 +38,7 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
+    args.host = validate_backend_host(args.host)
     print(f"Starting DistribLLM backend on {args.host}:{args.port}")
 
     uvicorn.run(
@@ -31,4 +49,3 @@ if __name__ == "__main__":
         log_level="info",
         timeout_graceful_shutdown=5,
     )
-

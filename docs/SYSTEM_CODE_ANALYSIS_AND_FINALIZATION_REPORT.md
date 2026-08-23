@@ -331,35 +331,25 @@ API tests now use an in-loop HTTPX ASGI transport because Starlette's threaded
 
 ### High 1 - Electron Security Is Deliberately Disabled
 
-`frontend/src/main/index.ts` enables `no-sandbox`, sets the BrowserWindow sandbox to false, disables web security, rewrites request origins globally, injects wildcard CORS response headers, and allows `unsafe-inline` plus `unsafe-eval` in CSP.
-
-Impact:
-
-- a renderer injection would have a substantially larger blast radius;
-- global header rewriting affects more than the intended backend requests;
-- the configuration is unsuitable for a final distributed desktop application.
-
-Required action:
-
-- restore Chromium sandboxing and web security;
-- keep context isolation enabled;
-- scope backend access to explicit loopback URLs;
-- replace wildcard response rewriting with correct backend CORS;
-- remove `unsafe-eval` and minimize inline allowances;
-- validate all IPC senders and exposed arguments.
+Resolved in source on 2026-08-23. The desktop window now enables Chromium
+sandboxing, context isolation, and web security while disabling renderer Node
+integration. The packaged renderer loads from the privileged, path-confined
+`distribllm://app` scheme instead of an opaque file origin. Global request and
+response header rewriting is removed; CSP no longer permits `unsafe-eval` or
+inline scripts; object, base, and frame embedding are disabled. The preload
+exports only the application-specific API, every IPC handler validates its
+sender URL, navigation is confined to the renderer, and external URLs are
+restricted to reviewed Hugging Face HTTPS hosts.
 
 ### High 2 - FastAPI Management Surface Uses Wildcard CORS
 
-`backend/api/server.py` allows every origin, method, and header. Node lifecycle, model paths, token management, generator controls, traces, and WebSocket generation are not generally authenticated.
-
-The loopback default reduces exposure but does not make wildcard policy safe if the bind address changes, a browser reaches loopback, or Electron web security remains disabled.
-
-Required action:
-
-- allow only the packaged Electron origin and explicitly approved development origins;
-- preserve loopback-only binding by default;
-- require authentication and TLS before any non-loopback bind;
-- add origin checks to every sensitive management endpoint, not only developer-key management.
+Resolved in source on 2026-08-23 for the local desktop boundary. FastAPI now
+uses an exact configurable allowlist containing the packaged
+`distribllm://app` origin and reviewed loopback development origins, explicit
+methods and headers, an HTTP middleware that rejects every foreign browser
+origin before routing, and the same check before WebSocket acceptance. The
+managed backend entry point rejects non-loopback binds; network exposure remains
+unsupported until a separately authenticated TLS gateway is implemented.
 
 ### High 3 - Final Installer Does Not Include The Backend
 
