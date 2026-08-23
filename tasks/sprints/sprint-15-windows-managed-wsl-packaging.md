@@ -181,3 +181,9 @@ This preserves the current working backend environment while giving testers a Wi
 - What changed: replaced cross-host-dependent ASAR file extraction with a byte-level check for the commit and manifest digest that Electron embeds into its main bundle, after the existing structural archive inspection and resource checksum audit.
 - Why: the ASAR library listed Windows entries with backslashes but could not extract any leading-slash, backslash, or normalized spelling consistently across Windows and Linux readers. The verifier must be runnable where the portable artifact is built.
 - Verification: the current native Windows build passes all structural, forbidden-entry, runtime-manifest, source-commit, and wrapper-freshness checks from the revised audit. The final artifact must be rebuilt once from this commit so its embedded audit tool and reported source identity match.
+
+### 2026-08-24 - Produce the reviewed atomic-session portable artifact
+
+- What changed: built the portable executable natively on Windows from committed source `e79f6c325d2ac5ab06b5abea0807771c8592eb40`, which includes the atomic session-route preparation repair and the cross-host package-audit repair.
+- Verification: native audit passed with thirty-eight ASAR entries, zero forbidden ASAR/runtime entries, sixty-five checksummed backend runtime files, backend manifest SHA-256 `7321136aec79f130d1a3caa1d26199b347b20e51da2f859fce0f94c997393ae2`, and acceptance identity bound. The executable is 87,847,622 bytes and SHA-256 `173f62a1a050afbd263d1df5a1a6f96fb152a645e0a497c4522cc0e0f621955d`.
+- Status: copy this exact file unchanged to both participants for the next controlled repeat. The physical two-device repetition remains the open Sprint 31 acceptance gate.
