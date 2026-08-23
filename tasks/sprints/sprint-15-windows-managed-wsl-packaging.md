@@ -175,3 +175,9 @@ This preserves the current working backend environment while giving testers a Wi
 - What changed: changed the package audit to locate the Electron main entry using the exact path reported by the ASAR, accepting both leading-slash Windows entries and the Linux spelling.
 - Why: a native Windows portable build correctly produced `/out/main/index.js`, but the audit hard-coded `out/main/index.js` and therefore failed to inspect the otherwise valid package.
 - Verification: the native Windows artifact for the preceding session-route commit passed the corrected audit with thirty-eight ASAR entries, sixty-five checksummed backend runtime files, no forbidden entries, and a commit-bound backend marker. A fresh artifact from this verifier commit is still required before distribution.
+
+### 2026-08-24 - Verify package identity across Windows and Linux ASAR readers
+
+- What changed: replaced cross-host-dependent ASAR file extraction with a byte-level check for the commit and manifest digest that Electron embeds into its main bundle, after the existing structural archive inspection and resource checksum audit.
+- Why: the ASAR library listed Windows entries with backslashes but could not extract any leading-slash, backslash, or normalized spelling consistently across Windows and Linux readers. The verifier must be runnable where the portable artifact is built.
+- Verification: the current native Windows build passes all structural, forbidden-entry, runtime-manifest, source-commit, and wrapper-freshness checks from the revised audit. The final artifact must be rebuilt once from this commit so its embedded audit tool and reported source identity match.
