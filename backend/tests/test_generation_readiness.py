@@ -4725,6 +4725,68 @@ class RemoteSequentialRouteTests(unittest.TestCase):
             self.assertEqual(trace_document["trace_id"], result["trace_id"])
             self.assertEqual(trace_document["trace"]["prompt"], "test")
 
+    def test_trace_generation_async_submits_pollable_legacy_diagnostic(self) -> None:
+        from api import server as api_server
+
+        class DummyGenerator:
+            def trace_generation(self, **kwargs) -> dict:
+                return {
+                    "prompt": kwargs["prompt"],
+                    "model_name": "facebook/opt-125m",
+                    "generation_config": {},
+                    "prompt_token_ids": [],
+                    "prompt_tokens": [],
+                    "steps": [],
+                    "response": "",
+                    "response_contains_replacement_char": False,
+                    "node_trace": ["peer-a"],
+                }
+
+        class ImmediateJobs:
+            def submit(self, kind, resource_key, target) -> dict:
+                progress_updates: list[tuple[str, str]] = []
+                result = target(
+                    lambda stage, detail: progress_updates.append((stage, detail)),
+                    threading.Event(),
+                )
+                return {
+                    "job_id": "trace-job",
+                    "kind": kind,
+                    "resource_key": resource_key,
+                    "status": "ready",
+                    "stage": "ready",
+                    "detail": "Runtime is ready.",
+                    "elapsed_seconds": 0.1,
+                    "cancel_requested": False,
+                    "result": result,
+                    "error": None,
+                    "reused": False,
+                    "progress_updates": progress_updates,
+                }
+
+        request = api_server.GenerationTraceRequest(prompt="test", max_new_tokens=1)
+        original_jobs = api_server._lifecycle_jobs
+        original_require = api_server._require_generator_ready
+        original_trace_dir = api_server.TRACE_DIR
+        with tempfile.TemporaryDirectory() as trace_dir:
+            api_server._lifecycle_jobs = ImmediateJobs()
+            api_server._require_generator_ready = lambda: asyncio.sleep(
+                0, result=DummyGenerator()
+            )
+            api_server.TRACE_DIR = Path(trace_dir)
+            try:
+                job = asyncio.run(api_server.trace_generator_async(request))
+            finally:
+                api_server._lifecycle_jobs = original_jobs
+                api_server._require_generator_ready = original_require
+                api_server.TRACE_DIR = original_trace_dir
+
+        self.assertEqual(job["kind"], "generation_trace")
+        self.assertEqual(job["resource_key"], "generator:legacy-trace")
+        self.assertEqual(job["result"]["status"], "ready")
+        self.assertEqual(job["result"]["trace"]["prompt"], "test")
+        self.assertEqual(job["progress_updates"][0][0], "legacy_trace")
+
     def test_trace_analysis_groups_saved_artifacts_and_flags_discrepancies(self) -> None:
         from api import server as api_server
 
@@ -5137,6 +5199,8 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(opt["covered_layers"], 0)
         self.assertEqual(opt["missing_layers"], list(range(12)))
         self.assertEqual(opt["route_reasons"], ["No DHT connection yet."])
+        self.assertEqual(opt["availability"]["state"], "route_validating")
+        self.assertFalse(opt["availability"]["can_generate_remotely"])
 
     def test_supported_models_include_sprint_11_tuning_metadata(self) -> None:
         expected = {
@@ -5253,6 +5317,8 @@ class RemoteSequentialRouteTests(unittest.TestCase):
         self.assertEqual(opt["missing_layers"], [])
         self.assertEqual(opt["compatible_nodes"], 1)
         self.assertEqual(opt["route_trace"], ["peer-123… (layers 0→12)"])
+        self.assertEqual(opt["availability"]["state"], "remotely_runnable")
+        self.assertTrue(opt["availability"]["can_generate_remotely"])
 
     def test_token_validation_requires_token_for_gated_model(self) -> None:
         from api import server as api_server

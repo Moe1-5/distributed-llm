@@ -6,6 +6,7 @@ interface MonitoringState {
   generator: GeneratorStatus | null
   models: ModelInfo[]
   nodes: NodeInfo[]
+  localNodes: NodeInfo[]
   stats: Stats | null
   selectedModel: string
   lastUpdated: Date | null
@@ -79,6 +80,7 @@ export default function Monitoring(): React.JSX.Element {
     generator: null,
     models: [],
     nodes: [],
+    localNodes: [],
     stats: null,
     selectedModel: '',
     lastUpdated: null,
@@ -97,7 +99,7 @@ export default function Monitoring(): React.JSX.Element {
       failures += 1
       setState((prev) => ({
         ...prev,
-        lastError: `${failures} monitor request(s) timed out`
+        lastError: `${failures} monitoring request(s) failed; successful sections remain current`
       }))
     }
     const requests = [
@@ -134,6 +136,17 @@ export default function Monitoring(): React.JSX.Element {
           setState((prev) => ({
             ...prev,
             nodes: result.nodes ?? [],
+            lastUpdated: new Date()
+          }))
+        },
+        failed
+      ),
+      applyIndependently(
+        api.getLocalNodes(),
+        (result) => {
+          setState((prev) => ({
+            ...prev,
+            localNodes: result.nodes ?? [],
             lastUpdated: new Date()
           }))
         },
@@ -261,6 +274,19 @@ export default function Monitoring(): React.JSX.Element {
   ])
 
   const providerNodes = mapNodes.filter((node) => node.kind === 'provider')
+  const localNodeIds = new Set(
+    state.localNodes.flatMap((node) => [node.node_id, node.peer_id].filter(Boolean) as string[])
+  )
+  const localProviders = modelNodes.filter(
+    (node) => localNodeIds.has(node.node_id ?? '') || localNodeIds.has(node.peer_id)
+  )
+  const remoteProviders = modelNodes.filter(
+    (node) => !localNodeIds.has(node.node_id ?? '') && !localNodeIds.has(node.peer_id)
+  )
+  const selectedProviders = activeRoute?.route.length ?? 0
+  const unprobedProviders = modelNodes.filter(
+    (node) => !healthByProvider.has(`${node.peer_id}:${node.rpc_uid ?? ''}`)
+  ).length
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">
@@ -292,6 +318,49 @@ export default function Monitoring(): React.JSX.Element {
             <p className="font-mono text-[12px] text-red">{state.lastError}</p>
           </div>
         )}
+
+        <section>
+          <h2 className="mb-3 font-mono text-[10px] tracking-widest text-text-dim uppercase">
+            What this page is showing
+          </h2>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {[
+              {
+                label: 'Local nodes',
+                value: String(localProviders.length),
+                detail:
+                  'Provider processes owned by this backend; lifecycle controls live on Nodes.'
+              },
+              {
+                label: 'Remote providers',
+                value: String(remoteProviders.length),
+                detail: 'Compatible DHT advertisements discovered from other backend identities.'
+              },
+              {
+                label: 'Selected route',
+                value: String(selectedProviders),
+                detail: 'Providers that the current generator validated for ordered execution.'
+              },
+              {
+                label: 'Not probed here',
+                value: String(unprobedProviders),
+                detail: 'Visible leases that this backend generator has not actively RPC-tested.'
+              }
+            ].map((item) => (
+              <div key={item.label} className="rounded-xl border border-border bg-bg-elevated p-4">
+                <div className="flex items-end justify-between gap-3">
+                  <p className="font-mono text-[9px] tracking-widest text-text-dim uppercase">
+                    {item.label}
+                  </p>
+                  <p className="text-xl font-semibold text-text-primary">{item.value}</p>
+                </div>
+                <p className="mt-2 text-[11px] leading-relaxed text-text-secondary">
+                  {item.detail}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
 
         <section>
           <div className="mb-3 flex items-end justify-between gap-4">
@@ -676,6 +745,11 @@ export default function Monitoring(): React.JSX.Element {
                     </span>
                   </div>
                   <div className="mt-4 flex flex-wrap gap-1.5">
+                    <span className="rounded border border-border px-2 py-0.5 font-mono text-[10px] text-text-dim">
+                      {localNodeIds.has(node.node_id ?? '') || localNodeIds.has(node.peer_id)
+                        ? 'LOCAL PROCESS'
+                        : 'REMOTE DHT PROVIDER'}
+                    </span>
                     <span className="rounded border border-cyan/20 bg-cyan-dim px-2 py-0.5 font-mono text-[10px] text-cyan">
                       layers {node.layer_start}-{node.layer_end}
                     </span>

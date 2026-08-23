@@ -26,6 +26,17 @@
 | Sprint 31 | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` | Source-implemented bounded OPT prefill/decode sessions; real direct and relayed two-device acceptance remains open. |
 | Sprint 32 | `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` | Separate infrastructure roles, add real redundancy, and prove the revised architecture under failures. |
 
+## Completion Audit - 2026-08-23
+
+All currently planned repository source work is implemented and locally verified. The remaining gates are intentionally not source checkboxes that can be completed on this development machine:
+
+- **Source-complete with local automated acceptance complete:** Sprints 18, 19, 23, 26, and 27.
+- **Source-complete with physical direct, relay, package, lifecycle, failover, session, or multi-host evidence still required:** Sprints 13 through 17, 20 through 25, and 28 through 32.
+- **Explicitly deferred product work:** Sprint 13's claim/payout UI remains gated until real multi-machine settlement mechanics pass and the user approves a later payout sprint. Credit mode remains prohibited.
+- **Closure rule:** every sprint stays in this active table until the user explicitly says to close that sprint, even after its source and physical evidence pass.
+
+The physical gates are consolidated in `docs/INFRASTRUCTURE_REDUNDANCY_ACCEPTANCE.md`, `docs/TWO_DEVICE_ACCEPTANCE_EVIDENCE.md`, and `docs/WINDOWS_MANAGED_WSL_PACKAGING.md`. Full completion requires a second independent VPS/failure domain, the two existing Windows participants, a three-provider topology, one identical reviewed package, and the dependency-ordered incentives-off then shadow matrix.
+
 ## Completed Sprints
 
 Completed sprint documents live in `tasks/archive/`.

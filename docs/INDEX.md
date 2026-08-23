@@ -14,7 +14,7 @@
 | Network reachability and relay review | `NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Sprint 14 transport defect, Petals-derived implementation, Windows/WSL direct setup, locked VPS deployment procedure, live relay diagnosis, rollout, and acceptance criteria |
 | Coverage-aware serving | `COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, atomic coordinator reservations, replica behavior, serving-plan API, desktop workflow, and incentives boundary |
 | VPS relay operations | `VPS_RELAY_OPERATIONS.md` | Manual foreground launch, persistent systemd installation, machine-readable restart evidence, relay-probe binding, upgrade, rollback, recovery, backup, and monitoring procedure |
-| Infrastructure redundancy acceptance | `INFRASTRUCTURE_REDUNDANCY_ACCEPTANCE.md` | Separated DHT/relay/control service deployment, independent-host requirements, controlled failure matrix, recovery objectives, and final evidence validation |
+| Infrastructure redundancy acceptance | `INFRASTRUCTURE_REDUNDANCY_ACCEPTANCE.md` | Separated DHT/relay/control service deployment, independent-host requirements, packaged Settings configuration, controlled failure matrix, recovery objectives, and final evidence validation |
 | Architecture failure matrix template | `ARCHITECTURE_FAILURE_MATRIX_TEMPLATE.json` | Fail-closed physical component, protocol, outage, topology, evidence-hash, and rollout-order template |
 | Deployment and live testing | `DEPLOYMENT_AND_LIVE_TESTING.md` | EXE rebuild rules, local WSL backend updates, VPS bootstrap, transactional placement, shadow settlement deployment, relay probes, and two-device checks |
 | Current two-device live-test issues and production roadmap | `CURRENT_TWO_DEVICE_LIVE_TEST_ISSUES.md` | Timestamped lease-persistence evidence, implemented first-stage DHT/expert repair, production service architecture, packaging plan, and open physical acceptance gates |
@@ -22,7 +22,7 @@
 | System analysis and finalization | `SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md` | Full source, runtime, security, deployment, validation, incentive-outage, and final desktop readiness audit |
 | Windows managed WSL packaging | `WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed distro strategy, launcher contract, sanitized acceptance report, and clean-Windows runbook |
 | Useful-work incentives | `USEFUL_WORK_INCENTIVES.md` | Signed receipt protocol, SQLite settlement rules, read-only credits, VPS rollout, and remaining two-device acceptance |
-| Two-device acceptance evidence | `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized relay/direct captures, Windows and VPS artifact assembly, complete-route validation, shadow receipts, standby non-payment, and manual gates |
+| Two-device acceptance evidence | `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized incentives-off-first relay/direct captures, Windows and VPS artifact assembly, complete-route validation, later shadow receipts, standby non-payment, and manual gates |
 | Local split acceptance | `LOCAL_SPLIT_ACCEPTANCE.md` | One-command real two-peer OPT split inference, parity, accounting, cleanup, and recorded evidence |
 | TinyLlama performance baseline | `TINYLLAMA_PERFORMANCE_BASELINE.md` | Bounded real distributed timing probe and the current Transformers chat-template compatibility blocker |
 | Errors and debugging | `ERRORS_AND_DEBUGGING.md` | Current OAuth, model access, CUDA/RAM, bootstrap, bounded RPC/reset diagnosis, route, and trace troubleshooting |

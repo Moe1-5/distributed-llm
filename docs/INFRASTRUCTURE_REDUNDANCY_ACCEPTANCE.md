@@ -105,14 +105,30 @@ sudo /opt/distribllm/deploy/vps/validate-control-service.sh settlement --restart
 
 ## Participant Configuration
 
-On both physical devices, put the same ordered lists in the repository-root
-`.env`, then restart the backend through the packaged Electron Settings page:
+On both physical devices, open the packaged Electron Settings page. Put one
+full DHT multiaddress per line in **Bootstrap Peers**, one full relay
+multiaddress per line in **Trusted Relays**, choose **Auto**, save, and restart
+the managed backend. The launcher owns those three values and overrides
+repository `.env` entries for them, so editing only `.env` does not change a
+saved packaged configuration.
+
+Use the repository-root `.env` only for backend settings the launcher does not
+own, including the first rollout mode:
 
 ```dotenv
-DISTRIBLLM_INITIAL_PEERS=<DHT_ONE_FULL_MULTIADDR>,<DHT_TWO_FULL_MULTIADDR>
-DISTRIBLLM_TRUSTED_RELAYS=<RELAY_ONE_FULL_MULTIADDR>,<RELAY_TWO_FULL_MULTIADDR>
-DISTRIBLLM_NETWORK_MODE=auto
 DISTRIBLLM_INCENTIVES_MODE=off
+```
+
+The ordered Settings values must be:
+
+```text
+Bootstrap Peers:
+<DHT_ONE_FULL_MULTIADDR>
+<DHT_TWO_FULL_MULTIADDR>
+
+Trusted Relays:
+<RELAY_ONE_FULL_MULTIADDR>
+<RELAY_TWO_FULL_MULTIADDR>
 ```
 
 `/network/status` exposes the ordered lists, unique counts, duplicate counts,

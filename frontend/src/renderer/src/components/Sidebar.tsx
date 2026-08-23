@@ -16,11 +16,11 @@ const NAV_ITEMS: { id: Page; label: string; icon: string }[] = [
 
 export default function Sidebar({ currentPage, onNavigate }: SidebarProps): React.JSX.Element {
   return (
-    <aside className="flex w-[220px] min-w-[220px] flex-col border-r border-border bg-bg-surface select-none">
+    <aside className="flex w-[68px] min-w-[68px] flex-col border-r border-border bg-bg-surface select-none lg:w-[220px] lg:min-w-[220px]">
       {/* Logo */}
       <div className="flex items-center gap-3 border-b border-border px-4 py-5">
         <span className="text-2xl leading-none text-cyan">◈</span>
-        <div>
+        <div className="hidden lg:block">
           <div className="font-mono text-[13px] font-semibold tracking-widest text-text-primary">
             DISTRIBLLM
           </div>
@@ -34,8 +34,11 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps): Reac
           const active = currentPage === item.id
           return (
             <button
+              type="button"
               key={item.id}
               onClick={() => onNavigate(item.id)}
+              aria-label={`Open ${item.label}`}
+              aria-current={active ? 'page' : undefined}
               className={`
                 relative flex w-full items-center gap-2.5 rounded-md px-3 py-2.5
                 text-left text-[13px] font-medium transition-all duration-150
@@ -49,7 +52,7 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps): Reac
               <span className={`text-base ${active ? 'text-cyan' : 'text-text-dim'}`}>
                 {item.icon}
               </span>
-              <span>{item.label}</span>
+              <span className="hidden lg:inline">{item.label}</span>
               {active && (
                 <span className="ml-auto h-1.5 w-1.5 rounded-full bg-cyan shadow-[0_0_6px_#00d4ff]" />
               )}
@@ -61,7 +64,10 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps): Reac
       {/* Settings — pinned above footer */}
       <div className="px-2 pb-2">
         <button
+          type="button"
           onClick={() => onNavigate('settings')}
+          aria-label="Open Settings"
+          aria-current={currentPage === 'settings' ? 'page' : undefined}
           className={`
             relative flex w-full items-center gap-2.5 rounded-md px-3 py-2.5
             text-left text-[13px] font-medium transition-all duration-150
@@ -77,7 +83,7 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps): Reac
           >
             ⚙
           </span>
-          <span>Settings</span>
+          <span className="hidden lg:inline">Settings</span>
           {currentPage === 'settings' && (
             <span className="ml-auto h-1.5 w-1.5 rounded-full bg-cyan shadow-[0_0_6px_#00d4ff]" />
           )}
@@ -85,12 +91,17 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps): Reac
       </div>
 
       {/* Footer */}
-      <div className="border-t border-border px-4 py-3.5">
+      <div
+        className="border-t border-border px-4 py-3.5"
+        title="Open Monitoring for authoritative DHT state"
+      >
         <div className="flex items-center gap-2">
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-green shadow-[0_0_6px_#00ff88] animate-pulse-glow" />
-          <span className="font-mono text-[11px] text-text-secondary">DHT Active</span>
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-text-dim" />
+          <span className="hidden font-mono text-[11px] text-text-secondary lg:inline">
+            Network status in Monitoring
+          </span>
         </div>
-        <div className="mt-1 font-mono text-[10px] text-text-dim">v0.1.0-alpha</div>
+        <div className="mt-1 hidden font-mono text-[10px] text-text-dim lg:block">v0.1.0-alpha</div>
       </div>
     </aside>
   )

@@ -10,6 +10,7 @@ const WS_URL = import.meta.env.VITE_WS_BASE_URL ?? BASE_URL.replace(/^http/, 'ws
 const REQUEST_TIMEOUT_MS = 8_000
 const FAST_REQUEST_TIMEOUT_MS = 1_500
 const STATUS_REQUEST_TIMEOUT_MS = 5_000
+const MODEL_AVAILABILITY_TIMEOUT_MS = 35_000
 
 // ---------------------------------------------------------------------------
 // Types
@@ -120,7 +121,7 @@ export interface NodeInfo {
 
 export interface LifecycleJob {
   job_id: string
-  kind: 'node_start' | 'generator_start'
+  kind: 'node_start' | 'generator_start' | 'generation_trace'
   resource_key: string
   status: 'queued' | 'running' | 'ready' | 'failed' | 'cancelled'
   stage: string
@@ -151,6 +152,27 @@ export interface ModelInfo {
   total_layers: number
   compatible_nodes: number
   route_trace: string[]
+  availability?: {
+    schema_version: 1
+    state:
+      | 'gated'
+      | 'route_validating'
+      | 'remotely_runnable'
+      | 'remotely_discoverable'
+      | 'local_available'
+      | 'unavailable'
+    local_access: boolean
+    local_imported: boolean
+    local_serving: boolean
+    remote_discovery: string
+    remotely_discoverable: boolean
+    provider_count: number
+    covered_layers: number
+    route_ready: boolean
+    can_generate_remotely: boolean
+    reason: string
+    action: string
+  }
 }
 
 export interface CoverageRange {
@@ -928,7 +950,7 @@ export const api = {
       token_available: boolean
       default_peers: string[]
       network?: NetworkRuntimeSnapshot
-    }>('/models'),
+    }>('/models', MODEL_AVAILABILITY_TIMEOUT_MS),
   getModelCatalog: () =>
     get<{
       models: ModelInfo[]
@@ -1009,6 +1031,11 @@ export const api = {
   },
   traceGeneration: (prompt: string, options: GenerationOptions = {}) =>
     post<GenerationTraceResult>('/generator/trace', {
+      prompt,
+      ...generationOptionsPayload(options)
+    }),
+  traceGenerationAsync: (prompt: string, options: GenerationOptions = {}) =>
+    post<LifecycleJob>('/generator/trace-async', {
       prompt,
       ...generationOptionsPayload(options)
     }),

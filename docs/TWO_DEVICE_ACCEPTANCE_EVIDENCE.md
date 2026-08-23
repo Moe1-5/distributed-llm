@@ -14,7 +14,7 @@ Prerequisites:
 
 - Both devices run the same reviewed feature commit with Python 3.12 and the locked Hivemind environment.
 - The persistent VPS relay and settlement services are healthy.
-- Both participants use `DISTRIBLLM_NETWORK_MODE=auto`, the same bootstrap peer, the same trusted relay, and `DISTRIBLLM_INCENTIVES_MODE=shadow`.
+- Both participants use `DISTRIBLLM_NETWORK_MODE=auto`, the same ordered DHT and relay lists, and begin with `DISTRIBLLM_INCENTIVES_MODE=off`.
 - Device A serves OPT-125M layers `0-6` and device B serves layers `6-12`.
 - Device B has a loaded generator for `facebook/opt-125m` after both ranges are visible.
 
@@ -26,7 +26,7 @@ uv run --python 3.12 python -m acceptance_evidence capture \
   --participant device-a \
   --backend-url http://127.0.0.1:8000 \
   --model facebook/opt-125m \
-  --output ~/distribllm-evidence/device-a-relay.json
+  --output ~/distribllm-evidence/device-a-relay-off.json
 ```
 
 Run one deterministic inference while capturing device B:
@@ -39,8 +39,7 @@ uv run --python 3.12 python -m acceptance_evidence capture \
   --model facebook/opt-125m \
   --run-inference \
   --max-new-tokens 8 \
-  --settlement-wait 30 \
-  --output ~/distribllm-evidence/device-b-relay.json
+  --output ~/distribllm-evidence/device-b-relay-off.json
 ```
 
 Transfer device A's JSON file to device B through the approved operator channel, then validate both:
@@ -48,15 +47,29 @@ Transfer device A's JSON file to device B through the approved operator channel,
 ```bash
 cd backend
 uv run --python 3.12 python -m acceptance_evidence validate \
-  ~/distribllm-evidence/device-a-relay.json \
-  ~/distribllm-evidence/device-b-relay.json \
+  ~/distribllm-evidence/device-a-relay-off.json \
+  ~/distribllm-evidence/device-b-relay-off.json \
+  --model facebook/opt-125m \
+  --expected-mode relay \
+  --expected-incentives off \
+  --output ~/distribllm-evidence/relay-off-report.json
+```
+
+A successful incentives-off report has `ok: true`, two adjacent selected ranges, at least two distinct selected peer IDs and participant owners, verified relay transport, matching per-hop timing, generated tokens, and no receipt submissions. Preserve it as the base inference result. Only after that report passes should both repository-root `.env` files be changed to `DISTRIBLLM_INCENTIVES_MODE=shadow`, the managed backends restarted, and the relay capture repeated. The shadow report additionally requires zero pending submissions and an increase in accepted shadow receipts during generation.
+
+For the shadow repeat, use new `device-a-relay-shadow.json` and
+`device-b-relay-shadow.json` output names, restore `--settlement-wait 30` on the
+inference capture, and validate with:
+
+```bash
+uv run --python 3.12 python -m acceptance_evidence validate \
+  ~/distribllm-evidence/device-a-relay-shadow.json \
+  ~/distribllm-evidence/device-b-relay-shadow.json \
   --model facebook/opt-125m \
   --expected-mode relay \
   --expected-incentives shadow \
   --output ~/distribllm-evidence/relay-report.json
 ```
-
-A successful report has `ok: true`, two adjacent selected ranges, at least two distinct selected peer IDs and participant owners, verified relay transport, matching per-hop timing, generated tokens, zero pending submissions, and an increase in accepted shadow receipts during the generation.
 
 ## Direct Acceptance
 

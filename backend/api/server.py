@@ -2859,6 +2859,100 @@ async def get_models() -> dict:
     return await asyncio.to_thread(_get_models_sync)
 
 
+def _model_availability(
+    *,
+    model_id: str,
+    model_info: dict,
+    local_imports: dict[str, dict],
+    route_status: dict,
+    local_infos: list[dict],
+    discovery_state: str,
+) -> dict:
+    """Build one explicit, renderer-safe model availability contract.
+
+    Availability is deliberately not inferred from the legacy ``available``
+    boolean.  Local model access, local serving, discovery, and validated route
+    readiness are independent facts and remain visible even when the summary
+    state changes.
+    """
+    local_imported = model_id in local_imports
+    local_access = not bool(model_info["gated"]) or local_imported
+    local_serving = any(
+        info.get("model_name") == model_id
+        and bool(info.get("running"))
+        and bool(info.get("layers_loaded"))
+        and bool(info.get("rpc_running"))
+        for info in local_infos
+    )
+    provider_count = int(route_status.get("compatible_nodes", 0))
+    covered_layers = int(route_status.get("covered_layers", 0))
+    route_ready = bool(route_status.get("route_ready"))
+    remotely_discoverable = provider_count > 0 or covered_layers > 0
+
+    if not local_access:
+        state = "gated"
+        reason = "Approved model files must be imported or downloaded on this device."
+        action = "Open model access and import the approved local files."
+    elif route_ready:
+        state = "remotely_runnable"
+        reason = "A complete compatible provider route has been validated."
+        action = "Start the inference client."
+    elif discovery_state in {"syncing", "not_started"}:
+        state = "route_validating"
+        reason = "Provider discovery has not produced an authoritative route yet."
+        action = "Wait for discovery to finish, then refresh model availability."
+    elif remotely_discoverable:
+        state = "remotely_discoverable"
+        reason = "Compatible providers are visible, but their layers do not form a complete route."
+        action = "Add providers for the missing layers or wait for coverage to change."
+    elif local_serving or local_imported:
+        state = "local_available"
+        reason = (
+            "This device is serving part of the model, but no complete route is ready."
+            if local_serving
+            else "Approved model files are available locally, but no provider route is ready."
+        )
+        action = "Serve missing layers or wait for remote providers."
+    else:
+        state = "unavailable"
+        reason = "No compatible provider route is currently visible."
+        action = "Start a provider or check DHT connectivity."
+
+    return {
+        "schema_version": 1,
+        "state": state,
+        "local_access": local_access,
+        "local_imported": local_imported,
+        "local_serving": local_serving,
+        "remote_discovery": discovery_state,
+        "remotely_discoverable": remotely_discoverable,
+        "provider_count": provider_count,
+        "covered_layers": covered_layers,
+        "route_ready": route_ready,
+        "can_generate_remotely": local_access and route_ready,
+        "reason": reason,
+        "action": action,
+    }
+
+
+def _local_availability_infos() -> list[dict]:
+    """Read local role facts without making the model catalog lifecycle-critical."""
+    infos: list[dict] = []
+    for local_node in _local_node_list():
+        getter = getattr(local_node, "get_info", None)
+        if not callable(getter):
+            continue
+        try:
+            infos.append(getter())
+        except Exception as exc:
+            logger.warning(
+                "Could not include local node %s in model availability: %s",
+                getattr(local_node, "node_id", "unknown"),
+                exc,
+            )
+    return infos
+
+
 @app.get("/models/catalog")
 async def get_model_catalog() -> dict:
     """Return local model choices without waiting for any DHT route scan."""
@@ -2868,9 +2962,15 @@ async def get_model_catalog() -> dict:
         for record in list_local_models()
         if record.get("model_name")
     }
+    local_infos = _local_availability_infos()
     models = []
     for model_id, info in SUPPORTED_MODELS.items():
         total_layers = int(info["num_layers"])
+        route_status = {
+            "route_ready": False,
+            "compatible_nodes": 0,
+            "covered_layers": 0,
+        }
         models.append(
             {
                 "id": model_id,
@@ -2891,6 +2991,14 @@ async def get_model_catalog() -> dict:
                 "total_layers": total_layers,
                 "compatible_nodes": 0,
                 "route_trace": [],
+                "availability": _model_availability(
+                    model_id=model_id,
+                    model_info=info,
+                    local_imports=local_imports,
+                    route_status=route_status,
+                    local_infos=local_infos,
+                    discovery_state="not_started",
+                ),
             }
         )
     return {
@@ -2923,6 +3031,10 @@ def _get_models_sync() -> dict:
     )
     dht = None if supervisor_nodes is not None else (_active_local_dht() or client_dht)
     active_prefix = _active_dht_prefix()
+    local_infos = _local_availability_infos()
+    discovery_state = str(supervisor_snapshot.get("state", "not_started"))
+    if not _supervisor_active(supervisor_snapshot):
+        discovery_state = "ready" if dht is not None else "not_started"
     models = []
     for model_id, info in SUPPORTED_MODELS.items():
         route_status = _get_model_route_status(
@@ -2956,6 +3068,14 @@ def _get_models_sync() -> dict:
             "total_layers": route_status["total_layers"],
             "compatible_nodes": route_status["compatible_nodes"],
             "route_trace": route_status["route_trace"],
+            "availability": _model_availability(
+                model_id=model_id,
+                model_info=info,
+                local_imports=local_imports,
+                route_status=route_status,
+                local_infos=local_infos,
+                discovery_state=discovery_state,
+            ),
         })
     result = {
         "models":          models,
@@ -5395,6 +5515,61 @@ async def trace_generator(req: GenerationTraceRequest) -> dict:
     except Exception as e:
         logger.error(f"Generation trace failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generator/trace-async", status_code=202)
+async def trace_generator_async(req: GenerationTraceRequest) -> dict:
+    """Submit the legacy token trace as a visible, pollable diagnostic job.
+
+    The submission request returns quickly and therefore does not inherit the
+    renderer's short control-plane HTTP deadline. DistributedGenerator remains
+    the operation owner and rejects overlap with an active chat generation.
+    """
+    active_generator = await _require_generator_ready()
+    request = req.model_dump()
+
+    def target(progress, cancel_event: threading.Event) -> dict:
+        if cancel_event.is_set():
+            return {"status": "cancelled"}
+        progress(
+            "legacy_trace",
+            "Running the legacy expert token trace. This is separate from the chat stream.",
+        )
+        trace = active_generator.trace_generation(
+            prompt=request["prompt"],
+            max_new_tokens=request["max_new_tokens"],
+            temperature=request["temperature"],
+            top_p=request["top_p"],
+            top_k=request["top_k"],
+            repetition_penalty=request["repetition_penalty"],
+            do_sample=request["do_sample"],
+        )
+        trace_metadata = _write_generation_trace(trace)
+        return {
+            "status": "ready",
+            "trace": {
+                **trace,
+                **trace_metadata,
+            },
+        }
+
+    job = _lifecycle_jobs.submit(
+        "generation_trace",
+        "generator:legacy-trace",
+        target,
+    )
+    _runtime_state.record_event(
+        kind="diagnostic",
+        phase="legacy_trace",
+        status="submitted",
+        message="Legacy generation trace diagnostic submitted.",
+        details={
+            "job_id": job.get("job_id"),
+            "reused": bool(job.get("reused")),
+            "max_new_tokens": request["max_new_tokens"],
+        },
+    )
+    return job
 
 
 @app.get("/generator/traces/analysis")

@@ -13,6 +13,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../api/client'
 import { recordDiagnostic } from '../api/diagnostics'
 import { applyIndependently } from '../api/independentRefresh'
+import { modelPresentation } from '../api/presentationState'
 import { isServingPlanAuthoritative, servingPlanStatus } from '../api/servingPlanState'
 import type {
   HuggingFaceConnection,
@@ -194,6 +195,7 @@ export default function Network(): React.JSX.Element {
   const inferencePlanPromiseRef = useRef<Promise<void> | null>(null)
   const generatorStatusPromiseRef = useRef<Promise<void> | null>(null)
   const lastServingPlanStateRef = useRef<string | null>(null)
+  const modelAvailabilityPromiseRef = useRef<Promise<void> | null>(null)
 
   // Status badges
   const [backendOk, setBackendOk] = useState(false)
@@ -282,6 +284,28 @@ export default function Network(): React.JSX.Element {
   // Load models + status on mount
   // ---------------------------------------------------------------------------
 
+  const refreshModelAvailability = useCallback(async (): Promise<void> => {
+    if (modelAvailabilityPromiseRef.current) return modelAvailabilityPromiseRef.current
+    const request = api
+      .getModels()
+      .then((result) => setModels(result.models))
+      .catch((error) => {
+        recordDiagnostic({
+          source: 'network',
+          severity: 'warning',
+          summary: 'Full model availability refresh failed; retaining the stable catalog.',
+          details: { error: error instanceof Error ? error.message : String(error) }
+        })
+      })
+      .finally(() => {
+        if (modelAvailabilityPromiseRef.current === request) {
+          modelAvailabilityPromiseRef.current = null
+        }
+      })
+    modelAvailabilityPromiseRef.current = request
+    return request
+  }, [])
+
   useEffect(() => {
     let active = true
     const loadInitial = async (): Promise<void> => {
@@ -323,13 +347,19 @@ export default function Network(): React.JSX.Element {
         if (active) setHfConnection(connection)
       })
       await Promise.allSettled([modelsRequest, statusRequest, hfRequest])
+      if (active) void refreshModelAvailability()
     }
 
     void loadInitial()
     return () => {
       active = false
     }
-  }, [])
+  }, [refreshModelAvailability])
+
+  useEffect(() => {
+    const interval = window.setInterval(() => void refreshModelAvailability(), 10_000)
+    return () => window.clearInterval(interval)
+  }, [refreshModelAvailability])
 
   // ---------------------------------------------------------------------------
   // When serve model changes, auto-update layer range
@@ -385,6 +415,26 @@ export default function Network(): React.JSX.Element {
   )
   const servingPlanAuthoritative = isServingPlanAuthoritative(servingPlan)
   const servingPlanState = servingPlanStatus(servingPlan, servingPlanError, servingPlanLoading)
+  const servePresentation = selectedServeModel
+    ? modelPresentation(selectedServeModel, servingPlan)
+    : null
+  const inferencePresentation = selectedInferModel
+    ? modelPresentation(selectedInferModel, inferencePlan)
+    : null
+  const nodeStartDisabledReason = !serveModel
+    ? 'Choose a model.'
+    : !customRangeValid
+      ? `Choose a valid range inside zero to ${selectedServeModel?.num_layers ?? 0}.`
+      : servingMode === 'recommended' && !servingPlanAuthoritative
+        ? 'Wait for a fresh authoritative coverage snapshot, or switch to Custom.'
+        : servingMode === 'recommended' && !servingPlan?.recommendation
+          ? 'No non-overlapping placement is available; stop a provider or wait for a lease to expire.'
+          : null
+  const generatorStartDisabledReason = !inferModel
+    ? 'Choose a model.'
+    : inferNeedsLocalImport
+      ? 'Download or import the approved local model files before starting inference.'
+      : null
 
   const refreshServingPlan = useCallback(async (): Promise<ServingPlan | null> => {
     if (!serveModel || !selectedServeModel) return null
@@ -492,7 +542,7 @@ export default function Network(): React.JSX.Element {
   }, [])
 
   const refreshModelsAndImports = useCallback(async () => {
-    const [modelsRes, localRes] = await Promise.all([api.getModelCatalog(), api.getLocalModels()])
+    const [modelsRes, localRes] = await Promise.all([api.getModels(), api.getLocalModels()])
     setModels(modelsRes.models)
     setLocalImports(localRes.models)
   }, [])
@@ -1271,9 +1321,9 @@ export default function Network(): React.JSX.Element {
   // ---------------------------------------------------------------------------
 
   return (
-    <div className="flex h-full overflow-hidden">
+    <div className="flex h-full flex-col overflow-hidden xl:flex-row">
       {/* Left panel */}
-      <div className="flex w-[480px] min-w-[480px] flex-col border-r border-border">
+      <div className="flex min-h-0 w-full min-w-0 flex-col border-b border-border xl:w-[480px] xl:min-w-[480px] xl:border-r xl:border-b-0">
         {/* Header */}
         <div className="flex flex-shrink-0 items-center justify-between border-b border-border px-6 py-5">
           <div>
@@ -1314,6 +1364,9 @@ export default function Network(): React.JSX.Element {
           ).map(([id, label]) => (
             <button
               key={id}
+              type="button"
+              role="tab"
+              aria-selected={tab === id}
               onClick={() => setTab(id)}
               className={`
                   rounded-t-lg px-4 py-2 font-mono text-[11px] font-semibold
@@ -1335,6 +1388,10 @@ export default function Network(): React.JSX.Element {
           {/* ── SERVE LAYERS ── */}
           {tab === 'serve' && (
             <>
+              <p className="text-[12px] leading-relaxed text-text-secondary">
+                Provider role: load a bounded transformer-layer range on this device and advertise
+                it to the swarm. This does not start a chat client.
+              </p>
               {/* Model dropdown */}
               <div className="flex flex-col gap-1.5">
                 <label className={labelCls}>Model</label>
@@ -1342,6 +1399,7 @@ export default function Network(): React.JSX.Element {
                   <div className="h-10 animate-pulse rounded-lg bg-bg-surface" />
                 ) : (
                   <select
+                    aria-label="Model to serve"
                     value={serveModel}
                     onChange={(e) => handleServeModelChange(e.target.value)}
                     disabled={nodeLoading}
@@ -1349,7 +1407,7 @@ export default function Network(): React.JSX.Element {
                   >
                     {models.map((m) => (
                       <option key={m.id} value={m.id}>
-                        {m.id} — {tuningLabel(m)} — {m.description}
+                        {m.id} — {modelPresentation(m, null).primary} — {tuningLabel(m)}
                       </option>
                     ))}
                   </select>
@@ -1357,11 +1415,18 @@ export default function Network(): React.JSX.Element {
 
                 {/* Model info */}
                 {selectedServeModel && (
-                  <p className="font-mono text-[10px] text-text-dim">
-                    {selectedServeModel.num_layers} layers total · {selectedServeModel.vram_gb}GB
-                    VRAM · {selectedServeModel.gated ? 'gated' : 'open'} ·{' '}
-                    {tuningLabel(selectedServeModel)}
-                  </p>
+                  <div className="flex flex-col gap-1">
+                    <p className="font-mono text-[10px] text-text-dim">
+                      {selectedServeModel.num_layers} layers total · {selectedServeModel.vram_gb}GB
+                      VRAM · {selectedServeModel.gated ? 'gated' : 'open'} ·{' '}
+                      {tuningLabel(selectedServeModel)}
+                    </p>
+                    {servePresentation && (
+                      <p className="font-mono text-[10px] text-cyan">
+                        {servePresentation.primary} · {servePresentation.secondary}
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
 
@@ -1372,6 +1437,7 @@ export default function Network(): React.JSX.Element {
                   <button
                     key={mode}
                     type="button"
+                    aria-pressed={servingMode === mode}
                     onClick={() => {
                       setServingMode(mode)
                       if (mode === 'recommended' && servingPlanAuthoritative) {
@@ -1404,6 +1470,7 @@ export default function Network(): React.JSX.Element {
                       −
                     </button>
                     <input
+                      aria-label="Layer capacity"
                       type="number"
                       value={layerCount}
                       min={1}
@@ -1428,6 +1495,7 @@ export default function Network(): React.JSX.Element {
                   <div className="flex flex-1 flex-col gap-1.5">
                     <label className={labelCls}>Layer Start</label>
                     <input
+                      aria-label="First layer to serve"
                       type="number"
                       value={layerStart}
                       min={0}
@@ -1440,6 +1508,7 @@ export default function Network(): React.JSX.Element {
                   <div className="flex flex-1 flex-col gap-1.5">
                     <label className={labelCls}>Layer End</label>
                     <input
+                      aria-label="Layer end boundary"
                       type="number"
                       value={layerEnd}
                       min={layerStart + 1}
@@ -1565,6 +1634,7 @@ export default function Network(): React.JSX.Element {
               <div className="flex flex-col gap-1.5">
                 <label className={labelCls}>Device</label>
                 <select
+                  aria-label="Serving compute device"
                   value={device}
                   onChange={(e) => setDevice(e.target.value)}
                   disabled={nodeLoading}
@@ -1576,6 +1646,8 @@ export default function Network(): React.JSX.Element {
               </div>
 
               <button
+                type="button"
+                aria-label="Start serving selected model layers"
                 onClick={() => void (nodeLoading ? handleCancelNodeStart() : handleStartNode())}
                 disabled={
                   !nodeLoading &&
@@ -1607,6 +1679,11 @@ export default function Network(): React.JSX.Element {
               >
                 {nodeLoading ? `CANCEL ${nodeProgress.toUpperCase()}` : 'START NODE'}
               </button>
+              {!nodeLoading && nodeStartDisabledReason && (
+                <p className="font-mono text-[10px] leading-relaxed text-amber">
+                  Start unavailable: {nodeStartDisabledReason}
+                </p>
+              )}
             </>
           )}
 
@@ -1625,6 +1702,7 @@ export default function Network(): React.JSX.Element {
                   <div className="h-10 animate-pulse rounded-lg bg-bg-surface" />
                 ) : (
                   <select
+                    aria-label="Model for remote inference"
                     value={inferModel}
                     onChange={(e) => {
                       setInferModel(e.target.value)
@@ -1635,10 +1713,26 @@ export default function Network(): React.JSX.Element {
                   >
                     {models.map((m) => (
                       <option key={m.id} value={m.id}>
-                        {m.id} — {tuningLabel(m)}
+                        {m.id} — {modelPresentation(m, null).primary} — {tuningLabel(m)}
                       </option>
                     ))}
                   </select>
+                )}
+
+                {inferencePresentation && (
+                  <div
+                    className={`rounded-lg border px-3 py-2 font-mono text-[10px] ${
+                      inferencePresentation.tone === 'ready'
+                        ? 'border-green/20 bg-green/5 text-green'
+                        : inferencePresentation.tone === 'failed'
+                          ? 'border-red/20 bg-red/5 text-red'
+                          : 'border-amber/30 bg-amber/10 text-amber'
+                    }`}
+                  >
+                    <p className="font-semibold">{inferencePresentation.primary}</p>
+                    <p className="mt-1 leading-relaxed">{inferencePresentation.secondary}</p>
+                    <p className="mt-1 text-text-secondary">Next: {inferencePresentation.action}</p>
+                  </div>
                 )}
 
                 {selectedInferModel && inferencePlan && (
@@ -1755,17 +1849,19 @@ export default function Network(): React.JSX.Element {
                 </div>
               ) : (
                 <button
+                  type="button"
+                  aria-label="Start inference client"
                   onClick={() =>
                     void (genLoading ? handleCancelGeneratorStart() : handleStartGenerator())
                   }
-                  disabled={!genLoading && !inferModel}
+                  disabled={!genLoading && Boolean(generatorStartDisabledReason)}
                   className={`
                     w-full rounded-xl border py-3 font-mono text-[12px] font-semibold
                     transition-all duration-150
                     ${
                       genLoading
                         ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
-                        : !inferModel
+                        : generatorStartDisabledReason
                           ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
                           : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
                     }
@@ -1774,13 +1870,21 @@ export default function Network(): React.JSX.Element {
                   {genLoading ? `CANCEL ${genProgress.toUpperCase()}` : 'START GENERATOR'}
                 </button>
               )}
+              {!genLoading &&
+                !genReady &&
+                !generatorStatus?.components_loaded &&
+                generatorStartDisabledReason && (
+                  <p className="font-mono text-[10px] leading-relaxed text-amber">
+                    Start unavailable: {generatorStartDisabledReason}
+                  </p>
+                )}
             </>
           )}
         </div>
       </div>
 
       {/* Activity log */}
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-h-[220px] flex-1 flex-col">
         <div className="flex flex-shrink-0 items-center justify-between border-b border-border px-5 py-3.5">
           <span className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
             Activity Log

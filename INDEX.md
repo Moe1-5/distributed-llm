@@ -67,6 +67,7 @@
 | Frontend API client                       | `frontend/src/renderer/src/api/client.ts` |
 | Persistent renderer diagnostics           | `frontend/src/renderer/src/api/diagnostics.ts` |
 | Serving-plan freshness policy             | `frontend/src/renderer/src/api/servingPlanState.ts` |
+| Model and runtime presentation contract   | `frontend/src/renderer/src/api/presentationState.ts` |
 | Packaged executable identity capture      | `frontend/src/main/artifactIdentity.ts`   |
 | Independent renderer refresh primitive    | `frontend/src/renderer/src/api/independentRefresh.ts` |
 | Renderer partial-state, diagnostics, and serving-plan freshness tests | `frontend/tests/independentRefresh.test.ts` |
@@ -95,7 +96,7 @@
 
 | File                                                         | What's inside                                                                        |
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `tasks/active.md`                                            | Active sprint routing table.                                                         |
+| `tasks/active.md`                                            | Active sprint routing table and current source-versus-physical completion audit.     |
 | `tasks/lessons.md`                                           | Assistant lessons: active and internalized.                                          |
 | `tasks/sprints/sprint-13-real-incentives-and-settlement.md`   | Active future sprint plan for real rewards, contribution receipts, anti-abuse checks, and settlement. |
 | `tasks/sprints/sprint-14-performance-and-visibility.md`       | Active sprint for runtime/generation performance metrics, Monitoring visibility, chat templates, and context-aware streamed decoding. |
@@ -111,12 +112,12 @@
 | `tasks/sprints/sprint-24-windows-fundamental-acceptance-build.md` | Active sprint for one audited Windows executable bound to fundamental two-device acceptance evidence. |
 | `tasks/sprints/sprint-25-runtime-state-validation.md` | Active sprint for authoritative runtime readiness, lifecycle dependency validation, and staged diagnostics. |
 | `tasks/sprints/sprint-26-credit-gated-api-access.md` | Active sprint for fair-use chat, verified-credit API access, and signed inference capabilities. |
-| `tasks/sprints/sprint-27-frontend-experience-and-model-discovery.md` | Proposed sprint for remote-model discovery, role clarity, coherent runtime status, diagnostics, and desktop UI optimization. |
+| `tasks/sprints/sprint-27-frontend-experience-and-model-discovery.md` | Locally implemented remote-model discovery, role clarity, coherent runtime status, diagnostics, and desktop UI optimization; packaged review remains open. |
 | `tasks/sprints/sprint-28-peer-addressed-expert-protocol.md` | Locally implemented peer-unique expert ownership, exact peer dispatch, and Hivemind 1.1.12 compatibility; physical rollout remains open. |
 | `tasks/sprints/sprint-29-persistent-network-supervisor.md` | Implemented backend-owned discovery, explicit network state, last-good topology, publication ownership, evidence-based transport recovery, and exact-handle lifecycle ownership; physical validation remains open. |
 | `tasks/sprints/sprint-30-transactional-swarm-placement.md` | Implemented source sprint for authenticated atomic layer reservations, provider lease states, expiry, and backend lifecycle integration; physical validation remains open. |
 | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` | Source-implemented sprint for bounded remote prefill/decode sessions, key/value caches, parity, diagnostics, and safe recovery; physical relay acceptance remains open. |
-| `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` | Planned sprint for separated infrastructure roles, independent redundancy, failure injection, and final architecture evidence. |
+| `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` | Source-implemented separated infrastructure roles, independent redundancy configuration, failure injection, and final architecture evidence; physical deployment remains open. |
 | `tasks/archive/sprint-10-gated-model-local-import.md`          | Completed sprint for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
 | `tasks/archive/sprint-11-instruction-ready-model-expansion.md` | Completed sprint for instruction-ready/chat-ready model registry expansion, tuning labels, local-import contracts, and live TinyLlama generation validation. |
 | `tasks/archive/sprint-12-auth-lifecycle-and-startup-cleanup.md` | Completed sprint for public-model auth isolation, failed-start cleanup, model cache cleanup, local expert routing, and safetensors/bin-index gated import validation. |
@@ -242,7 +243,7 @@
 | `frontend/src/main/backendLauncher.ts`  | Validated WSL detection, dependency sync, FastAPI health, diagnostics, PID lifecycle, and sanitized Windows acceptance evidence. |
 | `frontend/src/preload/`                 | Electron preload bridge.                      |
 | `frontend/src/renderer/`                | React renderer application.                   |
-| `frontend/src/renderer/src/api/`        | HTTP/WebSocket client, persistent sanitized diagnostics, independent refresh, and serving-plan freshness policy. |
+| `frontend/src/renderer/src/api/`        | HTTP/WebSocket client, persistent sanitized diagnostics, independent refresh, serving-plan freshness, and explicit model/runtime presentation state. |
 | `frontend/src/renderer/src/pages/`      | Dashboard, Network, Chat, Monitoring, and Settings pages. |
 | `frontend/src/renderer/src/components/` | Shared renderer components.                   |
 | `frontend/src/renderer/src/assets/`     | CSS and static renderer assets.               |

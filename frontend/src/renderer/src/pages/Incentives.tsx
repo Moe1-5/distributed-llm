@@ -1,9 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  api,
-  type DeveloperAccessStatus,
-  type IncentivesStatus
-} from '../api/client'
+import { api, type DeveloperAccessStatus, type IncentivesStatus } from '../api/client'
 
 function shortIdentity(value: string | null): string {
   if (!value) return 'Not initialized'
@@ -52,6 +48,15 @@ export default function Incentives(): React.JSX.Element {
   }, [refresh])
 
   const mode = status?.mode ?? 'off'
+  const keyDisabledReason = !access
+    ? 'Developer access status is still loading.'
+    : !access.developer_api_enabled
+      ? 'Developer API access is disabled in the current rollout mode.'
+      : !access.eligible_for_api_key
+        ? 'Earn a positive verified useful-work credit balance before creating a key.'
+        : !keyName.trim()
+          ? 'Enter a name for the new API key.'
+          : null
 
   const createApiKey = useCallback(async () => {
     if (keyAction) return
@@ -265,9 +270,9 @@ export default function Incentives(): React.JSX.Element {
             </button>
           </div>
 
-          {!access?.eligible_for_api_key && (
+          {keyDisabledReason && (
             <p className="mt-3 font-mono text-[10px] text-amber">
-              A positive verified useful-work credit balance is required.
+              Create key unavailable: {keyDisabledReason}
             </p>
           )}
 
@@ -276,9 +281,7 @@ export default function Incentives(): React.JSX.Element {
               <p className="font-mono text-[10px] font-semibold text-amber uppercase">
                 API key shown once
               </p>
-              <p className="mt-2 break-all font-mono text-[11px] text-text-primary">
-                {newApiKey}
-              </p>
+              <p className="mt-2 break-all font-mono text-[11px] text-text-primary">{newApiKey}</p>
               <button
                 type="button"
                 onClick={() => setNewApiKey(null)}
@@ -295,9 +298,7 @@ export default function Incentives(): React.JSX.Element {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="truncate text-[13px] font-medium text-text-primary">{key.name}</p>
-                    <p className="mt-1 font-mono text-[10px] text-text-dim">
-                      {key.key_prefix}...
-                    </p>
+                    <p className="mt-1 font-mono text-[10px] text-text-dim">{key.key_prefix}...</p>
                   </div>
                   <span
                     className={`font-mono text-[9px] font-semibold uppercase ${key.revoked_at ? 'text-red' : 'text-green'}`}

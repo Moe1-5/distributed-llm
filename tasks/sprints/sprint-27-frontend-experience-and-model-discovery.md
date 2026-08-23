@@ -3,7 +3,7 @@
 **Goal:** Make the desktop application clearly explain what can run remotely, what is served locally, which runtime stage is healthy or failed, and what the user should do next.
 **Start:** 2026-08-22
 **End:** TBD
-**Status:** Active; the first coverage-freshness and diagnostic slice is implemented, with broader workflow work still open.
+**Status:** Implemented and locally verified on `feature/distributed-runtime-architecture`; retained as active until explicit sprint closure and packaged workflow review.
 
 ## Problem Summary
 
@@ -21,18 +21,18 @@ Users cannot currently answer these basic questions from the interface:
 
 ## Planned Work
 
-- [ ] Audit Nodes, Network, Inference, Monitoring, Incentives, and Settings as one end-to-end participant workflow.
-- [ ] Add an explicit model-availability contract with local, remotely discoverable, route-validating, remotely runnable, gated, and unavailable states.
-- [ ] Present a model catalog that labels `Can generate remotely`, `Serving locally`, `Needs providers`, and `Requires local access` without conflating those states.
-- [ ] Separate the `Serve layers` contribution workflow from the `Run inference` consumer workflow and explain each role in plain language.
+- [x] Audit Nodes, Network, Inference, Monitoring, Incentives, and Settings as one end-to-end participant workflow.
+- [x] Add an explicit model-availability contract with local, remotely discoverable, route-validating, remotely runnable, gated, and unavailable states.
+- [x] Present a model catalog that labels `Can generate remotely`, `Serving locally`, `Needs providers`, and `Requires local access` without conflating those states.
+- [x] Separate the `Serve layers` contribution workflow from the `Run inference` consumer workflow and explain each role in plain language.
 - [x] Label pre-generator coverage as provisional and replace `Needs layers` with a discovery-aware state when the serving-plan refresh is not authoritative.
-- [ ] Define one status hierarchy for backend, DHT discovery, provider RPC health, tensor canary, active generation stream, local WebSocket, and diagnostics.
+- [x] Define one status hierarchy for backend, DHT discovery, provider RPC health, tensor canary, active generation stream, local WebSocket, and diagnostics.
 - [x] Remove stale `Waiting for generator route` messages immediately after authoritative readiness changes.
 - [x] Show the latest transport failure with its stage, peer, layer range, request identity, failure class, and retained route context in Settings diagnostics.
-- [ ] Make Trace a non-conflicting diagnostic job with an appropriate deadline and visible progress instead of the generic eight-second API timeout, and label it as legacy-only unless a distinct receipt-path diagnostic is implemented.
-- [ ] Explain the difference between local Nodes, remote providers, selected routes, and unprobed workers in Monitoring.
-- [ ] Add loading, empty, stale, mixed-version, timeout, suspended, and recovery states to renderer tests.
-- [ ] Review responsive layout, keyboard navigation, accessibility labels, contrast, information density, and error-copy consistency across the desktop UI.
+- [x] Make Trace a non-conflicting diagnostic job with an appropriate deadline and visible progress instead of the generic eight-second API timeout, and label it as legacy-only unless a distinct receipt-path diagnostic is implemented.
+- [x] Explain the difference between local Nodes, remote providers, selected routes, and unprobed workers in Monitoring.
+- [x] Add loading, empty, stale, mixed-version, timeout, suspended, and recovery states to renderer tests.
+- [x] Review responsive layout, keyboard navigation, accessibility labels, contrast, information density, and error-copy consistency across the desktop UI.
 
 ## Acceptance Criteria
 
@@ -67,3 +67,10 @@ Users cannot currently answer these basic questions from the interface:
 - Why: Device 1 and Device 2 both displayed `0-6` because the frontend treated the backend's immediate local-only snapshot as authoritative while remote DHT discovery was still refreshing, and later split inference exposed too little request-correlated evidence after a streamed response failed.
 - Verification: all 293 backend tests and 54 subtests pass; four renderer-flow tests, 20 launcher tests, frontend type checking, lint with zero errors, and the production Electron/Vite build pass. Existing unrelated formatting warnings remain in lint output. The clean-identity portable EXE embeds commit `232acb1bdcba5c7347a8f58aba056881115a8308` with `sourceDirty: false`; its audit reports 36 ASAR entries, zero forbidden entries, 87,663,434 bytes, and SHA-256 `0b6121de080fb5f16df53d9f47df95d39a5ff07cd99892eef1f0e2af23de89ee`.
 - Status: a packaged physical retest is still required. Start the two serving devices sequentially: wait for Device 1 to publish `0-6`, then require Device 2 to show a FRESH snapshot with `0-6` already covered and `6-12` recommended before starting it. Simultaneous starts can still race because a recommendation is a snapshot, not a distributed reservation.
+
+### 2026-08-23 - Complete explicit model, runtime, and diagnostic presentation contracts
+
+- What changed: added a schema-versioned backend model-availability contract; layered the fast catalog with a bounded full availability refresh; labelled remote generation, local serving, missing providers, and gated local access; separated provider and consumer guidance; added one tested hierarchy for backend, DHT, RPC, canary, generator, active generation, WebSocket, and legacy diagnostics; converted Trace to a pollable lifecycle job with a three-minute renderer deadline and explicit legacy-path warning; added Monitoring ownership explanations; made the Network layout and sidebar responsive; removed the static `DHT Active` claim; and added keyboard focus, reduced-motion, contrast, and primary-action recovery improvements.
+- Why: the physical tests showed that independent booleans and stale snapshots could produce contradictory readiness claims, an eight-second Trace timeout could obscure a second distributed attempt, and users could not distinguish local processes from remote DHT providers or selected routes.
+- Verification: all 449 backend unit tests, 20 launcher tests, and seven renderer state tests pass; frontend type checking and the production Electron/Vite build pass; lint reports zero errors and 78 pre-existing formatting warnings; `git diff --check` passes.
+- Status: Sprint 27 source acceptance is complete. Packaged visual review remains part of the consolidated Windows physical matrix and the sprint stays active until the user explicitly requests closure.

@@ -705,11 +705,15 @@ export default function Settings(): React.JSX.Element {
 
           {/* Token input */}
           <div className="flex flex-col gap-2">
-            <label className="font-mono text-[10px] tracking-widest text-text-dim uppercase">
+            <label
+              htmlFor="hf-token-diagnostic"
+              className="font-mono text-[10px] tracking-widest text-text-dim uppercase"
+            >
               {tokenSet ? 'Replace Token' : 'Enter Token'}
             </label>
             <div className="flex gap-2">
               <input
+                id="hf-token-diagnostic"
                 type="password"
                 value={tokenInput}
                 onChange={(e) => setTokenInput(e.target.value)}
@@ -724,6 +728,10 @@ export default function Settings(): React.JSX.Element {
                 "
               />
               <button
+                type="button"
+                aria-label={
+                  tokenSet ? 'Replace saved Hugging Face token' : 'Save Hugging Face token'
+                }
                 onClick={() => void handleSave()}
                 disabled={!tokenInput.trim() || saveState === 'saving'}
                 className={`
@@ -767,6 +775,8 @@ export default function Settings(): React.JSX.Element {
                 </p>
               </div>
               <button
+                type="button"
+                aria-label="Remove saved Hugging Face token"
                 onClick={() => void handleDelete()}
                 disabled={saveState === 'deleting'}
                 className="
