@@ -63,9 +63,14 @@
   "scenarios": {
     "coordinator_outage": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
     "dht_loss": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "discovery_before_roles": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
     "relay_loss": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
     "worker_loss": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
-    "generator_recovery": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"}
+    "generator_recovery": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "packaged_lifecycle": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "placement_race": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "role_identity": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},
+    "service_restart_isolation": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"}
   },
   "topologies": {
     "direct": {"ok": false, "evidence_sha256": "REPLACE_WITH_64_CHARACTER_SHA256"},

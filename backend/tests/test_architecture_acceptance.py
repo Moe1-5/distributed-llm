@@ -61,9 +61,14 @@ def matrix() -> dict:
             for name in (
                 "coordinator_outage",
                 "dht_loss",
+                "discovery_before_roles",
                 "relay_loss",
                 "worker_loss",
                 "generator_recovery",
+                "packaged_lifecycle",
+                "placement_race",
+                "role_identity",
+                "service_restart_isolation",
             )
         },
         "topologies": topologies,

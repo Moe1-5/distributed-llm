@@ -12,6 +12,7 @@ import {
   WslBackendLauncher,
   buildWindowsAcceptanceReport,
   buildBackendLaunchScript,
+  buildBackendSourceIdentityScript,
   buildDependencySyncScript,
   buildBackendStopScript,
   buildWslBashArgs,
@@ -89,7 +90,13 @@ function fakeRuntime(
     run: async (file, args): Promise<CommandResult> => {
       calls.push([file, args])
       if (args.includes('--list')) {
-        return { stdout: '  NAME      STATE           VERSION\n* Ubuntu    Running         2\n', stderr: '' }
+        return {
+          stdout: '  NAME      STATE           VERSION\n* Ubuntu    Running         2\n',
+          stderr: ''
+        }
+      }
+      if (args.includes('-lc') && decodeWslScript(args).includes('git rev-parse HEAD')) {
+        return { stdout: `${TEST_COMMIT}\nclean\n`, stderr: '' }
       }
       return { stdout: '', stderr: '' }
     },
@@ -108,9 +115,10 @@ function fakeRuntime(
 }
 
 test('parses null-delimited WSL distro output', () => {
-  assert.deepEqual(parseWslDistros('\uFEFFU\u0000b\u0000u\u0000n\u0000t\u0000u\u0000\r\u0000\n\u0000'), [
-    'Ubuntu'
-  ])
+  assert.deepEqual(
+    parseWslDistros('\uFEFFU\u0000b\u0000u\u0000n\u0000t\u0000u\u0000\r\u0000\n\u0000'),
+    ['Ubuntu']
+  )
 })
 
 test('parses selected distro names and WSL versions', () => {
@@ -138,7 +146,10 @@ test('hashes the selected packaged artifact without exposing its path', async ()
     await writeFile(artifactPath, 'verified artifact')
     const identity = await readArtifactIdentity(artifactPath)
 
-    assert.equal(resolvePackagedArtifactPath('/extracted/DistribLLM.exe', artifactPath), artifactPath)
+    assert.equal(
+      resolvePackagedArtifactPath('/extracted/DistribLLM.exe', artifactPath),
+      artifactPath
+    )
     assert.deepEqual(identity, {
       fileName: 'DistribLLM-portable.exe',
       sha256: '2127de9293abf1503418b9f78b3d530cdd2263417064815ee46b7ecdf1215ddc',
@@ -220,6 +231,14 @@ test('sync and stop scripts guard WSL runtime directories before using uv or pid
   assert.match(stopScript, /pid_file="\$XDG_STATE_HOME\/distribllm\/backend\.pid"/)
 })
 
+test('source identity script reports the tracked-clean backend Git revision', () => {
+  const script = buildBackendSourceIdentityScript(validConfig())
+
+  assert.match(script, /git rev-parse HEAD/)
+  assert.match(script, /git status --porcelain --untracked-files=no/)
+  assert.doesNotMatch(script, /git status --porcelain\s*$/m)
+})
+
 test('transports multiline WSL scripts without relying on Windows preserving newlines', () => {
   const script = 'set -eu\nexport EXAMPLE="one two"\nprintf "%s\\n" "$EXAMPLE"'
   const args = buildWslBashArgs('Ubuntu', script)
@@ -268,7 +287,10 @@ test('rejects a selected distro that still uses WSL 1', async () => {
   const runtime = fakeRuntime({
     run: async (_file, args) =>
       args.includes('--list')
-        ? { stdout: '  NAME      STATE           VERSION\n* Ubuntu    Running         1\n', stderr: '' }
+        ? {
+            stdout: '  NAME      STATE           VERSION\n* Ubuntu    Running         1\n',
+            stderr: ''
+          }
         : { stdout: '', stderr: '' }
   })
   const launcher = new WslBackendLauncher(validConfig(), runtime)
@@ -328,7 +350,10 @@ test('does not restart after managed shutdown fails', async () => {
     run: async (_file, args) => {
       runCalls += 1
       if (args.includes('--list')) {
-        return { stdout: '  NAME      STATE           VERSION\n* Ubuntu    Running         2\n', stderr: '' }
+        return {
+          stdout: '  NAME      STATE           VERSION\n* Ubuntu    Running         2\n',
+          stderr: ''
+        }
       }
       if (args.includes('-lc') && decodeWslScript(args).includes('kill -TERM')) {
         throw new Error('WSL stopped responding')
@@ -350,7 +375,7 @@ test('does not restart after managed shutdown fails', async () => {
 test('exports sanitized acceptance evidence after a complete managed lifecycle', async () => {
   const config = validConfig({ syncDependencies: true })
   const runtime = fakeRuntime()
-  const launcher = new WslBackendLauncher(config, runtime)
+  const launcher = new WslBackendLauncher(config, runtime, TEST_COMMIT)
 
   await launcher.start()
   await launcher.stop()
@@ -362,10 +387,14 @@ test('exports sanitized acceptance evidence after a complete managed lifecycle',
   assert.equal(report.checks.backendHealthReady, true)
   assert.equal(report.checks.backendStoppedCleanly, true)
   assert.equal(report.checks.sourceCommitIdentified, true)
+  assert.equal(report.checks.backendSourceMatchesApplication, true)
   assert.equal(report.checks.artifactIdentified, true)
   assert.equal(report.configuration.backendPathConfigured, true)
   assert.equal(report.configuration.initialPeerCount, 1)
   assert.equal(report.launcher.currentStatus.state, 'idle')
+  assert.equal(report.schemaVersion, 3)
+  assert.equal(report.backendRuntime.sourceCommit, TEST_COMMIT)
+  assert.equal(report.backendRuntime.sourceClean, true)
   assert.deepEqual(
     report.launcher.transitions.map((transition) => transition.state),
     ['idle', 'checking', 'installing_backend', 'starting_backend', 'ready', 'stopping', 'idle']
@@ -396,7 +425,9 @@ test('acceptance report cannot pass outside a packaged Windows lifecycle', () =>
       dependencySyncRequested: true,
       dependencySyncCompleted: true,
       backendHealthReady: true,
-      backendStoppedCleanly: true
+      backendStoppedCleanly: true,
+      backendSourceCommit: null,
+      backendSourceClean: false
     },
     packagedApplication({
       packaged: false,
@@ -413,7 +444,44 @@ test('acceptance report cannot pass outside a packaged Windows lifecycle', () =>
   assert.equal(report.checks.windowsHost, false)
   assert.equal(report.checks.packagedApplication, false)
   assert.equal(report.checks.sourceCommitIdentified, false)
+  assert.equal(report.checks.backendSourceMatchesApplication, false)
   assert.equal(report.checks.artifactIdentified, false)
+})
+
+test('packaged launcher rejects a mismatched WSL backend before startup', async () => {
+  const runtime = fakeRuntime({
+    run: async (_file, args) => {
+      runtime.calls.push([_file, args])
+      if (args.includes('--list')) {
+        return {
+          stdout: '  NAME      STATE           VERSION\n* Ubuntu    Running         2\n',
+          stderr: ''
+        }
+      }
+      if (args.includes('-lc') && decodeWslScript(args).includes('git rev-parse HEAD')) {
+        return { stdout: `${'c'.repeat(40)}\nclean\n`, stderr: '' }
+      }
+      return { stdout: '', stderr: '' }
+    }
+  })
+  const launcher = new WslBackendLauncher(
+    validConfig({ syncDependencies: true }),
+    runtime,
+    TEST_COMMIT
+  )
+
+  const status = await launcher.start()
+
+  assert.equal(status.state, 'failed')
+  assert.equal(status.diagnosticCode, 'backend_source_mismatch')
+  assert.match(status.detail ?? '', new RegExp(TEST_COMMIT))
+  assert.equal(runtime.child.listenerCount('exit'), 0)
+  assert.equal(
+    runtime.calls.some(
+      ([, args]) => args.includes('-lc') && decodeWslScript(args).includes('uv sync')
+    ),
+    false
+  )
 })
 
 test('changing launcher configuration clears evidence from the previous lifecycle', async () => {

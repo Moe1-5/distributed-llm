@@ -50,6 +50,8 @@ export interface BackendLauncherEvidence {
   dependencySyncCompleted: boolean
   backendHealthReady: boolean
   backendStoppedCleanly: boolean
+  backendSourceCommit: string | null
+  backendSourceClean: boolean
 }
 
 export interface WindowsAcceptanceApplication {
@@ -65,9 +67,13 @@ export interface WindowsAcceptanceApplication {
 }
 
 export interface WindowsAcceptanceReport {
-  schemaVersion: 2
+  schemaVersion: 3
   capturedAt: string
   application: WindowsAcceptanceApplication
+  backendRuntime: {
+    sourceCommit: string | null
+    sourceClean: boolean
+  }
   configuration: {
     distroName: string
     backendPathConfigured: boolean
@@ -86,6 +92,7 @@ export interface WindowsAcceptanceReport {
     windowsHost: boolean
     packagedApplication: boolean
     sourceCommitIdentified: boolean
+    backendSourceMatchesApplication: boolean
     artifactIdentified: boolean
     wslAvailable: boolean
     distroPresent: boolean
@@ -163,6 +170,10 @@ export function buildWindowsAcceptanceReport(
     packagedApplication: application.packaged,
     sourceCommitIdentified:
       /^[0-9a-f]{40}$/.test(application.sourceCommit ?? '') && !application.sourceDirty,
+    backendSourceMatchesApplication:
+      /^[0-9a-f]{40}$/.test(evidence.backendSourceCommit ?? '') &&
+      evidence.backendSourceClean &&
+      evidence.backendSourceCommit === application.sourceCommit,
     artifactIdentified:
       /^[0-9a-f]{64}$/.test(application.artifactSha256 ?? '') &&
       Number.isInteger(application.artifactBytes) &&
@@ -180,9 +191,13 @@ export function buildWindowsAcceptanceReport(
   }
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     capturedAt,
     application: { ...application },
+    backendRuntime: {
+      sourceCommit: evidence.backendSourceCommit,
+      sourceClean: evidence.backendSourceClean
+    },
     configuration: {
       distroName: config.distroName,
       backendPathConfigured: Boolean(config.backendPath.trim()),
@@ -203,7 +218,10 @@ export function buildWindowsAcceptanceReport(
 }
 
 export function decodeWslOutput(output: string): string {
-  return output.replace(/^\uFEFF/, '').replaceAll('\u0000', '').replaceAll('\r', '')
+  return output
+    .replace(/^\uFEFF/, '')
+    .replaceAll('\u0000', '')
+    .replaceAll('\r', '')
 }
 
 export function parseWslDistros(output: string): string[] {
@@ -271,7 +289,9 @@ export function validateBackendLauncherConfig(config: BackendLauncherConfig): st
         backendUrl.search ||
         backendUrl.hash
       ) {
-        errors.push('Backend URL must use HTTP on a loopback address without credentials or query parameters.')
+        errors.push(
+          'Backend URL must use HTTP on a loopback address without credentials or query parameters.'
+        )
       }
     } catch {
       errors.push('Backend URL is invalid.')
@@ -346,10 +366,10 @@ export function buildBackendLaunchScript(config: BackendLauncherConfig): string 
     `env ${environment} uv run --python 3.12 python main.py &`,
     'backend_pid=$!',
     'printf "%s\\n" "$backend_pid" > "$pid_file"',
-    "cleanup() { rm -f \"$pid_file\"; }",
-    "terminate() { kill -TERM \"$backend_pid\" 2>/dev/null || true; wait \"$backend_pid\" || true; cleanup; exit 0; }",
-    "trap terminate TERM INT",
-    "trap cleanup EXIT",
+    'cleanup() { rm -f "$pid_file"; }',
+    'terminate() { kill -TERM "$backend_pid" 2>/dev/null || true; wait "$backend_pid" || true; cleanup; exit 0; }',
+    'trap terminate TERM INT',
+    'trap cleanup EXIT',
     'wait "$backend_pid"'
   ].join('\n')
 }
@@ -362,6 +382,17 @@ export function buildDependencySyncScript(config: BackendLauncherConfig): string
     `cd -- ${shellQuote(config.backendPath)}`,
     'test -f pyproject.toml || { echo "pyproject.toml is missing" >&2; exit 2; }',
     'uv sync --python 3.12'
+  ].join('\n')
+}
+
+export function buildBackendSourceIdentityScript(config: BackendLauncherConfig): string {
+  return [
+    'set -eu',
+    `cd -- ${shellQuote(config.backendPath)}`,
+    'command -v git >/dev/null 2>&1 || { echo "git is not installed" >&2; exit 127; }',
+    'git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "backend path is not a Git checkout" >&2; exit 2; }',
+    'git rev-parse HEAD',
+    'test -z "$(git status --porcelain --untracked-files=no)" && printf "clean\\n" || printf "dirty\\n"'
   ].join('\n')
 }
 
@@ -395,10 +426,16 @@ function diagnosticFromOutput(output: string): { code: string; message: string }
     normalized.includes('mkdir: cannot create directory') &&
     normalized.includes('no such file or directory')
   ) {
-    return { code: 'runtime_directory_invalid', message: 'The WSL runtime directory configuration is invalid.' }
+    return {
+      code: 'runtime_directory_invalid',
+      message: 'The WSL runtime directory configuration is invalid.'
+    }
   }
   if (normalized.includes('pyproject.toml is missing') || normalized.includes('no such file')) {
-    return { code: 'backend_path_invalid', message: 'Backend files were not found at the configured path.' }
+    return {
+      code: 'backend_path_invalid',
+      message: 'Backend files were not found at the configured path.'
+    }
   }
   return { code: 'backend_start_failed', message: 'The managed backend failed to start.' }
 }
@@ -413,7 +450,8 @@ export class WslBackendLauncher extends EventEmitter {
 
   constructor(
     config: BackendLauncherConfig,
-    private readonly runtime: BackendLauncherRuntime
+    private readonly runtime: BackendLauncherRuntime,
+    private readonly expectedSourceCommit: string | null = null
   ) {
     super()
     this.config = { ...config }
@@ -437,16 +475,26 @@ export class WslBackendLauncher extends EventEmitter {
       dependencySyncRequested: false,
       dependencySyncCompleted: false,
       backendHealthReady: false,
-      backendStoppedCleanly: false
+      backendStoppedCleanly: false,
+      backendSourceCommit: null,
+      backendSourceClean: false
     }
   }
 
   getConfig(): BackendLauncherConfig {
-    return { ...this.config, initialPeers: [...this.config.initialPeers], trustedRelays: [...this.config.trustedRelays] }
+    return {
+      ...this.config,
+      initialPeers: [...this.config.initialPeers],
+      trustedRelays: [...this.config.trustedRelays]
+    }
   }
 
   setConfig(config: BackendLauncherConfig): void {
-    this.config = { ...config, initialPeers: [...config.initialPeers], trustedRelays: [...config.trustedRelays] }
+    this.config = {
+      ...config,
+      initialPeers: [...config.initialPeers],
+      trustedRelays: [...config.trustedRelays]
+    }
     this.evidence = this.initialEvidence()
   }
 
@@ -506,7 +554,12 @@ export class WslBackendLauncher extends EventEmitter {
 
     const validationErrors = validateBackendLauncherConfig(this.config)
     if (validationErrors.length > 0) {
-      return this.update('needs_setup', 'Managed backend setup is incomplete.', 'configuration_invalid', validationErrors.join(' '))
+      return this.update(
+        'needs_setup',
+        'Managed backend setup is incomplete.',
+        'configuration_invalid',
+        validationErrors.join(' ')
+      )
     }
 
     this.update('checking', 'Checking WSL 2 and the configured distro.')
@@ -551,6 +604,42 @@ export class WslBackendLauncher extends EventEmitter {
       )
     }
     this.evidence.distroWsl2 = true
+
+    if (this.expectedSourceCommit) {
+      try {
+        const identity = await this.runtime.run(
+          'wsl.exe',
+          buildWslBashArgs(this.config.distroName, buildBackendSourceIdentityScript(this.config))
+        )
+        const [sourceCommit = '', cleanliness = ''] = decodeWslOutput(identity.stdout)
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+        this.evidence.backendSourceCommit = /^[0-9a-f]{40}$/.test(sourceCommit)
+          ? sourceCommit
+          : null
+        this.evidence.backendSourceClean = cleanliness === 'clean'
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        return this.update(
+          'failed',
+          'Could not identify the WSL backend source revision.',
+          'backend_source_unidentified',
+          detail
+        )
+      }
+      if (
+        this.evidence.backendSourceCommit !== this.expectedSourceCommit ||
+        !this.evidence.backendSourceClean
+      ) {
+        return this.update(
+          'failed',
+          'WSL backend source does not match this application build.',
+          'backend_source_mismatch',
+          `Expected ${this.expectedSourceCommit}; found ${this.evidence.backendSourceCommit ?? 'unknown'} (${this.evidence.backendSourceClean ? 'clean' : 'dirty'} tracked source). Pull the packaged source commit before starting.`
+        )
+      }
+    }
 
     if (this.config.syncDependencies) {
       this.evidence.dependencySyncRequested = true
@@ -636,7 +725,12 @@ export class WslBackendLauncher extends EventEmitter {
       this.child?.kill('SIGTERM')
       const detail = error instanceof Error ? error.message : String(error)
       this.child = null
-      return this.update('failed', 'Managed backend did not stop cleanly.', 'backend_stop_failed', detail)
+      return this.update(
+        'failed',
+        'Managed backend did not stop cleanly.',
+        'backend_stop_failed',
+        detail
+      )
     }
     this.child?.kill('SIGTERM')
     this.child = null

@@ -26,7 +26,7 @@ def windows_report(
     artifact_sha256: str = ARTIFACT_SHA256,
 ) -> dict:
     return {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "capturedAt": "2026-08-13T00:00:00.000Z",
         "ok": True,
         "application": {
@@ -39,6 +39,10 @@ def windows_report(
             "artifactFileName": "DistribLLM-1.0.0-portable.exe",
             "artifactSha256": artifact_sha256,
             "artifactBytes": 87652373,
+        },
+        "backendRuntime": {
+            "sourceCommit": source_commit,
+            "sourceClean": True,
         },
         "configuration": {
             "distroName": "Ubuntu",
@@ -62,6 +66,7 @@ def windows_report(
             "windowsHost": True,
             "packagedApplication": True,
             "sourceCommitIdentified": True,
+            "backendSourceMatchesApplication": True,
             "artifactIdentified": True,
             "wslAvailable": True,
             "distroPresent": True,
@@ -91,7 +96,7 @@ def vps_report() -> dict:
         "errors": [],
         "status": {
             "peer_id": "QmRelay",
-            "deployment_commit": "abc1234",
+            "deployment_commit": SOURCE_COMMIT,
             "hivemind_version": "1.1.12",
             "visible_maddrs": [RELAY],
         },
@@ -195,7 +200,7 @@ class AcceptanceManifestTests(unittest.TestCase):
         self.assertEqual(report["windows"]["source_commits"], [SOURCE_COMMIT])
         self.assertEqual(report["windows"]["artifact_sha256"], [ARTIFACT_SHA256])
         self.assertEqual(report["vps"]["peer_id"], "QmRelay")
-        self.assertEqual(len(report["manual_gates"]), 4)
+        self.assertEqual(len(report["manual_gates"]), 6)
 
     def test_rejects_incompatible_windows_and_inference_reports(self) -> None:
         mismatched_direct = inference_report("direct")
@@ -223,6 +228,21 @@ class AcceptanceManifestTests(unittest.TestCase):
         self.assertIn("Windows reports use different source commits", report["errors"])
         self.assertIn("Windows reports use different executable hashes", report["errors"])
 
+    def test_rejects_wsl_backend_revision_that_differs_from_application(self) -> None:
+        mismatched = windows_report()
+        mismatched["backendRuntime"]["sourceCommit"] = "d" * 40
+        mismatched["checks"]["backendSourceMatchesApplication"] = False
+
+        report = validate(windows_reports=[windows_report(), mismatched])
+
+        self.assertFalse(report["ok"])
+        rendered = "\n".join(report["errors"])
+        self.assertIn(
+            "WSL backend source does not match its application commit",
+            rendered,
+        )
+        self.assertIn("backendSourceMatchesApplication", rendered)
+
     def test_rejects_probe_not_bound_to_validated_vps(self) -> None:
         probe = relay_probe()
         probe["trusted_relays"] = [
@@ -247,6 +267,18 @@ class AcceptanceManifestTests(unittest.TestCase):
         rendered = "\n".join(report["errors"])
         self.assertIn("restart continuity was not validated", rendered)
         self.assertIn("identity hash continuity was not validated", rendered)
+
+    def test_rejects_vps_deployment_from_another_commit(self) -> None:
+        vps = vps_report()
+        vps["status"]["deployment_commit"] = "d" * 40
+
+        report = validate(vps_report=vps)
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "VPS deployment commit does not match the reviewed Windows source commit",
+            report["errors"],
+        )
 
     def test_rejects_relay_probe_from_another_vps_validation_run(self) -> None:
         probe = relay_probe()
@@ -278,7 +310,7 @@ class AcceptanceManifestTests(unittest.TestCase):
         self.assertTrue(report["ok"], report["errors"])
         self.assertEqual(report["schema_version"], 2)
         self.assertTrue(report["architecture"]["ok"])
-        self.assertEqual(len(report["manual_gates"]), 5)
+        self.assertEqual(len(report["manual_gates"]), 7)
 
         architecture["participant_source_commit"] = "d" * 40
         rejected = validate(

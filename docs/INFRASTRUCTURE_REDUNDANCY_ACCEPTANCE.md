@@ -142,6 +142,20 @@ proves that separately.
 Capture all logs before restoring a stopped component. Hash each evidence
 bundle with `sha256sum`; those hashes go into the architecture matrix.
 
+The matrix also requires these cross-sprint scenarios so physical closure
+cannot silently omit earlier lifecycle and control-plane gates:
+
+| Scenario | Evidence that must be hashed |
+|---|---|
+| `packaged_lifecycle` | Both schema-three Windows reports from the same EXE, including one observed clean-Windows first run, dependency sync, ready state, managed stop, and no orphan backend. |
+| `discovery_before_roles` | A packaged participant diagnostic export showing an existing remote provider before that participant starts either a worker or generator role. |
+| `role_identity` | Before/after diagnostics showing co-located worker and generator peer IDs are distinct and stable across one completed request and generator restart. |
+| `placement_race` | Correlated coordinator and participant records from two simultaneous six-layer Recommended starts showing atomic non-overlapping reservations, followed by expiry/recovery evidence. |
+| `service_restart_isolation` | Role-specific validation and health reports before and after restarting DHT, relay, coordinator, and settlement individually, showing no other role's identity or state was corrupted. |
+
+An `ok` flag without the corresponding preserved evidence bundle is not a
+pass. Keep participant, service, and diagnostic timestamps under one test ID.
+
 ### Baseline and complementary split
 
 1. Use incentives off on both devices.
@@ -238,7 +252,7 @@ Copy `docs/ARCHITECTURE_FAILURE_MATRIX_TEMPLATE.json` into the private evidence
 directory and replace every placeholder from the captured reports. The template
 fails closed until each test has real evidence. It is a JSON document with kind `distributed_architecture_failure_matrix`,
 schema version one, the participant commit, the six component records, pinned
-protocol revisions, five failure scenarios, eight topology gates, and rollout
+protocol revisions, ten failure scenarios, eight topology gates, and rollout
 ordering. Every scenario and topology item contains `ok=true` plus the SHA-256
 of its evidence bundle. Validate it in participant WSL:
 
@@ -256,6 +270,11 @@ to both Windows artifact reports and will reject missing redundancy, colocated
 failure domains, duplicate peer identities, an unproven three-provider route,
 protocol drift, missing evidence hashes, or shadow testing performed before
 the incentives-off baseline.
+
+The legacy VPS restart report supplied to the final manifest must also expose
+the full reviewed 40-character deployment commit. The manifest rejects it if
+that commit differs from the schema-three Windows application and WSL backend
+commit.
 
 The `topologies.incentives_off.evidence_sha256` value must be the SHA-256 of
 the actual passing `relay-off-report.json`, not a combined folder or manually

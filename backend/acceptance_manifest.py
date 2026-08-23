@@ -20,6 +20,7 @@ REQUIRED_WINDOWS_CHECKS = (
     "windowsHost",
     "packagedApplication",
     "sourceCommitIdentified",
+    "backendSourceMatchesApplication",
     "artifactIdentified",
     "wslAvailable",
     "distroPresent",
@@ -89,7 +90,7 @@ def _validate_windows_reports(
 
     for index, report in enumerate(reports, start=1):
         prefix = f"Windows report {index}"
-        if report.get("schemaVersion") != 2:
+        if report.get("schemaVersion") != 3:
             errors.append(f"{prefix} has an unsupported schema version")
         if report.get("ok") is not True:
             errors.append(f"{prefix} did not pass its managed WSL lifecycle")
@@ -110,6 +111,13 @@ def _validate_windows_reports(
             errors.append(f"{prefix} has no valid source commit")
         if application.get("sourceDirty") is not False:
             errors.append(f"{prefix} was built from dirty tracked source")
+        backend_runtime = _mapping(report.get("backendRuntime"))
+        if backend_runtime.get("sourceCommit") != source_commit:
+            errors.append(
+                f"{prefix} WSL backend source does not match its application commit"
+            )
+        if backend_runtime.get("sourceClean") is not True:
+            errors.append(f"{prefix} WSL backend has dirty tracked source")
         artifact_sha256 = str(application.get("artifactSha256", "")).strip()
         if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256):
             artifact_hashes.add(artifact_sha256)
@@ -194,9 +202,12 @@ def _validate_vps_and_probe(
 
     status = _mapping(vps_report.get("status"))
     relay_peer_id = str(status.get("peer_id", "")).strip()
+    deployment_commit = str(status.get("deployment_commit", "")).strip()
     visible_maddrs = _string_list(status.get("visible_maddrs"))
     if not relay_peer_id:
         errors.append("VPS validation has no relay peer ID")
+    if not re.fullmatch(r"[0-9a-f]{40}", deployment_commit):
+        errors.append("VPS validation has no full deployment commit")
     if status.get("hivemind_version") != expected_hivemind_version:
         errors.append("VPS Hivemind version does not match the expected runtime")
 
@@ -239,7 +250,7 @@ def _validate_vps_and_probe(
 
     return errors, {
         "peer_id": relay_peer_id,
-        "deployment_commit": status.get("deployment_commit"),
+        "deployment_commit": deployment_commit or None,
         "hivemind_version": status.get("hivemind_version"),
         "relay_probe_peer_id": probe_peer_id or None,
         "relay_probe_elapsed_seconds": elapsed,
@@ -399,6 +410,14 @@ def validate_acceptance_set(
     errors.extend(vps_errors)
     errors.extend(relay_errors)
     errors.extend(direct_errors)
+    source_commits = windows_summary["source_commits"]
+    if (
+        len(source_commits) == 1
+        and vps_summary["deployment_commit"] != source_commits[0]
+    ):
+        errors.append(
+            "VPS deployment commit does not match the reviewed Windows source commit"
+        )
     if set(relay_summary["participants"]) != set(direct_summary["participants"]):
         errors.append("Relay and direct reports use different participant labels")
 
@@ -436,7 +455,6 @@ def validate_acceptance_set(
                     "Incentives-off relay evidence was not validated before shadow relay evidence"
                 )
 
-        source_commits = windows_summary["source_commits"]
         architecture_summary = validate_architecture_matrix(
             architecture_report,
             expected_source_commit=(source_commits[0] if len(source_commits) == 1 else None),
@@ -477,6 +495,8 @@ def validate_acceptance_set(
             "Confirm the reports came from two separate physical Windows devices.",
             "Confirm each device launched the reviewed portable artifact hash.",
             "Review generated output and monitoring on both devices.",
+            "Confirm one report came from a clean-Windows first-run lifecycle.",
+            "Review request-correlated participant and VPS debug logs for the accepted relay run.",
             "Explicitly approve sprint closure and any move from shadow to credit mode.",
             *(
                 ["Confirm failure domains refer to independent physical hosts or providers."]

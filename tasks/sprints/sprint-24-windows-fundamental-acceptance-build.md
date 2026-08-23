@@ -107,3 +107,9 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 - Why: the physical matrix must use one artifact that contains the final model-availability states, staged diagnostics, provider ownership explanations, async Trace workflow, and packaged Settings configuration boundary.
 - Verification: the committed source passes 449 backend tests, 20 launcher tests, seven renderer-state tests, frontend type checking and production build, lint with zero errors, and package inspection with 36 ASAR entries and zero forbidden entries.
 - Status: a final clean-source-metadata rebuild from the evidence-record commit is required next. Two-device direct, relay, lifecycle, session, and failure-injection evidence remains open.
+
+### 2026-08-23 - Bind the executed WSL backend revision
+
+- What changed: upgraded Windows acceptance reports to schema version three; added a packaged-launch preflight that reads the configured backend checkout's Git revision and tracked-source state, refuses an unidentified, dirty, or mismatched checkout before dependency sync and startup, and records the matched backend revision separately from the EXE identity; made the final manifest require that check.
+- Why: the schema-two report proved which EXE was launched but not which external WSL backend it executed, allowing two devices to present the same application artifact while running different backend branches.
+- Status: all 453 backend tests, twenty-two launcher tests, seven renderer tests, Electron type checking and production build, and lint with zero errors pass. Acceptance uses only a clean package rebuilt from this commit and matching schema-three reports; two physical reports remain required.

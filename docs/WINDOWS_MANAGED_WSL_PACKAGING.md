@@ -132,6 +132,8 @@ Diagnostic mapping:
 | `distro_not_wsl2` | Convert the selected distro with `wsl.exe --set-version <name> 2`. |
 | `uv_missing` | Install uv inside the selected distro. |
 | `backend_path_invalid` | Point Settings at the directory containing `pyproject.toml`. |
+| `backend_source_unidentified` | Use a real Git checkout for the configured WSL backend path and ensure Git is installed. |
+| `backend_source_mismatch` | Pull the exact clean source commit embedded in the packaged application before starting. |
 | `backend_port_conflict` | Stop the process already using the configured loopback port. |
 | `backend_health_timeout` | Inspect the captured backend error tail and WSL backend logs. |
 | `backend_stop_failed` | Stop the recorded PID inside the selected distro before retrying. |
@@ -140,16 +142,17 @@ Diagnostic mapping:
 
 `npm run test:launcher` exercises configuration validation, WSL output parsing, shell quoting, missing prerequisites, process launch, health readiness, port conflict, and safe stop/restart behavior. `npm run audit:win-package` inspects the generated ASAR and rejects environment files, archives, model state, traces, tokens, identities, and receipts. The portable artifact is generated output under `frontend/dist` and is not committed.
 
-The Settings page can export a versioned JSON acceptance report after a launcher lifecycle. The report contains only application metadata, non-secret configuration counts, sanitized launcher state transitions, diagnostic codes, and boolean checks. It deliberately excludes the backend path, peer and relay addresses, process output, model data, tokens, identities, receipts, and local usernames.
+The Settings page can export a versioned JSON acceptance report after a launcher lifecycle. Schema version three contains application metadata, the tracked-clean WSL backend commit, non-secret configuration counts, sanitized launcher state transitions, diagnostic codes, and boolean checks. It deliberately excludes the backend path, peer and relay addresses, process output, model data, tokens, identities, receipts, and local usernames.
 
 The report passes only when one unchanged configuration has completed all of these checks:
 
 1. the app is a packaged build running on Windows,
 2. WSL is available,
 3. the configured distro exists and uses WSL 2,
-4. dependency synchronization was enabled and completed,
-5. backend health reached ready, and
-6. the managed backend subsequently stopped cleanly.
+4. the configured backend is a tracked-clean Git checkout at the exact commit embedded in the application,
+5. dependency synchronization was enabled and completed,
+6. backend health reached ready, and
+7. the managed backend subsequently stopped cleanly.
 
 Saving launcher configuration resets accumulated evidence so one distro or relay setup cannot certify another. A report exported before clean stop remains useful for diagnostics but has `ok: false`.
 
@@ -170,16 +173,17 @@ Two-device inference remains gated on Sprint 16 relay validation.
 
 On each physical Windows test device:
 
-1. launch the reviewed portable artifact; its exported report will record the executable SHA-256, byte size, source commit, and tracked-source state automatically,
-2. do not manually start the backend in WSL,
-3. configure the WSL 2 distro and backend path in Settings, leave dependency sync enabled, and retain `auto` mode with the reviewed VPS bootstrap and relay values,
-4. start the backend and wait for the launcher state to become `ready`,
-5. complete the relay probe and two-device inference capture described in `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md`,
-6. return to Settings and stop the managed backend,
-7. select **Export report** and retain the generated JSON beside the two-device evidence files.
+1. update the WSL backend checkout to the exact reviewed commit and confirm its tracked files are clean,
+2. launch the reviewed portable artifact; before dependency sync or startup it will verify that checkout against its embedded commit, and its exported report will record both identities automatically,
+3. do not manually start the backend in WSL,
+4. configure the WSL 2 distro and backend path in Settings, leave dependency sync enabled, and retain `auto` mode with the reviewed VPS bootstrap and relay values,
+5. start the backend and wait for the launcher state to become `ready`,
+6. complete the relay probe and two-device inference capture described in `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md`,
+7. return to Settings and stop the managed backend,
+8. select **Export report** and retain the generated JSON beside the two-device evidence files.
 
-The Windows acceptance report proves the packaged Electron-to-WSL lifecycle and binds it to the actual executable SHA-256 and clean source commit. It does not by itself prove relay reservation, route ownership, tensor forwarding, inference parity, or two-device operation; those remain separate live evidence gates. After both device reports and the network evidence exist, use the final manifest workflow in `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` to reject mixed executable hashes, source commits, application versions, VPS runs, or participant sets before manual review.
+The Windows acceptance report proves the packaged Electron-to-WSL lifecycle and binds the actual executable SHA-256, embedded application commit, and executed tracked-clean WSL backend commit. It does not by itself prove relay reservation, route ownership, tensor forwarding, inference parity, or two-device operation; those remain separate live evidence gates. After both device reports and the network evidence exist, use the final manifest workflow in `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` to reject mixed executable hashes, source commits, WSL backend revisions, application versions, VPS runs, or participant sets before manual review.
 
 The portable artifact produced from `feature/windows-package-acceptance-report` is 87,652,120 bytes with SHA-256 `2f88a3169110820edb3f4af57394aabd045fd5307b25e7a1c5a4f7b280dd5328`. Generated artifacts remain outside version control.
 
-The current fundamental acceptance artifact produced from runtime commit `ecaf75066e279b04fcd3900eb69fe30a1e1a9ef3` is `DistribLLM-1.0.0-portable.exe`, 87,653,718 bytes, with SHA-256 `0c1d84e6566e9ff43a8cd057feb7aa2fb1ceb8d2c77301f7c27caaabd0e38dbe`. Its audit found 36 ASAR entries and zero forbidden entries. Inspection of the packaged main bundle confirms the same runtime commit, clean tracked-source flag, and report schema version two are embedded. This artifact supersedes every earlier package for Sprint 24 physical-device evidence; generated artifacts remain outside version control.
+The older schema-two artifact records above are historical and must not be used for current physical acceptance. The current candidate must export a passing schema-three report that proves the WSL backend revision matches the embedded application revision. Generated artifacts remain outside version control; identify the current candidate by the commit and SHA-256 supplied with the physical-test handoff.

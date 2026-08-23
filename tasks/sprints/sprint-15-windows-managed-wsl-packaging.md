@@ -78,6 +78,12 @@ This preserves the current working backend environment while giving testers a Wi
 
 ## Session Log
 
+### 2026-08-23 - Reject packaged frontend and WSL backend revision drift
+
+- What changed: added a packaged preflight and schema-three acceptance field that require the configured WSL backend checkout to be tracked-clean and equal to the commit embedded in the EXE before dependency synchronization or launch.
+- Why: the existing-Ubuntu packaging boundary keeps backend source outside the executable, so matching EXE hashes alone did not prove that two physical devices executed the same backend code.
+- Status: automated launcher and manifest checks pass. Acceptance uses only a clean package rebuilt from this commit and matching schema-three reports; clean-Windows and two-device physical acceptance remain open.
+
 ### 2026-08-11 - Create Windows managed WSL packaging sprint
 
 - What changed: created Sprint 15 for packaging DistribLLM as a Windows Electron application with a managed WSL 2 backend runtime and VPS relay-backed default networking.

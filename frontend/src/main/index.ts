@@ -99,7 +99,9 @@ function backendConfigPath(): string {
 
 async function loadBackendConfig(): Promise<BackendLauncherConfig> {
   try {
-    const stored = JSON.parse(await readFile(backendConfigPath(), 'utf8')) as Partial<BackendLauncherConfig>
+    const stored = JSON.parse(
+      await readFile(backendConfigPath(), 'utf8')
+    ) as Partial<BackendLauncherConfig>
     return {
       ...DEFAULT_BACKEND_LAUNCHER_CONFIG,
       ...stored,
@@ -176,7 +178,17 @@ app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.electron')
 
   const backendConfig = await loadBackendConfig()
-  backendLauncher = new WslBackendLauncher(backendConfig, createBackendRuntime())
+  const expectedBackendSourceCommit =
+    app.isPackaged &&
+    !__DISTRIBLLM_SOURCE_DIRTY__ &&
+    /^[0-9a-f]{40}$/.test(__DISTRIBLLM_SOURCE_COMMIT__)
+      ? __DISTRIBLLM_SOURCE_COMMIT__
+      : null
+  backendLauncher = new WslBackendLauncher(
+    backendConfig,
+    createBackendRuntime(),
+    expectedBackendSourceCommit
+  )
   backendLauncher.on('status', broadcastBackendStatus)
 
   ipcMain.handle('backend-launcher:get-status', () => backendLauncher?.getStatus())

@@ -195,10 +195,10 @@
 | `backend/traces/`        | Gitignored runtime JSON generation traces written by `/generator/trace`.             |
 | `backend/bootstrap.py`   | Explicit full-DHT, non-storage relay, and legacy combined Hivemind infrastructure roles. |
 | `backend/bootstrap_service_validate.py` | Validates role, protocol, commit, effective flags, identity, address, failure domain, and restart continuity. |
-| `backend/architecture_acceptance.py` | Validates redundant infrastructure, controlled failures, protocol revisions, topology evidence, and rollout ordering. |
+| `backend/architecture_acceptance.py` | Validates redundant infrastructure, controlled failures, packaged lifecycle, pre-role discovery, role identity, placement race, protocol revisions, topology evidence, and rollout ordering. |
 | `backend/control_service_validate.py` | Validates coordinator/settlement component health, revisions, failure domain, logs, and restart evidence. |
 | `backend/acceptance_evidence.py` | Captures sanitized participant evidence and validates two-device route, transport, timing, receipts, ownership, and optional standby non-payment. |
-| `backend/acceptance_manifest.py` | Cross-validates packaged Windows, VPS restart, bound relay probe, relay/direct inference, hash-bound incentives-off session ordering, and architecture artifacts while preserving manual approval gates. |
+| `backend/acceptance_manifest.py` | Cross-validates schema-three packaged Windows and matching WSL revisions, VPS restart, bound relay probe, relay/direct inference, hash-bound incentives-off session ordering, and architecture artifacts while preserving manual approval gates. |
 | `backend/local_split_probe.py` | Runs cached-model local split inference through two real Hivemind serving peers and records parity, accounting, and cleanup evidence. |
 | `backend/tinyllama_performance_probe.py` | Runs a bounded cached TinyLlama distributed timing, accounting, resource, and cleanup baseline. |
 | `backend/relay_probe.py` | Minimal Hivemind-only circuit-relay reservation probe for Sprint 16 diagnostics.     |
@@ -240,7 +240,7 @@
 | `frontend/package.json`                 | Frontend dependencies and scripts.            |
 | `frontend/README.md`                    | Frontend development, validation, Windows packaging, and launcher runtime notes. |
 | `frontend/src/main/`                    | Electron main process and managed WSL backend launcher. |
-| `frontend/src/main/backendLauncher.ts`  | Validated WSL detection, dependency sync, FastAPI health, diagnostics, PID lifecycle, and sanitized Windows acceptance evidence. |
+| `frontend/src/main/backendLauncher.ts`  | Validated WSL detection, packaged-to-backend source revision binding, dependency sync, FastAPI health, diagnostics, PID lifecycle, and sanitized schema-three Windows acceptance evidence. |
 | `frontend/src/preload/`                 | Electron preload bridge.                      |
 | `frontend/src/renderer/`                | React renderer application.                   |
 | `frontend/src/renderer/src/api/`        | HTTP/WebSocket client, persistent sanitized diagnostics, independent refresh, serving-plan freshness, and explicit model/runtime presentation state. |

@@ -28,6 +28,12 @@ For backend-only Python changes, the current executable is not enough by itself.
 3. Restart the managed backend from Electron Settings or from the terminal.
 4. Rebuild the executable only if the Electron app or launcher also changed.
 
+Acceptance packages now verify this boundary before startup: the configured
+WSL backend must be a tracked-clean Git checkout at the exact commit embedded
+in the EXE. A mismatch fails with `backend_source_mismatch` before dependency
+sync or backend launch, preventing a new renderer from silently testing an old
+backend branch.
+
 For final two-device acceptance, build one fresh executable after all accepted fixes are committed. Both devices should run that same artifact hash.
 
 ## Current Packaging Boundary
