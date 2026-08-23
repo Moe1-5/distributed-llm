@@ -196,3 +196,9 @@ The participant now selects the configured trusted relay statically and requests
 - What changed: started the packaged Device 1 OPT-125M worker with the manual adjacent range `0-6` on CUDA.
 - Why: the split test must use explicit disjoint ranges rather than Recommended placement, whose discovery snapshot can still lag physical node publication.
 - Status: passed. Peer `QmUZTRtPJHGubgrR82F5sJRym96EzD2Z6euwNB4XXdXXRJ` serves `0-6`, has layers loaded, an active RPC server, fresh Hivemind publication, verified relay transport, and a visible circuit multiaddress. The node has accepted no forwards yet. The next gate is Device 2 serving the complementary `6-12` range.
+
+### 2026-08-23 - Establish the adjacent two-device relay split
+
+- What changed: started complementary CUDA workers on the two physical devices: Device 1 peer `QmV1JC6v2C3vUwbYBK8anRpRoor57sWj5abubatyw6BSuZ` serves `0-6`, and Device 2 peer `QmUUHDX97bymRja9NtMQxdpK2iZ393GoxgSrFJSSmYmm5p` serves `6-12`.
+- Why: this is the controlled topology required to distinguish split-route tensor forwarding from the previously tested single full-model provider path.
+- Status: both nodes report exactly one running CUDA worker with layers loaded, RPC active, fresh publication, verified relay transport, public circuit multiaddresses, zero failed forwards, and zero forwarded requests before generation. The next gate is Device 1 generator route validation and one controlled prompt while both workers remain running.
