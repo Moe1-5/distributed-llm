@@ -162,6 +162,24 @@ Diagnostic mapping:
 
 `npm run test:launcher` exercises configuration validation, WSL output parsing, shell quoting, packaged install/integrity policy, missing prerequisites, process launch, health readiness, port conflict, and safe stop/restart behavior. `npm run test:backend-runtime` verifies the payload allowlist and manifest. `npm run audit:win-package` inspects both the generated ASAR and the unpacked backend resource, verifies every payload checksum, and rejects environment files, archives, model state, traces, tokens, identities, receipts, tests, bytecode, and symbolic links. The portable artifact is generated output under `frontend/dist` and is not committed.
 
+The sanitized payload includes the non-secret participant acceptance tools used
+by the physical runbooks: evidence capture/validation, final manifest and
+architecture validation, relay and tensor probes, lease observation, local
+failover, and local performance probes. It does not include VPS deployment
+entry points, test suites, or mutable evidence. After the EXE has installed the
+reviewed runtime, an operator can run a participant tool without a Git checkout:
+
+```bash
+COMMIT=<reviewed-application-commit>
+RUNTIME="$HOME/.local/state/distribllm/runtimes/$COMMIT/backend"
+PYTHON="$HOME/.local/state/distribllm/environments/$COMMIT/bin/python"
+cd "$RUNTIME"
+"$PYTHON" -m acceptance_evidence --help
+```
+
+Keep tool output under `~/distribllm-evidence`, never inside the read-only
+runtime directory.
+
 The packaged renderer runs from the privileged `distribllm://app` scheme with a
 path-confined asset resolver. Chromium sandboxing, context isolation, and web
 security remain enabled; renderer Node integration and the generic Electron

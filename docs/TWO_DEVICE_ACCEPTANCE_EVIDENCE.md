@@ -8,6 +8,24 @@ The collector includes public peer IDs, application public keys, selected and st
 
 Participant labels are operator attestations. The validator proves that distinct local backend captures own the selected peer IDs, but it cannot cryptographically prove that those backends run on separate physical computers. Record the device names and observe both machines during final approval.
 
+For a normal backend-bundled Windows run, use the acceptance tools installed by
+the EXE instead of a repository checkout. In each participant WSL terminal,
+set these variables to the reviewed application commit before running commands
+in this document:
+
+```bash
+COMMIT=<reviewed-application-commit>
+RUNTIME="$HOME/.local/state/distribllm/runtimes/$COMMIT/backend"
+PYTHON="$HOME/.local/state/distribllm/environments/$COMMIT/bin/python"
+mkdir -p "$HOME/distribllm-evidence"
+cd "$RUNTIME"
+```
+
+Replace each `uv run --python 3.12 python -m` below with `"$PYTHON" -m` for
+that packaged flow. The backend itself must still be started and stopped only
+through the EXE. Developer checkouts may continue using the shown `uv run`
+commands.
+
 ## Relay Acceptance
 
 Prerequisites:

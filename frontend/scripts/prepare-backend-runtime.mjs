@@ -7,9 +7,18 @@ import { fileURLToPath } from 'node:url'
 
 const RUNTIME_ROOT_FILES = new Set([
   '__init__.py',
+  'acceptance_evidence.py',
+  'acceptance_manifest.py',
+  'architecture_acceptance.py',
   'constants.py',
+  'lease_observer.py',
+  'local_failover_probe.py',
+  'local_split_probe.py',
   'main.py',
   'pyproject.toml',
+  'relay_probe.py',
+  'tensor_payload_probe.py',
+  'tinyllama_performance_probe.py',
   'uv.lock'
 ])
 const RUNTIME_DIRECTORIES = [
@@ -21,7 +30,19 @@ const RUNTIME_DIRECTORIES = [
   'node/',
   'placement/'
 ]
-const REQUIRED_FILES = ['main.py', 'pyproject.toml', 'uv.lock', 'api/server.py', 'node/node.py']
+const REQUIRED_FILES = [
+  'main.py',
+  'pyproject.toml',
+  'uv.lock',
+  'api/server.py',
+  'node/node.py',
+  'acceptance_evidence.py',
+  'acceptance_manifest.py',
+  'architecture_acceptance.py',
+  'lease_observer.py',
+  'relay_probe.py',
+  'tensor_payload_probe.py'
+]
 
 export const isBackendRuntimeFile = (path) => {
   return (

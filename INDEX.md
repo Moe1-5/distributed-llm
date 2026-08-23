@@ -244,7 +244,7 @@
 | `frontend/README.md`                    | Frontend development, validation, Windows packaging, and launcher runtime notes. |
 | `frontend/src/main/`                    | Electron main process and managed WSL backend launcher. |
 | `frontend/src/main/backendLauncher.ts`  | Validated WSL detection, commit-versioned packaged backend installation, frozen isolated dependency sync, FastAPI health, diagnostics, PID lifecycle, developer override, and sanitized schema-four Windows acceptance evidence. |
-| `frontend/scripts/prepare-backend-runtime.mjs` | Builds the sanitized tracked backend resource with an exact commit marker and per-file SHA-256 manifest. |
+| `frontend/scripts/prepare-backend-runtime.mjs` | Builds the sanitized tracked backend application and participant-evidence tool resource with an exact commit marker and per-file SHA-256 manifest. |
 | `frontend/tests/backendRuntimePayload.test.mjs` | Verifies the backend runtime allowlist, commit stamp, exclusions, and checksum manifest. |
 | `frontend/src/preload/`                 | Electron preload bridge.                      |
 | `frontend/src/renderer/`                | React renderer application.                   |
