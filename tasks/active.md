@@ -23,7 +23,7 @@
 | Sprint 28 | `tasks/sprints/sprint-28-peer-addressed-expert-protocol.md` | Bind every expert RPC to the selected peer and make duplicate-range providers coexist safely. |
 | Sprint 29 | `tasks/sprints/sprint-29-persistent-network-supervisor.md` | Add one control-plane supervisor while preserving distinct worker and generator peers and evidence-based recovery. |
 | Sprint 30 | `tasks/sprints/sprint-30-transactional-swarm-placement.md` | Allocate useful layer ranges through authoritative expiring reservations instead of UI snapshots. |
-| Sprint 31 | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` | Add bounded prefill and decode sessions that avoid full-sequence retransmission per token. |
+| Sprint 31 | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` | Source-implemented bounded OPT prefill/decode sessions; real direct and relayed two-device acceptance remains open. |
 | Sprint 32 | `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` | Separate infrastructure roles, add real redundancy, and prove the revised architecture under failures. |
 
 ## Completed Sprints

@@ -47,12 +47,13 @@
 | Selective worker layer loading            | `backend/node/block_loader.py`            |
 | Selective layer loading tests             | `backend/tests/test_selective_layer_loading.py` |
 | Remote layer routing                      | `backend/client/sequential.py`            |
+| Stateful session protocol and cache       | `backend/node/session_protocol.py`, `backend/node/session_cache.py` |
 | Health-aware route failover policy        | `backend/client/failover.py`              |
 | Peer-addressed expert protocol            | `tasks/sprints/sprint-28-peer-addressed-expert-protocol.md` |
 | Peer-addressed expert RPC tests            | `backend/tests/test_peer_addressed_rpc.py` |
 | Persistent network supervisor implementation | `tasks/sprints/sprint-29-persistent-network-supervisor.md` |
 | Transactional layer placement implementation | `backend/placement/`, `tasks/sprints/sprint-30-transactional-swarm-placement.md` |
-| Session and KV-cache inference plan       | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` |
+| Session and KV-cache inference implementation | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` |
 | Infrastructure resilience and final architecture acceptance | `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` |
 | Continuous provider health                | `backend/client/health.py`                |
 | Provider health tests                     | `backend/tests/test_provider_health.py`   |
@@ -113,7 +114,7 @@
 | `tasks/sprints/sprint-28-peer-addressed-expert-protocol.md` | Locally implemented peer-unique expert ownership, exact peer dispatch, and Hivemind 1.1.12 compatibility; physical rollout remains open. |
 | `tasks/sprints/sprint-29-persistent-network-supervisor.md` | Implemented backend-owned discovery, explicit network state, last-good topology, publication ownership, evidence-based transport recovery, and exact-handle lifecycle ownership; physical validation remains open. |
 | `tasks/sprints/sprint-30-transactional-swarm-placement.md` | Implemented source sprint for authenticated atomic layer reservations, provider lease states, expiry, and backend lifecycle integration; physical validation remains open. |
-| `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` | Planned sprint for bounded remote prefill/decode sessions, key/value caches, parity, and safe recovery. |
+| `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` | Source-implemented sprint for bounded remote prefill/decode sessions, key/value caches, parity, diagnostics, and safe recovery; physical relay acceptance remains open. |
 | `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` | Planned sprint for separated infrastructure roles, independent redundancy, failure injection, and final architecture evidence. |
 | `tasks/archive/sprint-10-gated-model-local-import.md`          | Completed sprint for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
 | `tasks/archive/sprint-11-instruction-ready-model-expansion.md` | Completed sprint for instruction-ready/chat-ready model registry expansion, tuning labels, local-import contracts, and live TinyLlama generation validation. |
@@ -171,7 +172,9 @@
 | `backend/api/lifecycle_jobs.py` | Thread-safe long-running node/generator jobs, admission closure, deduplication, progress, cancellation, and bounded worker shutdown. |
 | `backend/api/runtime_state.py` | Authoritative generator readiness state machine and bounded structured runtime diagnostic events. |
 | `backend/client/`        | Distributed generation and remote sequential client.                                 |
-| `backend/client/sequential.py` | Validated route construction and exact peer dispatch, with optional supervisor-owned topology input. |
+| `backend/client/sequential.py` | Validated route construction, exact stateless/receipt/session dispatch, and one safe session-route rebuild from known history. |
+| `backend/node/session_protocol.py` | Fixed-frame version-one session lifecycle and exact target metadata validation. |
+| `backend/node/session_cache.py` | Bounded provider-owned OPT key/value cache lifecycle and process-shared diagnostics. |
 | `backend/client/coverage.py` | Pure adjacent-range route planning, provider segmentation, snapshot revision, and serving recommendation logic. |
 | `backend/client/rpc_policy.py` | Validated remote-expert attempt policy, failure classification, and safe receipt fallback rules. |
 | `backend/incentives/` | Ed25519 identities, canonical BLAKE3 receipts, SQLite settlement, hashed developer API keys, credit reservations, and signed inference capabilities. |
@@ -214,6 +217,7 @@
 | `backend/tests/test_publication_classification.py` | Ambiguous Hivemind store result, independent readback, conflict, expiration horizon, and recovery-eligibility regressions. |
 | `backend/tests/test_runtime_state_validation.py` | Generator state, tensor canary, local replica limits, route suspension, and dependent-node deletion regressions. |
 | `backend/tests/test_transactional_placement.py` | Coordinator concurrency, complementary coverage, state transition, expiry, replay, restart, auth, and conflict regressions. |
+| `backend/tests/test_session_cache.py` | OPT cache lifecycle and parity, exact session routes, recovery safety, generator payload bounds, and real Hivemind session RPC regression coverage. |
 | `backend/tests/test_placement_client.py` | Authenticated client payload, publication attestation, heartbeat ownership, and secret-safe status regressions. |
 | `backend/tests/test_placement_backend_integration.py` | Backend authoritative-plan, coordinator range override, failed-load release, and fail-closed integration regressions. |
 | `backend/tests/test_api_access.py` | Hashed API-key eligibility, revocation, shared atomic credit reservations, shadow accounting, and signed capability regressions. |

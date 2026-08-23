@@ -28,6 +28,8 @@ appears to be running.
 """
  
 import sys
+import hashlib
+import json
 import time
 import traceback
 from collections.abc import Callable
@@ -44,7 +46,7 @@ from hivemind.p2p import PeerID
 from hivemind.proto import runtime_pb2
 from hivemind.utils.logging import get_logger
 
-from constants import EXPERT_RPC_UID_SCHEMA_VERSION
+from constants import EXPERT_RPC_UID_SCHEMA_VERSION, SUPPORTED_MODELS
 from client.coverage import (
     plan_health_aware_routes,
     provider_identity,
@@ -80,8 +82,26 @@ from incentives.receipts import (
     verify_presence,
 )
 from incentives.runtime import UsefulWorkRuntime, get_useful_work_runtime
+from node.session_protocol import (
+    SESSION_PROTOCOL_VERSION,
+    decode_session_metadata,
+    encode_session_metadata,
+    session_operation_document,
+)
  
 logger = get_logger(__name__)
+
+
+class SessionRouteError(RuntimeError):
+    """Base error for versioned stateful route operations."""
+
+
+class SessionPreDispatchError(SessionRouteError):
+    """No session expert was invoked, so rebuilding on an alternate is safe."""
+
+
+class SessionAmbiguousError(SessionRouteError):
+    """At least one session expert may have executed; never replay blindly."""
 
 
 def get_peer_expert(dht: object, rpc_uid: str, peer_id: str) -> RemoteExpert:
@@ -117,7 +137,7 @@ def get_ready_peer_expert(
     rpc_role: str = "normal",
 ) -> RemoteExpert:
     """Bind and preflight an exact expert before any tensor can be dispatched."""
-    if rpc_role not in {"normal", "receipt"}:
+    if rpc_role not in {"normal", "receipt", "session"}:
         raise ValueError(f"Unsupported RPC role {rpc_role!r}")
     try:
         expert = get_peer_expert(dht, rpc_uid, peer_id)
@@ -291,6 +311,11 @@ class RemoteSequential:
         self._session_route: Optional[list[dict]] = None
         self._session_snapshot_revision: Optional[tuple[str, str]] = None
         self._session_nodes: Optional[list[dict]] = None
+        self._remote_session_open = False
+        self._session_route_id: Optional[str] = None
+        self._session_request_id: Optional[str] = None
+        self._session_position = 0
+        self._last_session_metrics: dict = {}
         self._route_quarantine: dict[tuple[str, str, int, int], float] = {}
         self._last_failover: dict = {
             "attempt_count": 0,
@@ -788,8 +813,54 @@ class RemoteSequential:
                     exc,
                 )
 
+        session_capability: dict = {}
+        session_fields = {
+            "session_protocol_version",
+            "session_rpc_uid",
+            "session_hidden_size",
+        }
+        if any(field in info for field in session_fields):
+            try:
+                missing_session_fields = session_fields - set(info)
+                if missing_session_fields:
+                    raise ValueError(
+                        f"missing session fields: {sorted(missing_session_fields)}"
+                    )
+                if int(info["session_protocol_version"]) != SESSION_PROTOCOL_VERSION:
+                    raise ValueError("unsupported session protocol version")
+                session_rpc_uid = str(info["session_rpc_uid"]).strip()
+                session_hidden_size = int(info["session_hidden_size"])
+                if not session_rpc_uid or session_hidden_size <= 0:
+                    raise ValueError("empty session RPC UID")
+                if rpc_uid_schema_version >= EXPERT_RPC_UID_SCHEMA_VERSION:
+                    expected_session_prefix = (
+                        f"{self.dht_prefix}-{metadata_peer_id}.2."
+                        f"{layer_start}.{layer_end}."
+                    )
+                    if not is_valid_uid(session_rpc_uid) or not session_rpc_uid.startswith(
+                        expected_session_prefix
+                    ):
+                        raise ValueError(
+                            "session RPC UID ownership mismatch: "
+                            f"expected prefix {expected_session_prefix!r}, "
+                            f"got {session_rpc_uid!r}"
+                        )
+                session_capability = {
+                    "session_protocol_version": SESSION_PROTOCOL_VERSION,
+                    "session_rpc_uid": session_rpc_uid,
+                    "session_hidden_size": session_hidden_size,
+                }
+            except Exception as exc:
+                logger.warning(
+                    "Ignoring invalid session capability from %s: %s",
+                    metadata_peer_id[:8],
+                    exc,
+                )
+
         sanitized_info = {
-            key: value for key, value in info.items() if key not in receipt_fields
+            key: value
+            for key, value in info.items()
+            if key not in receipt_fields | session_fields
         }
         return {
             **sanitized_info,
@@ -806,6 +877,7 @@ class RemoteSequential:
             "rpc_running": rpc_running,
             "running": running,
             **receipt_capability,
+            **session_capability,
         }
 
     def start_session(self, session_id: Optional[str] = None) -> str:
@@ -813,6 +885,11 @@ class RemoteSequential:
         self._session_route = None
         self._session_snapshot_revision = None
         self._session_nodes = None
+        self._remote_session_open = False
+        self._session_route_id = None
+        self._session_request_id = str(uuid4())
+        self._session_position = 0
+        self._last_session_metrics = {}
         self._route_quarantine.clear()
         return self._session_id
 
@@ -821,7 +898,461 @@ class RemoteSequential:
         self._session_route = None
         self._session_snapshot_revision = None
         self._session_nodes = None
+        self._remote_session_open = False
+        self._session_route_id = None
+        self._session_request_id = None
+        self._session_position = 0
         self._route_quarantine.clear()
+
+    def remote_sessions_available(self) -> bool:
+        """Return whether one healthy complete route advertises session v1."""
+        if self.useful_work_runtime.config.enabled:
+            return False
+        try:
+            nodes = self._discover_nodes()
+            plan = self._build_route_plan(nodes)
+            expected_hidden_size = int(
+                SUPPORTED_MODELS.get(self.model_name or "", {}).get("hidden_size", 0)
+            )
+            return any(
+                all(
+                    int(node.get("session_protocol_version", 0))
+                    == SESSION_PROTOCOL_VERSION
+                    and bool(str(node.get("session_rpc_uid", "")).strip())
+                    and (
+                        expected_hidden_size <= 0
+                        or int(node.get("session_hidden_size", 0))
+                        == expected_hidden_size
+                    )
+                    for node in candidate["route"]
+                )
+                for candidate in self._eligible_attempt_routes(plan)
+            )
+        except Exception:
+            return False
+
+    def open_remote_session(
+        self,
+        hidden_size: int,
+        cancel_event: Optional[Event] = None,
+        *,
+        excluded_route_id: Optional[str] = None,
+        excluded_peer_ids: Optional[set[str]] = None,
+    ) -> dict:
+        if self._session_id is None or self._session_request_id is None:
+            raise SessionRouteError("start_session must be called before open")
+        if self._remote_session_open:
+            return dict(self._last_session_metrics)
+        if self.useful_work_runtime.config.enabled:
+            raise SessionRouteError(
+                "Session protocol v1 is disabled while useful-work receipts are enabled"
+            )
+        self._raise_if_cancelled(cancel_event)
+        nodes = self._discover_nodes()
+        plan = self._build_route_plan(nodes)
+        candidates = [
+            candidate
+            for candidate in self._eligible_attempt_routes(plan)
+            if all(
+                int(node.get("session_protocol_version", 0))
+                == SESSION_PROTOCOL_VERSION
+                and bool(str(node.get("session_rpc_uid", "")).strip())
+                and int(node.get("session_hidden_size", 0)) == hidden_size
+                for node in candidate["route"]
+            )
+            and (
+                excluded_route_id is None
+                or self._session_route_digest(candidate["route"]) != excluded_route_id
+            )
+            and not (
+                excluded_peer_ids
+                and any(
+                    str(node.get("peer_id", "")) in excluded_peer_ids
+                    for node in candidate["route"]
+                )
+            )
+        ]
+        if not candidates:
+            raise SessionRouteError("No healthy complete route supports session protocol v1")
+
+        preflight_errors: list[str] = []
+        selected_route: Optional[list[dict]] = None
+        experts: Optional[list[RemoteExpert]] = None
+        for candidate in candidates:
+            route = [dict(node) for node in candidate["route"]]
+            try:
+                self._assert_route_health(route)
+                experts = self._preflight_session_route(route)
+            except Exception as exc:
+                preflight_errors.append(str(exc))
+                continue
+            selected_route = route
+            break
+        if selected_route is None or experts is None:
+            raise SessionPreDispatchError(
+                "No session route passed exact-peer preflight: " + "; ".join(preflight_errors)
+            )
+
+        route_id = self._session_route_digest(selected_route)
+        logger.info(
+            "Opening remote session | request=%s session=%s route=%s hops=%s",
+            self._session_request_id,
+            self._session_id,
+            route_id,
+            len(selected_route),
+        )
+        dummy = torch.zeros((1, 1, hidden_size), dtype=torch.float32)
+        mask = torch.ones((1, 1), dtype=torch.long)
+        positions = torch.zeros((1, 1), dtype=torch.long)
+        opened: list[tuple[dict, RemoteExpert]] = []
+        started_at = time.perf_counter()
+        try:
+            for hop_index, (node, expert) in enumerate(zip(selected_route, experts)):
+                self._raise_if_cancelled(cancel_event)
+                self._session_expert_call(
+                    expert=expert,
+                    node=node,
+                    operation="open",
+                    route_id=route_id,
+                    operation_id=f"open-{hop_index}-{uuid4().hex}",
+                    position_start=0,
+                    hidden_states=dummy,
+                    attention_mask=mask,
+                    position_ids=positions,
+                )
+                opened.append((node, expert))
+        except Exception as exc:
+            for hop_index, (node, expert) in enumerate(opened):
+                try:
+                    self._session_expert_call(
+                        expert=expert,
+                        node=node,
+                        operation="cancel",
+                        route_id=route_id,
+                        operation_id=f"rollback-{hop_index}-{uuid4().hex}",
+                        position_start=0,
+                        hidden_states=dummy,
+                        attention_mask=mask,
+                        position_ids=positions,
+                    )
+                except Exception:
+                    pass
+            raise SessionAmbiguousError(
+                f"Session open may have executed on {len(opened)} provider(s): {exc}"
+            ) from exc
+
+        self._session_route = selected_route
+        self._session_nodes = [dict(node) for node in nodes]
+        self._session_snapshot_revision = (
+            plan["coverage_revision"],
+            plan["health_revision"],
+        )
+        self._session_route_id = route_id
+        self._remote_session_open = True
+        self._session_position = 0
+        self._last_session_metrics = {
+            "operation": "open",
+            "session_id": self._session_id,
+            "request_id": self._session_request_id,
+            "route_id": route_id,
+            "elapsed_ms": (time.perf_counter() - started_at) * 1000,
+            "input_bytes": 0,
+            "hops": [],
+            "route": [dict(node) for node in selected_route],
+        }
+        return dict(self._last_session_metrics)
+
+    def session_forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        operation: str,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        cancel_event: Optional[Event] = None,
+    ) -> tuple[torch.Tensor, list[str]]:
+        if operation not in {"prefill", "decode"}:
+            raise ValueError("session operation must be prefill or decode")
+        if not self._remote_session_open or self._session_route is None:
+            raise SessionRouteError("Remote session is not open")
+        if self._session_route_id is None:
+            raise SessionRouteError("Remote session has no route identity")
+        expected_operation = "prefill" if self._session_position == 0 else "decode"
+        if operation != expected_operation:
+            raise SessionRouteError(
+                f"Expected {expected_operation} at position {self._session_position}"
+            )
+        if operation == "decode" and hidden_states.shape[1] != 1:
+            raise ValueError("decode must send exactly one new position")
+        token_count = int(hidden_states.shape[1])
+        operation_id = f"{operation}-{self._session_position}-{uuid4().hex}"
+        self._raise_if_cancelled(cancel_event)
+        try:
+            experts = self._preflight_session_route(self._session_route)
+        except Exception as exc:
+            raise SessionPreDispatchError(
+                f"Session route failed before {operation} dispatch: {exc}"
+            ) from exc
+
+        started_at = time.perf_counter()
+        initial_bytes = sum(
+            value.numel() * value.element_size()
+            for value in (hidden_states, attention_mask, position_ids)
+        )
+        node_trace: list[str] = []
+        hop_metrics: list[dict] = []
+        current = hidden_states
+        for hop_index, (node, expert) in enumerate(zip(self._session_route, experts)):
+            self._raise_if_cancelled(cancel_event)
+            hop_started_at = time.perf_counter()
+            logger.info(
+                "Session hop dispatch | request=%s session=%s operation=%s "
+                "operation_id=%s position=%s tokens=%s hop=%s peer=%s layers=%s-%s",
+                self._session_request_id,
+                self._session_id,
+                operation,
+                operation_id,
+                self._session_position,
+                token_count,
+                hop_index + 1,
+                str(node["peer_id"]),
+                node["layer_start"],
+                node["layer_end"],
+            )
+            try:
+                current, response = self._session_expert_call(
+                    expert=expert,
+                    node=node,
+                    operation=operation,
+                    route_id=self._session_route_id,
+                    operation_id=operation_id,
+                    position_start=self._session_position,
+                    hidden_states=current,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                )
+            except Exception as exc:
+                raise SessionAmbiguousError(
+                    f"Session {operation} may have executed through hop {hop_index + 1}; "
+                    "automatic replay is suppressed: " + str(exc)
+                ) from exc
+            elapsed_ms = (time.perf_counter() - hop_started_at) * 1000
+            node_trace.append(
+                f"{str(node['peer_id'])[:8]} ({node['layer_start']}-{node['layer_end']})"
+            )
+            hop_metrics.append(
+                {
+                    "peer_id": str(node["peer_id"]),
+                    "rpc_uid": str(node["session_rpc_uid"]),
+                    "layer_start": int(node["layer_start"]),
+                    "layer_end": int(node["layer_end"]),
+                    "latency_ms": elapsed_ms,
+                    "input_bytes": initial_bytes,
+                    "expected_position": response.get("expected_position"),
+                    "estimated_cache_bytes": response.get("estimated_bytes"),
+                }
+            )
+        self._session_position += token_count
+        total_ms = (time.perf_counter() - started_at) * 1000
+        self._last_session_metrics = {
+            "operation": operation,
+            "session_id": self._session_id,
+            "request_id": self._session_request_id,
+            "route_id": self._session_route_id,
+            "position_start": self._session_position - token_count,
+            "token_count": token_count,
+            "input_bytes": initial_bytes * len(self._session_route),
+            "elapsed_ms": total_ms,
+            "hops": hop_metrics,
+            "route": [dict(node) for node in self._session_route],
+        }
+        logger.info(
+            "Session operation complete | request=%s session=%s operation=%s "
+            "position=%s tokens=%s elapsed_ms=%.1f wire_bytes=%s",
+            self._session_request_id,
+            self._session_id,
+            operation,
+            self._session_position - token_count,
+            token_count,
+            total_ms,
+            self._last_session_metrics["input_bytes"],
+        )
+        return current, node_trace
+
+    def rebuild_remote_session(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        hidden_size: int,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        cancel_event: Optional[Event] = None,
+    ) -> tuple[torch.Tensor, list[str]]:
+        """Rebuild once from known history after a strictly pre-dispatch failure."""
+        if not self._remote_session_open or self._session_route is None:
+            raise SessionRouteError("Remote session is not open")
+        previous_route = [dict(node) for node in self._session_route]
+        previous_route_id = self._session_route_id
+        cleanup = self.close_remote_session(cancelled=True)
+        excluded_peers = (
+            {str(node.get("peer_id", "")) for node in previous_route}
+            if not cleanup.get("closed", False)
+            else None
+        )
+        self._session_route = None
+        self._session_nodes = None
+        self._session_snapshot_revision = None
+        self._session_route_id = None
+        self._session_position = 0
+        self._last_session_metrics = {}
+        self.open_remote_session(
+            hidden_size,
+            cancel_event,
+            excluded_route_id=previous_route_id,
+            excluded_peer_ids=excluded_peers,
+        )
+        logger.warning(
+            "Rebuilding remote session from known history | request=%s session=%s "
+            "previous_route=%s positions=%s cleanup_complete=%s",
+            self._session_request_id,
+            self._session_id,
+            previous_route_id,
+            hidden_states.shape[1],
+            cleanup.get("closed", False),
+        )
+        output, trace = self.session_forward(
+            hidden_states,
+            operation="prefill",
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            cancel_event=cancel_event,
+        )
+        self._last_session_metrics = {
+            **self._last_session_metrics,
+            "rebuilt": True,
+            "previous_route_id": previous_route_id,
+            "cleanup_complete": bool(cleanup.get("closed", False)),
+        }
+        return output, trace
+
+    def close_remote_session(self, *, cancelled: bool = False) -> dict:
+        if not self._remote_session_open or self._session_route is None:
+            return {"closed": True, "idempotent_replay": True}
+        route = [dict(node) for node in self._session_route]
+        route_id = self._session_route_id
+        results: list[dict] = []
+        errors: list[str] = []
+        for hop_index, node in enumerate(route):
+            try:
+                expert = get_ready_peer_expert(
+                    self.dht,
+                    str(node["session_rpc_uid"]),
+                    str(node["peer_id"]),
+                    rpc_role="session",
+                )
+                hidden_size = int(node["session_hidden_size"])
+                hidden = torch.zeros((1, 1, hidden_size), dtype=torch.float32)
+                _output, response = self._session_expert_call(
+                    expert=expert,
+                    node=node,
+                    operation="cancel" if cancelled else "close",
+                    route_id=str(route_id),
+                    operation_id=f"close-{hop_index}-{uuid4().hex}",
+                    position_start=self._session_position,
+                    hidden_states=hidden,
+                    attention_mask=torch.ones((1, 1), dtype=torch.long),
+                    position_ids=torch.tensor([[max(0, self._session_position - 1)]]),
+                )
+                results.append(response)
+            except Exception as exc:
+                errors.append(f"{str(node.get('peer_id', 'unknown'))[:8]}: {exc}")
+        self._remote_session_open = False
+        return {
+            "closed": not errors,
+            "cancelled": cancelled,
+            "results": results,
+            "errors": errors,
+        }
+
+    def get_last_session_metrics(self) -> dict:
+        return json.loads(json.dumps(self._last_session_metrics))
+
+    def _preflight_session_route(self, route: list[dict]) -> list[RemoteExpert]:
+        experts: list[RemoteExpert] = []
+        for node in route:
+            experts.append(
+                get_ready_peer_expert(
+                    self.dht,
+                    str(node["session_rpc_uid"]),
+                    str(node["peer_id"]),
+                    rpc_role="session",
+                )
+            )
+        return experts
+
+    def _session_expert_call(
+        self,
+        *,
+        expert: RemoteExpert,
+        node: dict,
+        operation: str,
+        route_id: str,
+        operation_id: str,
+        position_start: int,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict]:
+        if self._session_id is None or self._session_request_id is None:
+            raise SessionRouteError("Session identity is not initialized")
+        token_count = int(hidden_states.shape[1]) if operation in {"prefill", "decode"} else 0
+        document = session_operation_document(
+            operation=operation,
+            session_id=self._session_id,
+            route_id=route_id,
+            request_id=self._session_request_id,
+            operation_id=operation_id,
+            peer_id=str(node["peer_id"]),
+            rpc_uid=str(node["session_rpc_uid"]),
+            layer_start=int(node["layer_start"]),
+            layer_end=int(node["layer_end"]),
+            position_start=position_start,
+            token_count=token_count,
+        )
+        output = expert.forward(
+            hidden_states,
+            encode_session_metadata(document),
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
+        if not isinstance(output, tuple) or len(output) != 2:
+            raise SessionRouteError("Session expert returned an invalid response")
+        result, metadata = output
+        response = decode_session_metadata(metadata)
+        if (
+            response.get("protocol_version") != SESSION_PROTOCOL_VERSION
+            or response.get("operation") != operation
+            or response.get("operation_id") != operation_id
+            or not isinstance(response.get("session"), dict)
+        ):
+            raise SessionRouteError("Session expert response identity is invalid")
+        return result, dict(response["session"])
+
+    @staticmethod
+    def _session_route_digest(route: list[dict]) -> str:
+        payload = [
+            {
+                "peer_id": str(node["peer_id"]),
+                "rpc_uid": str(node["session_rpc_uid"]),
+                "layer_start": int(node["layer_start"]),
+                "layer_end": int(node["layer_end"]),
+            }
+            for node in route
+        ]
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
 
     def _receipt_route(self, ordered_nodes: list[dict]) -> Optional[list[dict]]:
         runtime = self.useful_work_runtime

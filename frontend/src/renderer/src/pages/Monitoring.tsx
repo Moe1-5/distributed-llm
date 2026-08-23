@@ -67,6 +67,13 @@ function formatDuration(value: number | null | undefined): string {
   return `${value.toFixed(1)} ms`
 }
 
+function formatBytes(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'Unavailable'
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${value.toFixed(0)} B`
+}
+
 export default function Monitoring(): React.JSX.Element {
   const [state, setState] = useState<MonitoringState>({
     generator: null,
@@ -371,6 +378,29 @@ export default function Monitoring(): React.JSX.Element {
             ))}
           </div>
 
+          {lastGeneration?.session_protocol_version === 1 && (
+            <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
+              {[
+                ['Session', 'Protocol v1'],
+                ['Prefill wire', formatBytes(lastGeneration.session_prefill_bytes)],
+                ['Decode wire', formatBytes(lastGeneration.session_decode_bytes)],
+                ['Decode average', formatDuration(lastGeneration.session_average_decode_ms)],
+                [
+                  'Peak remote cache',
+                  formatBytes(lastGeneration.session_peak_provider_cache_bytes)
+                ],
+                ['Route rebuilds', String(lastGeneration.session_rebuilds ?? 0)]
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-lg border border-cyan/20 bg-cyan-dim p-4">
+                  <p className="font-mono text-[9px] tracking-widest text-text-dim uppercase">
+                    {label}
+                  </p>
+                  <p className="mt-2 text-sm font-semibold tabular-nums text-cyan">{value}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
           {lastGeneration && (
             <div className="mt-3 overflow-hidden rounded-lg border border-border bg-bg-elevated">
               <div className="grid grid-cols-[minmax(0,1fr)_100px_90px_110px] gap-3 border-b border-border px-4 py-2 font-mono text-[9px] tracking-widest text-text-dim uppercase">
@@ -596,7 +626,9 @@ export default function Monitoring(): React.JSX.Element {
                   >
                     Last forward: {lastFailover.attempt_count || 0} attempt(s)
                     {lastFailover.failed_over
-                      ? ` · failed over at layers ${lastFailover.reasons.at(-1)?.layer_start}-${lastFailover.reasons.at(-1)?.layer_end}`
+                      ? lastFailover.reasons.at(-1)?.phase === 'session_pre_dispatch'
+                        ? ' · session rebuilt from known history'
+                        : ` · failed over at layers ${lastFailover.reasons.at(-1)?.layer_start}-${lastFailover.reasons.at(-1)?.layer_end}`
                       : ' · no failover'}
                   </p>
                 )}
@@ -711,6 +743,22 @@ export default function Monitoring(): React.JSX.Element {
                         {node.rpc_safety.failed_requests} FAILED /{' '}
                         {node.rpc_safety.rejected_requests} REJECTED /{' '}
                         {node.rpc_safety.timed_out_requests} TIMEOUT
+                      </span>
+                    )}
+                    {node.session_cache?.supported && (
+                      <span
+                        className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
+                          (node.session_cache.evicted_sessions ?? 0) > 0 ||
+                          (node.session_cache.admission_rejections ?? 0) > 0 ||
+                          (node.session_cache.replay_rejections ?? 0) > 0
+                            ? 'border-amber/30 bg-amber/10 text-amber'
+                            : 'border-cyan/20 bg-cyan-dim text-cyan'
+                        }`}
+                        title={`Active ${node.session_cache.active_sessions}/${node.session_cache.policy?.max_sessions ?? '?'}; cache ${formatBytes(node.session_cache.estimated_cache_bytes)}`}
+                      >
+                        SESSION {node.session_cache.active_sessions} ACTIVE /{' '}
+                        {node.session_cache.evicted_sessions ?? 0} EVICTED /{' '}
+                        {node.session_cache.admission_rejections ?? 0} REJECTED
                       </span>
                     )}
                     {node.loading && (

@@ -22,16 +22,18 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `backend/node/node.py`: direct-reachability selection, relay fallback, DHT, layer handler, RPC, announcements, pause/resume/delete lifecycle, and contribution state for one layer slice.
 - `backend/node/reachability.py`: Petals-derived protocol that asks an independent peer to test direct libp2p dialing with relay disabled.
 - `backend/node/block_loader.py`: architecture-aware selective safetensors planning/materialization, strict tensor validation, load-memory diagnostics, and explicit binary-format fallback policy.
-- `backend/node/handler.py`: validated remote forward execution, architecture adapter integration, dtype/device conversion, and accounting.
-- `backend/node/rpc_server.py`: legacy Hivemind expert plus optional receipt expert, unique RPC UIDs, and bounded server shutdown helpers.
+- `backend/node/handler.py`: validated stateless execution plus OPT session-aware cached execution, dtype/device conversion, cleanup, and accounting.
+- `backend/node/session_protocol.py`: fixed-frame version-one open/prefill/decode/close/cancel metadata and exact peer/range targeting.
+- `backend/node/session_cache.py`: bounded provider-owned dynamic key/value caches, process-shared metrics, expiry, eviction, and replay rejection.
+- `backend/node/rpc_server.py`: stateless, receipt, and OPT session Hivemind experts with peer-scoped UIDs and bounded shutdown helpers.
 - `backend/node/rpc_safety.py`: typed public-expert limits, pre-execution tensor/metadata validation, bounded admission, cooperative deadline errors, and multiprocessing-safe counters.
 - `backend/node/gpu_monitor.py`: CPU, RAM, GPU, and VRAM sampling.
-- `backend/client/sequential.py`: DHT metadata validation, coverage-aware route planning, legacy/receipt RPC lookup and fail-open retry, settlement submission, and route traces.
+- `backend/client/sequential.py`: DHT metadata validation, coverage-aware route planning, exact stateless/receipt/session RPC dispatch, safe session rebuild, settlement submission, and route traces.
 - `backend/client/coverage.py`: pure contiguous coverage plans plus exclusive-range recommendation used by the placement authority.
 - `backend/client/health.py`: typed provider health state, DHT/protocol/transport signals, revision snapshots, and lifecycle-owned bounded metadata probes.
 - `backend/placement/service.py`: authenticated SQLite placement authority with atomic reservations, lease transitions, expiry, revisions, idempotency, and bounded audit reads.
 - `backend/placement/client.py`: participant coordinator client, private lease ownership, heartbeats, and local pre-expiry safety shutdown.
-- `backend/client/generation.py`: tokenizer/local components, architecture preparation, distributed autoregressive generation, sampling controls, cancellation, unload cleanup, parity probes, and trace generation.
+- `backend/client/generation.py`: tokenizer/local components, architecture preparation, stateless or session-aware autoregressive generation, one-position decode, bounded rebuild, sampling, cancellation, parity probes, and traces.
 - `backend/client/distributed_model.py`: reserved model-level facade; currently not the primary runtime path.
 - `backend/models/architecture_adapter.py`: explicit OPT and Llama-family adapter behavior used by generation/handler paths.
 - `backend/models/llama/`: Llama-family extension placeholders.
@@ -43,6 +45,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `backend/tests/test_useful_work_incentives.py`: identity, signed receipt, abuse rejection, RPC wrapper, concurrency, durability, pagination, and rollout-mode coverage.
 - `backend/tests/test_transactional_placement.py`: coordinator concurrency, lease transition, expiry, replay, stale revision, restart, auth, and redaction coverage.
 - `backend/tests/test_placement_client.py`: authenticated client, exact online attestation, heartbeat rejection, secret hiding, and local expiry safety coverage.
+- `backend/tests/test_session_cache.py`: cache lifecycle, OPT parity, exact session routing, safe/ambiguous recovery, generator payload bounds, and real Hivemind 1.1.12 session RPC coverage.
 - `backend/tests/test_placement_backend_integration.py`: serving-plan authority, fail-closed startup, allocation override, and failed-load release integration.
 - `backend/pyproject.toml` and `backend/uv.lock`: Python 3.12+ dependency contract and locked environment.
 - `backend/.local_models.json`: gitignored local import registry.

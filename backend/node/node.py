@@ -68,6 +68,9 @@ _NODE_PUBLICATION_FIELDS = (
     "rpc_uid_schema_version",
     "rpc_peer_id",
     "receipt_rpc_uid",
+    "session_protocol_version",
+    "session_rpc_uid",
+    "session_hidden_size",
     "application_public_key",
     "model_revision",
     "placement_model_revision",
@@ -797,6 +800,29 @@ class Node:
                 receipt_capability = (
                     capability_getter(peer_id) if callable(capability_getter) else None
                 )
+                session_capability_getter = getattr(
+                    self.rpc,
+                    "get_session_capability",
+                    None,
+                )
+                session_capability = (
+                    session_capability_getter()
+                    if callable(session_capability_getter)
+                    else None
+                )
+                advertised_session_capability = (
+                    {
+                        key: session_capability[key]
+                        for key in (
+                            "session_protocol_version",
+                            "session_rpc_uid",
+                            "session_hidden_size",
+                        )
+                        if key in session_capability
+                    }
+                    if session_capability
+                    else {}
+                )
                 safety_getter = getattr(self.rpc, "get_safety_snapshot", None)
                 rpc_safety = safety_getter() if callable(safety_getter) else None
                 node_key = f"{self.dht_prefix}.node_info.{peer_id}"
@@ -831,6 +857,7 @@ class Node:
                     "rpc_publication": rpc_publication,
                     "timestamp": time.time(),
                     **(receipt_capability or {}),
+                    **advertised_session_capability,
                 }
                 node_stored = self._dht_call(
                     "node metadata store",
@@ -1337,6 +1364,12 @@ class Node:
                 if callable(capability_getter) and peer_id is not None
                 else None
             )
+            session_capability_getter = getattr(rpc, "get_session_capability", None)
+            session_capability = (
+                session_capability_getter()
+                if callable(session_capability_getter)
+                else None
+            )
             safety_getter = getattr(rpc, "get_safety_snapshot", None)
             rpc_safety = safety_getter() if callable(safety_getter) else None
             publication_getter = getattr(rpc, "get_publication_status", None)
@@ -1375,6 +1408,7 @@ class Node:
                 "placement": dict(self.placement_lease) if self.placement_lease else None,
                 "accounting": self._get_accounting_snapshot_owned(peer_id),
                 **(receipt_capability or {}),
+                **(session_capability or {}),
             }
 
     def get_accounting_snapshot(self) -> dict:

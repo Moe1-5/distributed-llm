@@ -217,16 +217,24 @@ class RPCSafetyController:
         if value is None:
             return
         batch, sequence, _ = hidden_states.shape
-        valid_shape = value.shape == (batch, sequence) or value.shape == (
-            batch,
-            1,
-            sequence,
-            sequence,
-        )
+        valid_shape = False
+        if value.dim() == 2:
+            valid_shape = (
+                value.shape[0] == batch
+                and sequence <= value.shape[1] <= self.config.max_sequence_length
+            )
+        elif value.dim() == 4:
+            valid_shape = (
+                value.shape[0] == batch
+                and value.shape[1] == 1
+                and value.shape[2] == sequence
+                and sequence <= value.shape[3] <= self.config.max_sequence_length
+            )
         if value.dim() not in {2, 4} or not valid_shape:
             self._raise(
                 "mask",
-                "attention_mask must be [batch, sequence] or [batch, 1, sequence, sequence]",
+                "attention_mask must be [batch, source] or "
+                "[batch, 1, current_sequence, source] within the context limit",
             )
         if value.dtype not in {
             torch.bool,

@@ -156,7 +156,10 @@ Inference page opens /stream WebSocket
   -> applies the publisher chat template once for chat/instruct models, or keeps a raw base-model prompt
   -> tokenizes the resulting prompt
   -> prepares architecture-specific inputs
-  -> sends hidden states through selected RPC route
+  -> if every OPT hop advertises session version one and incentives are off:
+       open exact route -> prefill full prompt once -> decode one new position per token
+       -> close/cancel provider caches
+  -> otherwise send full hidden-state history through the stateless selected route
   -> optionally verifies signed useful-work receipts and queues generator acceptance
   -> applies local output components
   -> samples/decodes next token
@@ -165,7 +168,7 @@ Inference page opens /stream WebSocket
   -> sends route trace and completion metrics
 ```
 
-The user can request cancellation between token steps. Diagnostic endpoints can compare next-token logits/generated output with direct Hugging Face execution and write redacted JSON traces.
+The user can request cancellation between token steps. A session route that fails before dispatch may rebuild once from known token history on a different complete route; an in-flight ambiguous failure stops without replay. Diagnostic endpoints can compare next-token logits/generated output with direct Hugging Face execution and write redacted JSON traces. Monitoring shows session wire bytes, decode latency, provider cache use, evictions, admission rejection, and rebuild count.
 
 ## 9. Remote Worker Flow
 

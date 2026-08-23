@@ -29,7 +29,11 @@ import torch.nn as nn
 from hivemind.utils.logging import get_logger
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from constants import SUPPORTED_MODELS, DEFAULT_GEN_CONFIG
-from client.sequential import RemoteSequential
+from client.sequential import (
+    RemoteSequential,
+    SessionPreDispatchError,
+    SessionRouteError,
+)
 from client.failover import RouteCancellationError
 from models.architecture_adapter import get_architecture_adapter
 
@@ -614,6 +618,15 @@ class DistributedGenerator:
         failover_reasons: list[dict] = []
         route_revision: Optional[str] = None
         hop_totals: dict[tuple[str, int, int], dict] = {}
+        remote_session_enabled = False
+        session_failed = False
+        prefill_bytes = 0
+        decode_bytes = 0
+        prefill_duration_ms = 0.0
+        decode_duration_ms_total = 0.0
+        decode_calls = 0
+        peak_remote_cache_bytes = 0
+        session_rebuilds = 0
         cfg = self._get_gen_config()
         logger.info(
             "[gen] starting generation prompt=%r max_new_tokens=%s temperature=%s top_p=%s",
@@ -647,26 +660,64 @@ class DistributedGenerator:
                 self.tokenizer.eos_token_id,
             )
 
+            session_available = getattr(
+                self.sequential,
+                "remote_sessions_available",
+                None,
+            )
+            open_remote_session = getattr(
+                self.sequential,
+                "open_remote_session",
+                None,
+            )
+            if callable(session_available) and callable(open_remote_session):
+                remote_session_enabled = await asyncio.to_thread(session_available)
+            if remote_session_enabled:
+                model_entry = SUPPORTED_MODELS.get(self.model_name, {})
+                hidden_size = int(model_entry.get("hidden_size", 0))
+                if hidden_size <= 0:
+                    raise RuntimeError(
+                        f"Session inference has no hidden-size contract for {self.model_name}"
+                    )
+                await asyncio.to_thread(
+                    open_remote_session,
+                    hidden_size,
+                    self._stop_event,
+                )
+
             for step in range(max_new_tokens):
                 if self._stop_requested:
                     logger.info("[gen] stop requested before step=%s", step)
                     break
 
-                position_ids = torch.arange(
-                    generated_ids.shape[1],
-                    device=self.device,
-                    dtype=torch.long,
-                ).unsqueeze(0)
-
-                attention_mask = torch.ones(
-                    generated_ids.shape,
-                    device=self.device,
-                    dtype=torch.bool,
-                )
+                if remote_session_enabled and step > 0:
+                    step_input_ids = generated_ids[:, -1:]
+                    position_ids = torch.tensor(
+                        [[generated_ids.shape[1] - 1]],
+                        device=self.device,
+                        dtype=torch.long,
+                    )
+                    attention_mask = torch.ones(
+                        step_input_ids.shape,
+                        device=self.device,
+                        dtype=torch.bool,
+                    )
+                else:
+                    step_input_ids = generated_ids
+                    position_ids = torch.arange(
+                        generated_ids.shape[1],
+                        device=self.device,
+                        dtype=torch.long,
+                    ).unsqueeze(0)
+                    attention_mask = torch.ones(
+                        generated_ids.shape,
+                        device=self.device,
+                        dtype=torch.bool,
+                    )
 
                 with torch.no_grad():
                     hidden_states = self._prepare_hidden_states(
-                        generated_ids,
+                        step_input_ids,
                         attention_mask,
                         position_ids,
                     )
@@ -679,29 +730,112 @@ class DistributedGenerator:
                     tuple(position_ids.shape),
                 )
                 self._validate_generation_inputs(
-                    input_ids=generated_ids,
+                    input_ids=step_input_ids,
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                 )
 
                 try:
-                    hidden_states, trace = await self._forward_async(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        position_ids=position_ids,
+                    if remote_session_enabled:
+                        hidden_states, trace = await self._session_forward_async(
+                            hidden_states=hidden_states,
+                            operation="prefill" if step == 0 else "decode",
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                        )
+                    else:
+                        hidden_states, trace = await self._forward_async(
+                            hidden_states=hidden_states,
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                        )
+                except SessionPreDispatchError as exc:
+                    rebuild_remote_session = getattr(
+                        self.sequential,
+                        "rebuild_remote_session",
+                        None,
+                    )
+                    if (
+                        not remote_session_enabled
+                        or session_rebuilds >= 1
+                        or not callable(rebuild_remote_session)
+                    ):
+                        session_failed = True
+                        raise
+                    full_attention_mask = torch.ones(
+                        generated_ids.shape,
+                        device=self.device,
+                        dtype=torch.bool,
+                    )
+                    full_position_ids = torch.arange(
+                        generated_ids.shape[1],
+                        device=self.device,
+                        dtype=torch.long,
+                    ).unsqueeze(0)
+                    with torch.no_grad():
+                        full_hidden_states = self._prepare_hidden_states(
+                            generated_ids,
+                            full_attention_mask,
+                            full_position_ids,
+                        )
+                    hidden_states, trace = await asyncio.to_thread(
+                        rebuild_remote_session,
+                        full_hidden_states,
+                        hidden_size=hidden_size,
+                        attention_mask=full_attention_mask,
+                        position_ids=full_position_ids,
+                        cancel_event=self._stop_event,
+                    )
+                    session_rebuilds += 1
+                    failed_over = True
+                    failover_reasons.append(
+                        {
+                            "attempt": session_rebuilds,
+                            "request_id": "session",
+                            "failure_class": "pre_dispatch",
+                            "peer_id": "",
+                            "layer_start": 0,
+                            "layer_end": 0,
+                            "reason": str(exc),
+                            "phase": "session_pre_dispatch",
+                            "action": "rebuilt_from_known_history",
+                        }
                     )
                 except RouteCancellationError:
                     logger.info("[gen] cancellation stopped active route work")
                     break
+                except SessionRouteError:
+                    session_failed = True
+                    raise
 
                 forward_metrics_getter = getattr(
                     self.sequential,
-                    "get_last_forward_metrics",
+                    (
+                        "get_last_session_metrics"
+                        if remote_session_enabled
+                        else "get_last_forward_metrics"
+                    ),
                     None,
                 )
                 if callable(forward_metrics_getter):
                     forward_metrics = forward_metrics_getter()
+                    if remote_session_enabled:
+                        operation = str(forward_metrics.get("operation", ""))
+                        operation_bytes = int(forward_metrics.get("input_bytes", 0))
+                        operation_ms = float(forward_metrics.get("elapsed_ms", 0.0))
+                        if operation == "prefill":
+                            prefill_bytes += operation_bytes
+                            prefill_duration_ms += operation_ms
+                        elif operation == "decode":
+                            decode_bytes += operation_bytes
+                            decode_duration_ms_total += operation_ms
+                            decode_calls += 1
+                        for hop in forward_metrics.get("hops", []):
+                            peak_remote_cache_bytes = max(
+                                peak_remote_cache_bytes,
+                                int(hop.get("estimated_cache_bytes") or 0),
+                            )
                     route_validation_ms_total += float(
                         forward_metrics.get("route_validation_ms", 0.0)
                     )
@@ -826,6 +960,19 @@ class DistributedGenerator:
                 "failed_over": failed_over,
                 "failover_reasons": failover_reasons,
                 "route_revision": route_revision,
+                "session_protocol_version": (
+                    1 if remote_session_enabled else None
+                ),
+                "session_prefill_bytes": prefill_bytes,
+                "session_decode_bytes": decode_bytes,
+                "session_prefill_duration_ms": prefill_duration_ms,
+                "session_decode_duration_ms_total": decode_duration_ms_total,
+                "session_average_decode_ms": (
+                    decode_duration_ms_total / decode_calls if decode_calls else None
+                ),
+                "session_decode_calls": decode_calls,
+                "session_peak_provider_cache_bytes": peak_remote_cache_bytes,
+                "session_rebuilds": session_rebuilds,
             }
             self._last_generation_metrics = metrics
             yield {
@@ -835,9 +982,23 @@ class DistributedGenerator:
             }
 
         except Exception as e:
+            session_failed = session_failed or remote_session_enabled
             logger.error(f"Generation error: {e}", exc_info=True)
             yield {"error": str(e)}
         finally:
+            close_remote_session = getattr(
+                self.sequential,
+                "close_remote_session",
+                None,
+            )
+            if remote_session_enabled and callable(close_remote_session):
+                try:
+                    await asyncio.to_thread(
+                        close_remote_session,
+                        cancelled=bool(self._stop_requested or session_failed),
+                    )
+                except Exception as exc:
+                    logger.warning("Remote session cleanup failed: %s", exc)
             end_session = getattr(self.sequential, "end_session", None)
             if session_started and callable(end_session):
                 end_session()
@@ -1412,6 +1573,26 @@ class DistributedGenerator:
         if supports_cancel:
             kwargs["cancel_event"] = self._stop_event
         return await asyncio.to_thread(forward, **kwargs)
+
+    async def _session_forward_async(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        operation: str,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[str]]:
+        session_forward = getattr(self.sequential, "session_forward", None)
+        if not callable(session_forward):
+            raise RuntimeError("Selected sequential client has no session protocol")
+        return await asyncio.to_thread(
+            session_forward,
+            hidden_states,
+            operation=operation,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            cancel_event=self._stop_event,
+        )
 
     def _prepare_reference_model_for_parity(self) -> torch.device:
         model = self._get_reference_model()

@@ -6,8 +6,8 @@
 **Description:** Electron + FastAPI prototype for project-owned public/discoverable peer-to-peer distributed LLM inference over Hivemind DHT/RPC.  
 **Stage:** [ ] Scaffolding [x] MVP prototype [ ] Feature-complete [ ] Production
 ## Active Sprint
-**Sprint:** Sprint 13 remains the lowest active sprint by workflow; Sprints 28-30 are implemented in source with physical rollout pending, Sprints 31-32 are planned, and Sprints 22, 25, and 27 retain open transport, runtime, and UI gates.
-**Goal:** Physically validate exact identities, persistent network ownership, and atomic placement, then reduce token traffic with sessions and harden infrastructure.
+**Sprint:** Sprint 13 remains the lowest active sprint by workflow; Sprints 28-31 are implemented in source with physical rollout pending, Sprint 32 is planned, and Sprints 22, 25, and 27 retain open transport, runtime, and UI gates.
+**Goal:** Physically validate exact identities, persistent network ownership, atomic placement, and bounded OPT sessions, then harden infrastructure.
 ## Tech Stack
 React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Transformers/PyTorch, uv for backend dependencies, npm for frontend scripts.
 ## Last Decision
@@ -36,4 +36,4 @@ React 19 + Electron/Vite frontend, FastAPI Python backend, Hivemind DHT/RPC, Tra
 - Sprint 24 now binds device reports to executable SHA-256 and clean source commit; one final post-commit rebuild plus physical relay/failover/direct acceptance remain open.
 - Sprint 25 now refreshes worker metadata and membership on bounded heartbeats, rejects stale local advertisements, gates generator readiness on RPC health and a tensor canary, and exposes suspended generators for explicit unload. Physical relay retesting remains open.
 - Sprint 26 now keeps Electron chat free while verified credits unlock hashed local API keys, shared atomic reservations, signed capabilities, and OpenAI-compatible chat completions; hosted global spending remains future work.
-- Sprint 27 retains frontend workflow and diagnostics. Sprint 28 pins Hivemind 1.1.12 and peer-binds RPC. Sprint 29 owns persistent network state and recovery. Sprint 30 now adds a separate authenticated SQLite placement service, atomic exclusive leases, coordinator-backed Recommended and Custom starts, exact online attestation, heartbeats, fail-closed new placement, pre-expiry local safety shutdown, deployment tooling, and renderer authority indicators. Full source regression passes; packaged two-device validation remains open, while Sprints 31-32 retain session and infrastructure work.
+- Sprint 27 retains frontend workflow and diagnostics. Sprint 28 pins Hivemind 1.1.12 and peer-binds RPC. Sprint 29 owns persistent network state and recovery. Sprint 30 adds authenticated transactional placement. Sprint 31 now adds exact peer-scoped OPT session RPC, bounded provider key/value caches, one-position decode, one safe known-history rebuild, ambiguous no-replay, shared cache metrics, and stateless receipt compatibility. Local real-Hivemind validation passes; packaged two-device relay validation remains open, while Sprint 32 retains infrastructure work.

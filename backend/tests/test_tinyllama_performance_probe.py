@@ -33,6 +33,10 @@ class TinyLlamaPerformanceProbeTests(unittest.TestCase):
                 "tokens_per_second": 10,
                 "route_validation_ms_total": 5,
                 "stopped": False,
+                "session_protocol_version": 1,
+                "session_prefill_bytes": 1024,
+                "session_decode_bytes": 256,
+                "session_decode_calls": 2,
                 "secret": "not-for-evidence",
                 "hop_metrics": [
                     {
@@ -52,6 +56,8 @@ class TinyLlamaPerformanceProbeTests(unittest.TestCase):
 
         self.assertNotIn("secret", evidence)
         self.assertNotIn("maddrs", evidence["hop_metrics"][0])
+        self.assertEqual(evidence["session_protocol_version"], 1)
+        self.assertEqual(evidence["session_decode_bytes"], 256)
 
     def test_baseline_requires_visible_output_metrics_and_accounting(self) -> None:
         route = [{"layer_start": 0, "layer_end": 22}]

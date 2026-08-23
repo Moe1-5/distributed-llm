@@ -3,7 +3,7 @@
 **Goal:** Replace full-sequence retransmission per token with bounded prefill and decode sessions while preserving parity, cancellation, accounting, and safe recovery.
 **Start:** 2026-08-23
 **End:** TBD
-**Status:** Planned behind the stateless transport baseline and Sprints 28 through 30.
+**Status:** Implemented in source on `feature/distributed-runtime-architecture`; physical direct and relayed two-device acceptance remains open.
 
 ---
 
@@ -23,16 +23,16 @@ This is a protocol change, not a performance flag. Cache ownership, model semant
 
 ## Work Plan
 
-- [ ] Define versioned `open`, `prefill`, `decode`, `close`, and `cancel` RPC operations.
-- [ ] Create stable session, route, request, and operation identities.
-- [ ] Add bounded per-provider cache ownership, admission, expiry, eviction, cleanup, and diagnostics.
-- [ ] Keep one exact peer-addressed route stable for a session.
-- [ ] Send full context only during prefill and only new positions during decode.
-- [ ] Add OPT adapter support for remote cached attention state with Hugging Face parity.
-- [ ] Define cancellation and ambiguous-outcome semantics for every session operation.
-- [ ] Rebuild state on a safe alternate from known token history without blind ambiguous replay.
-- [ ] Make useful-work operations and accepted receipts idempotent across session recovery.
-- [ ] Expose prefill/decode bytes, cache use, eviction, first-token time, and per-token timing.
+- [x] Define versioned `open`, `prefill`, `decode`, `close`, and `cancel` RPC operations.
+- [x] Create stable session, route, request, and operation identities.
+- [x] Add bounded per-provider cache ownership, admission, expiry, eviction, cleanup, and diagnostics.
+- [x] Keep one exact peer-addressed route stable for a session.
+- [x] Send full context only during prefill and only new positions during decode.
+- [x] Add OPT adapter support for remote cached attention state with Hugging Face parity.
+- [x] Define cancellation and ambiguous-outcome semantics for every session operation.
+- [x] Rebuild state on a safe alternate from known token history without blind ambiguous replay.
+- [x] Preserve useful-work idempotency by retaining stateless receipt RPC whenever incentives are enabled; signed session receipts remain a future protocol version.
+- [x] Expose prefill/decode bytes, cache use, eviction, first-token time, and per-token timing.
 
 ## Test Plan
 
@@ -45,12 +45,26 @@ This is a protocol change, not a performance flag. Cache ownership, model semant
 
 ## Acceptance Criteria
 
-- [ ] Cached and stateless greedy output match the accepted Hugging Face reference tolerance.
-- [ ] Decode traffic no longer grows with the full accumulated sequence.
-- [ ] Cache memory and concurrency are bounded and observable.
-- [ ] Cancellation, timeout, unload, and peer loss release cache state.
-- [ ] Safe alternate recovery rebuilds once; ambiguous execution never triggers blind replay.
+- [x] Cached and stateless logits and greedy-token selection match the accepted tolerance in local OPT tests.
+- [x] Decode traffic no longer grows with the full accumulated sequence.
+- [x] Cache memory and concurrency are bounded and observable.
+- [x] Cancellation, timeout, unload, and peer loss have bounded release through cancel, runtime expiry, and shutdown cleanup.
+- [x] Safe alternate recovery rebuilds once; ambiguous execution never triggers blind replay.
 - [ ] One real two-device relayed session completes with correlated prefill and decode evidence.
+
+## Physical Test Gate
+
+Run this only after both devices and the VPS use the same committed source and the matching freshly rebuilt executable.
+
+1. Set `DISTRIBLLM_INCENTIVES_MODE=off` on both participants. Session protocol version one intentionally falls back to stateless receipt RPC in shadow or credit mode.
+2. Start the VPS relay and placement coordinator using the Sprint 30 deployment configuration, then start the packaged application on both Windows devices.
+3. On device one, use Custom to serve OPT-125M layers `0-6`. On device two, use Recommended and verify it reserves `6-12`; do not proceed if it proposes an overlapping range.
+4. Wait until Monitoring reports complete coverage, both exact providers healthy, Generator ready, and Route ready.
+5. Start inference on device one and generate at least eight tokens. Record the first-token result and keep both applications running.
+6. In Monitoring, verify `Session Protocol v1`, one prefill, one-position decode activity, non-growing decode wire bytes, and provider session cache counters. Export diagnostics from both devices immediately after the request.
+7. Repeat with device two as generator and device one still serving its half. Export diagnostics again.
+8. For failure recovery, add a fully disjoint standby route, stop one active provider before a decode dispatch, and verify exactly one `rebuilt_from_known_history` event. Do not repeat an ambiguous stream-reset request automatically.
+9. Save the device-one, device-two, and VPS logs under one test identifier. A pass requires a complete response in both generator directions, matching exact peers and ranges, no ambiguous replay, and zero active provider sessions after close.
 
 ---
 
@@ -61,3 +75,13 @@ This is a protocol change, not a performance flag. Cache ownership, model semant
 - What changed: created the sprint for versioned prefill/decode RPCs, bounded remote key/value caches, exact route ownership, parity, cleanup, and accounting-safe recovery.
 - Why: the architecture audit identified full-sequence retransmission and recomputation as a growing sustained-relay load that is absent from the successful one-position startup canary.
 - Status: planning is complete and remains behind the stateless transport baseline plus Sprints 28 through 30; no runtime source changed in this session.
+
+### 2026-08-23 - Implement version-one OPT sessions
+
+- What changed: added fixed-frame lifecycle RPCs under peer-scoped role-two expert UIDs, stable request/session/route/operation identities, provider-owned Hugging Face dynamic caches, one full prefill followed by one-position decodes, explicit close/cancel, and stateless compatibility.
+- Safety: cache count, total bytes, per-session bytes, positions, operation history, and time to live are bounded. Idle expiry runs inside the Hivemind runtime process; counters are multiprocessing-safe and visible to the parent API. Replayed tensor operations are rejected.
+- Recovery: the client preflights every exact hop. It may rebuild once from complete known token history only after a pre-dispatch failure and only on a different complete route. In-flight ambiguity still stops and cancels without replay.
+- Accounting: incentives-enabled generation remains on the existing stateless signed-receipt path, preventing duplicate accepted work while session receipts are undefined.
+- Observability: correlated client/provider logs and Monitoring now show protocol version, prefill/decode bytes and duration, average decode latency, peak provider cache use, active sessions, evictions, admission rejections, and rebuild count. Acceptance artifacts whitelist these metrics.
+- Verification: 432 backend tests pass, including OPT cached/stateless output parity, constant decode input size, limits, expiry/eviction, unload, exact route lifecycle, safe rebuild, ambiguous no-replay, generator integration, and a real local Hivemind 1.1.12 session RPC. Frontend type checks, 20 launcher tests, four renderer-flow tests, production build, and lint with zero errors also pass; 81 pre-existing formatting warnings remain. The packaged physical test is still open.
+- Status: source implementation is complete; do not close this sprint until the two-device relayed gate above passes and the user explicitly requests closure.

@@ -51,6 +51,13 @@ from node.rpc_safety import (
     RPCSafetyError,
     get_rpc_safety_config,
 )
+from node.session_protocol import (
+    SESSION_METADATA_TENSOR_SIZE,
+    SESSION_PROTOCOL_VERSION,
+    decode_session_metadata,
+    encode_session_metadata,
+    validate_session_operation,
+)
 
 logger = get_logger(__name__)
 
@@ -414,6 +421,126 @@ class _ReceiptHandlerModule(nn.Module):
         return self._safety.execute(hidden_states, execute)
 
 
+class _SessionHandlerModule(nn.Module):
+    """Stateful OPT prefill/decode expert under a separate versioned UID."""
+
+    def __init__(
+        self,
+        handler: InferenceHandler,
+        safety: RPCSafetyController,
+        *,
+        peer_id: str,
+        rpc_uid: str,
+    ) -> None:
+        super().__init__()
+        self._handler = handler
+        self._safety = safety
+        self._peer_id = peer_id
+        self._rpc_uid = rpc_uid
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        session_metadata: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self._safety.validate(
+            hidden_states,
+            attention_mask,
+            position_ids,
+            session_metadata,
+        )
+        if hidden_states.shape[0] != 1:
+            raise ValueError("Session protocol v1 requires batch size one")
+        operation = validate_session_operation(
+            decode_session_metadata(session_metadata),
+            expected_peer_id=self._peer_id,
+            expected_rpc_uid=self._rpc_uid,
+            expected_layer_start=self._handler.layer_start,
+            expected_layer_end=self._handler.layer_end,
+        )
+        logger.info(
+            "Session RPC admitted | request=%s session=%s operation=%s "
+            "position=%s tokens=%s layers=%s-%s shape=%s bytes=%s",
+            operation["request_id"],
+            operation["session_id"],
+            operation["operation"],
+            operation["position_start"],
+            operation["token_count"],
+            self._handler.layer_start,
+            self._handler.layer_end,
+            tuple(hidden_states.shape),
+            hidden_states.numel() * hidden_states.element_size(),
+        )
+
+        def execute(deadline: float) -> tuple[torch.Tensor, torch.Tensor]:
+            action = str(operation["operation"])
+            if action == "open":
+                session = self._handler.session_open(
+                    session_id=operation["session_id"],
+                    route_id=operation["route_id"],
+                    request_id=operation["request_id"],
+                    operation_id=operation["operation_id"],
+                )
+                output = hidden_states.detach().to(device="cpu")
+            elif action in {"prefill", "decode"}:
+                if int(operation["token_count"]) != int(hidden_states.shape[1]):
+                    raise ValueError("Session token_count does not match hidden states")
+                output, session = self._handler.session_forward(
+                    operation=action,
+                    session_id=operation["session_id"],
+                    route_id=operation["route_id"],
+                    request_id=operation["request_id"],
+                    operation_id=operation["operation_id"],
+                    position_start=int(operation["position_start"]),
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    deadline=deadline,
+                )
+            else:
+                session = self._handler.session_close(
+                    session_id=operation["session_id"],
+                    route_id=operation["route_id"],
+                    request_id=operation["request_id"],
+                    operation_id=operation["operation_id"],
+                    cancelled=action == "cancel",
+                )
+                output = hidden_states.detach().to(device="cpu")
+            response = {
+                "protocol_version": SESSION_PROTOCOL_VERSION,
+                "operation": action,
+                "operation_id": operation["operation_id"],
+                "session": session,
+            }
+            logger.info(
+                "Session RPC complete | request=%s session=%s operation=%s "
+                "next_position=%s cache_bytes=%s",
+                operation["request_id"],
+                operation["session_id"],
+                action,
+                session.get("expected_position"),
+                session.get("estimated_bytes"),
+            )
+            return output, encode_session_metadata(response)
+
+        try:
+            return self._safety.execute(hidden_states, execute)
+        except Exception as exc:
+            logger.error(
+                "Session RPC failed | request=%s session=%s operation=%s "
+                "position=%s error=%s: %s",
+                operation["request_id"],
+                operation["session_id"],
+                operation["operation"],
+                operation["position_start"],
+                type(exc).__name__,
+                exc,
+            )
+            raise
+
+
 class RPCServer:
     """
     Registers this node's layers with hivemind and serves
@@ -465,6 +592,7 @@ class RPCServer:
         self._running  = False
         self._uid:     Optional[str] = None
         self._receipt_uid: Optional[str] = None
+        self._session_uid: Optional[str] = None
         self._lock     = threading.Lock()
         self._shutdown_thread: Optional[threading.Thread] = None
         self._shutdown_server: Optional[hivemind.moe.Server] = None
@@ -558,6 +686,36 @@ class RPCServer:
             uid_suffix,
         )
 
+    @staticmethod
+    def build_session_rpc_uid(
+        dht_prefix: str,
+        layer_start: int,
+        layer_end: int,
+        uid_suffix: Optional[int] = None,
+        *,
+        provider_peer_id: Optional[str] = None,
+    ) -> str:
+        if provider_peer_id is None:
+            return RPCServer.build_rpc_uid(
+                f"{dht_prefix}.888888",
+                layer_start,
+                layer_end,
+                uid_suffix,
+            )
+        normalized_prefix = dht_prefix.strip()
+        normalized_peer_id = str(provider_peer_id).strip()
+        if not normalized_prefix or "." in normalized_prefix:
+            raise ValueError("dht_prefix must be non-empty and dot-free")
+        if not normalized_peer_id or "." in normalized_peer_id:
+            raise ValueError("provider_peer_id must be non-empty and dot-free")
+        replica = 0 if uid_suffix is None else uid_suffix
+        if replica < 0:
+            raise ValueError("uid_suffix must be non-negative")
+        return (
+            f"{normalized_prefix}-{normalized_peer_id}.2."
+            f"{layer_start}.{layer_end}.{replica}"
+        )
+
     def start(self) -> None:
         with self._lock:
             if self._running:
@@ -629,6 +787,46 @@ class RPCServer:
                 pool_size=self.safety_config.max_queued_forwards,
             ), self.safety_controller)
             module_backends = {self._uid: backend}
+            session_snapshot_getter = getattr(
+                self.handler,
+                "get_session_cache_snapshot",
+                None,
+            )
+            session_snapshot = (
+                session_snapshot_getter()
+                if callable(session_snapshot_getter)
+                else {"supported": False}
+            )
+            if session_snapshot.get("supported"):
+                self._session_uid = self.build_session_rpc_uid(
+                    self.dht_prefix,
+                    self.handler.layer_start,
+                    self.handler.layer_end,
+                    self.uid_suffix,
+                    provider_peer_id=provider_peer_id,
+                )
+                session_metadata_descriptor = BatchTensorDescriptor(
+                    SESSION_METADATA_TENSOR_SIZE,
+                    dtype=torch.uint8,
+                )
+                session_backend = _install_rejecting_pools(ModuleBackend(
+                    name=self._session_uid,
+                    module=_SessionHandlerModule(
+                        self.handler,
+                        self.safety_controller,
+                        peer_id=provider_peer_id,
+                        rpc_uid=self._session_uid,
+                    ),
+                    args_schema=(hidden_descriptor, session_metadata_descriptor),
+                    kwargs_schema={
+                        "attention_mask": mask_descriptor,
+                        "position_ids": mask_descriptor,
+                    },
+                    outputs_schema=(hidden_descriptor, session_metadata_descriptor),
+                    max_batch_size=1,
+                    pool_size=self.safety_config.max_queued_forwards,
+                ), self.safety_controller)
+                module_backends[self._session_uid] = session_backend
             if self.incentives_config.enabled:
                 if self.application_identity is None:
                     raise RuntimeError("Incentives mode requires an application identity")
@@ -705,6 +903,14 @@ class RPCServer:
             if server is None:
                 self._running = False
                 self._receipt_uid = None
+                self._session_uid = None
+                close_sessions = getattr(
+                    getattr(self, "handler", None),
+                    "close_all_sessions",
+                    None,
+                )
+                if callable(close_sessions):
+                    close_sessions("rpc_not_running")
                 return True
 
             shutdown_thread = getattr(self, "_shutdown_thread", None)
@@ -763,6 +969,14 @@ class RPCServer:
                 self._server = None
             self._running = False
             self._receipt_uid = None
+            self._session_uid = None
+            close_sessions = getattr(
+                getattr(self, "handler", None),
+                "close_all_sessions",
+                None,
+            )
+            if callable(close_sessions):
+                close_sessions("rpc_shutdown")
             logger.info("RPC server stopped.")
             return True
 
@@ -885,10 +1099,29 @@ class RPCServer:
             "model_revision": self.incentives_config.model_revision,
         }
 
+    def get_session_capability(self) -> Optional[dict]:
+        if not self._running or self._session_uid is None:
+            return None
+        snapshot_getter = getattr(self.handler, "get_session_cache_snapshot", None)
+        return {
+            "session_protocol_version": SESSION_PROTOCOL_VERSION,
+            "session_rpc_uid": self._session_uid,
+            "session_hidden_size": self._get_hidden_size(),
+            "session_cache": (
+                snapshot_getter()
+                if callable(snapshot_getter)
+                else {"supported": False, "active_sessions": 0}
+            ),
+        }
+
     def _publication_uids(self) -> list[str]:
         return [
             uid
-            for uid in (self._uid, self._receipt_uid)
+            for uid in (
+                getattr(self, "_uid", None),
+                getattr(self, "_receipt_uid", None),
+                getattr(self, "_session_uid", None),
+            )
             if uid is not None
         ]
 

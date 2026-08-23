@@ -89,6 +89,33 @@ export interface NodeInfo {
     queued_forwards: number
     peak_queued_forwards: number
   } | null
+  session_protocol_version?: number
+  session_rpc_uid?: string
+  session_hidden_size?: number
+  session_cache?: {
+    supported: boolean
+    active_sessions: number
+    estimated_cache_bytes?: number
+    opened_sessions?: number
+    closed_sessions?: number
+    cancelled_sessions?: number
+    expired_sessions?: number
+    evicted_sessions?: number
+    admission_rejections?: number
+    replay_rejections?: number
+    prefill_operations?: number
+    decode_operations?: number
+    prefill_input_bytes?: number
+    decode_input_bytes?: number
+    policy?: {
+      max_sessions: number
+      max_total_bytes: number
+      max_session_bytes: number
+      max_positions: number
+      ttl_seconds: number
+      operation_history_limit: number
+    }
+  }
 }
 
 export interface LifecycleJob {
@@ -460,6 +487,8 @@ export interface RouteFailoverReason {
   layer_start: number
   layer_end: number
   reason: string
+  phase?: string
+  action?: string
 }
 
 export interface RouteFailoverStatus {
@@ -493,6 +522,15 @@ export interface GenerationPerformance {
   failed_over?: boolean
   failover_reasons?: RouteFailoverReason[]
   route_revision?: string
+  session_protocol_version?: number | null
+  session_prefill_bytes?: number
+  session_decode_bytes?: number
+  session_prefill_duration_ms?: number
+  session_decode_duration_ms_total?: number
+  session_average_decode_ms?: number | null
+  session_decode_calls?: number
+  session_peak_provider_cache_bytes?: number
+  session_rebuilds?: number
 }
 
 export interface GeneratorPerformance {

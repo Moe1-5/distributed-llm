@@ -197,20 +197,13 @@ Goal: move toward Petals-like efficiency.
 
 **Implementation owner:** Sprint 31, after Sprints 22 and 28 establish the stateless transport baseline and exact peer execution.
 
-### Current Behavior
+### Implemented Source Behavior
 
-Each token step embeds and sends the full generated sequence through all remote layers.
+OPT session protocol version one now creates stable session, request, route, and operation identities; opens exact peer-scoped session experts; prefills the full context once; and sends only one new position for later decode steps. Provider-owned dynamic caches have bounded sessions, bytes, positions, operation history, time-to-live expiry, least-recently-used eviction, explicit close/cancel, unload/shutdown cleanup, and process-shared diagnostics.
 
-### Target Behavior
+The client preflights the complete exact route before each operation. One strictly pre-dispatch failure may rebuild a different complete route from known token history. Once any hop may have executed, replay is suppressed. The generator and Monitoring expose prefill/decode bytes, durations, peak cache use, and rebuild count. Stateless RPC remains versioned and available for transport comparison, unsupported architectures, and shadow/credit receipt mode; this preserves receipt idempotency until session operations gain their own signed accounting contract.
 
-Sprint 31 will:
-
-- create a session id per generation
-- hold route stable during the session
-- support KV cache on remote nodes
-- send only the new token after the initial prefill
-
-This is a larger change because node RPC APIs need to support versioned cache state, bounded admission and cleanup, architecture parity, cancellation, and accounting-safe recovery.
+Local tests cover cached/stateless logits and greedy-token parity, constant one-position decode payloads, admission/expiry/eviction/cleanup, safe rebuild, ambiguous no-replay, and a real exact-peer Hivemind 1.1.12 session RPC. Direct and relayed two-device session evidence remains the physical acceptance gate.
 
 ## Phase 6: Multi-Node and Multi-Generator Management
 

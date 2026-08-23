@@ -154,6 +154,15 @@ def _performance_evidence(source: dict[str, Any]) -> dict[str, Any]:
             "tokens_per_second",
             "route_validation_ms_total",
             "stopped",
+            "session_protocol_version",
+            "session_prefill_bytes",
+            "session_decode_bytes",
+            "session_prefill_duration_ms",
+            "session_decode_duration_ms_total",
+            "session_average_decode_ms",
+            "session_decode_calls",
+            "session_peak_provider_cache_bytes",
+            "session_rebuilds",
         )
     }
     raw_hops = source.get("hop_metrics")

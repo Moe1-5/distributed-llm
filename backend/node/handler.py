@@ -11,9 +11,11 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from hivemind.utils.logging import get_logger
+from transformers import DynamicCache
 
 from node.block_loader import load_layers
 from node.rpc_safety import RPCExecutionTimeout
+from node.session_cache import SessionCacheManager
 
 logger = get_logger(__name__)
 
@@ -58,6 +60,7 @@ class InferenceHandler:
         self._total_latency_ms = 0.0
         self._last_success_at: Optional[float] = None
         self._last_error_at: Optional[float] = None
+        self._session_cache_manager: Optional[SessionCacheManager] = None
 
     # ------------------------------------------------------------------
     # Loading
@@ -87,10 +90,22 @@ class InferenceHandler:
                 f"Expected {expected_layers} layers, got {len(self.layers)}"
             )
         self.load_diagnostics = getattr(self.layers, "load_diagnostics", None)
+        first_layer = self.layers[0]
+        model_config = getattr(getattr(first_layer, "self_attn", None), "config", None)
+        if "opt" in self.model_name.lower() and model_config is not None:
+            self._session_cache_manager = SessionCacheManager(
+                layer_count=len(self.layers),
+                hidden_size=int(getattr(model_config, "hidden_size")),
+                element_size=torch.tensor([], dtype=self.dtype).element_size(),
+                model_config=model_config,
+            )
         self._loaded = True
         logger.info(f"Loaded {len(self.layers)} layers on {self.device}")
 
     def unload(self) -> None:
+        if self._session_cache_manager is not None:
+            self._session_cache_manager.close_all("worker_unload")
+            self._session_cache_manager = None
         if self.layers is not None:
             del self.layers
             self.layers = None
@@ -186,6 +201,173 @@ class InferenceHandler:
                 )
             raise
 
+    def session_open(
+        self,
+        *,
+        session_id: str,
+        route_id: str,
+        request_id: str,
+        operation_id: str,
+    ) -> dict:
+        manager = self._require_session_cache()
+        return manager.open(
+            session_id=session_id,
+            route_id=route_id,
+            request_id=request_id,
+            operation_id=operation_id,
+        )
+
+    def session_forward(
+        self,
+        *,
+        operation: str,
+        session_id: str,
+        route_id: str,
+        request_id: str,
+        operation_id: str,
+        position_start: int,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor],
+        deadline: Optional[float] = None,
+    ) -> tuple[torch.Tensor, dict]:
+        if operation not in {"prefill", "decode"}:
+            raise ValueError("session_forward operation must be prefill or decode")
+        if hidden_states.shape[0] != 1:
+            raise ValueError("session protocol v1 requires batch size one")
+        manager = self._require_session_cache()
+        input_bytes = sum(
+            value.numel() * value.element_size()
+            for value in (hidden_states, attention_mask, position_ids)
+            if value is not None
+        )
+
+        def execute(cache: DynamicCache) -> torch.Tensor:
+            return self._forward_with_cache(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                cache=cache,
+                position_start=position_start,
+                deadline=deadline,
+            )
+
+        started_at = time.perf_counter()
+        try:
+            output, session = manager.execute(
+                session_id=session_id,
+                route_id=route_id,
+                request_id=request_id,
+                operation_id=operation_id,
+                operation=operation,
+                position_start=position_start,
+                token_count=int(hidden_states.shape[1]),
+                input_bytes=input_bytes,
+                target=execute,
+            )
+        except Exception:
+            self._record_accounting(
+                success=False,
+                token_positions=int(hidden_states.shape[1]),
+                latency_ms=(time.perf_counter() - started_at) * 1000,
+            )
+            raise
+        self._record_accounting(
+            success=True,
+            token_positions=int(hidden_states.shape[1]),
+            latency_ms=(time.perf_counter() - started_at) * 1000,
+        )
+        return output, session
+
+    def session_close(
+        self,
+        *,
+        session_id: str,
+        route_id: str,
+        request_id: str,
+        operation_id: str,
+        cancelled: bool,
+    ) -> dict:
+        return self._require_session_cache().close(
+            session_id=session_id,
+            route_id=route_id,
+            request_id=request_id,
+            operation_id=operation_id,
+            cancelled=cancelled,
+        )
+
+    def get_session_cache_snapshot(self) -> dict:
+        if self._session_cache_manager is None:
+            return {
+                "protocol_version": 1,
+                "supported": False,
+                "active_sessions": 0,
+            }
+        return {
+            "supported": True,
+            **self._session_cache_manager.snapshot(),
+        }
+
+    def close_all_sessions(self, reason: str) -> int:
+        if self._session_cache_manager is None:
+            return 0
+        return self._session_cache_manager.close_all(reason)
+
+    def _require_session_cache(self) -> SessionCacheManager:
+        if not self._loaded or self.layers is None:
+            raise RuntimeError("Layers are not loaded")
+        if self._session_cache_manager is None:
+            raise RuntimeError(
+                f"Session protocol v1 is not supported for {self.model_name}"
+            )
+        return self._session_cache_manager
+
+    def _forward_with_cache(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor],
+        cache: DynamicCache,
+        position_start: int,
+        deadline: Optional[float],
+    ) -> torch.Tensor:
+        if self.layers is None:
+            raise RuntimeError("Layers are not loaded")
+        self._check_deadline(deadline)
+        hidden_states = hidden_states.to(self.device, dtype=self.dtype)
+        position_ids = self._prepare_position_ids(position_ids, hidden_states)
+        if bool((position_ids != torch.arange(
+            position_start,
+            position_start + hidden_states.shape[1],
+            device=position_ids.device,
+            dtype=position_ids.dtype,
+        ).unsqueeze(0)).any()):
+            raise ValueError("session position_ids do not match the expected position range")
+        attention_mask = self._prepare_decoder_attention_mask(
+            attention_mask,
+            hidden_states,
+            past_length=position_start,
+        )
+        self._acquire_execution_lock(deadline)
+        try:
+            with torch.no_grad():
+                for layer in self.layers:
+                    self._check_deadline(deadline)
+                    output = layer(
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=cache,
+                        use_cache=True,
+                        cache_position=position_ids[0],
+                    )
+                    hidden_states = output[0] if isinstance(output, tuple) else output
+                self._check_deadline(deadline)
+        finally:
+            self._lock.release()
+        return hidden_states.cpu()
+
     @staticmethod
     def _check_deadline(deadline: Optional[float]) -> None:
         if deadline is not None and time.monotonic() >= deadline:
@@ -254,14 +436,16 @@ class InferenceHandler:
         self,
         attention_mask: Optional[torch.Tensor],
         hidden_states: torch.Tensor,
+        past_length: int = 0,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
+        total_length = past_length + seq_len
         device = hidden_states.device
         dtype = hidden_states.dtype
 
         if attention_mask is None:
             token_mask = torch.ones(
-                (batch_size, seq_len),
+                (batch_size, total_length),
                 device=device,
                 dtype=torch.bool,
             )
@@ -274,23 +458,38 @@ class InferenceHandler:
                     "attention_mask must be [batch, seq_len] or "
                     f"[batch, 1, tgt_len, src_len], got {tuple(attention_mask.shape)}"
                 )
-            if attention_mask.shape != (batch_size, seq_len):
+            if past_length > 0 and attention_mask.shape == (batch_size, seq_len):
+                attention_mask = torch.cat(
+                    [
+                        torch.ones(
+                            (batch_size, past_length),
+                            device=device,
+                            dtype=attention_mask.dtype,
+                        ),
+                        attention_mask,
+                    ],
+                    dim=1,
+                )
+            if attention_mask.shape != (batch_size, total_length):
                 raise ValueError(
-                    f"attention_mask must be [batch, seq_len] = {(batch_size, seq_len)}, "
+                    "attention_mask must cover cached and current positions as "
+                    f"{(batch_size, total_length)}, "
                     f"got {tuple(attention_mask.shape)}"
                 )
             token_mask = attention_mask.to(dtype=torch.bool)
 
-        causal_mask = torch.ones(
-            (seq_len, seq_len),
+        source_positions = torch.arange(total_length, device=device)
+        target_positions = torch.arange(
+            past_length,
+            total_length,
             device=device,
-            dtype=torch.bool,
-        ).tril()
-        allowed = causal_mask.unsqueeze(0).unsqueeze(0)
+        )
+        allowed = (source_positions.unsqueeze(0) <= target_positions.unsqueeze(1))
+        allowed = allowed.unsqueeze(0).unsqueeze(0)
         allowed = allowed & token_mask[:, None, None, :]
 
         decoder_mask = torch.zeros(
-            (batch_size, 1, seq_len, seq_len),
+            (batch_size, 1, seq_len, total_length),
             device=device,
             dtype=dtype,
         )
@@ -343,6 +542,7 @@ class InferenceHandler:
             "loaded":      self._loaded,
             "num_layers":  len(self.layers) if self.layers else 0,
             "loading":     self.load_diagnostics,
+            "session_cache": self.get_session_cache_snapshot(),
         }
 
     def get_accounting_snapshot(self) -> dict:
