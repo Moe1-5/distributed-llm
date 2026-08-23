@@ -44,8 +44,8 @@ The participant now selects the configured trusted relay statically and requests
 ## Todo
 
 - [ ] Capture full VPS and participant `p2pd` logs at debug level during one relay attempt.
-- [ ] Verify the VPS process is running the expected branch/commit and Hivemind version.
-- [ ] Inspect the effective VPS `p2pd` flags and confirm that relay service/hop reservations are enabled, not only relay dialing.
+- [x] Verify the VPS process is running the expected branch/commit and Hivemind version.
+- [x] Inspect the effective VPS `p2pd` flags and confirm that relay service/hop reservations are enabled, not only relay dialing.
 - [x] Inspect the effective participant `p2pd` flags for AutoRelay, trusted relays, reachability state, DHT client mode, and bootstrap peers.
 - [x] Build a minimal Hivemind-only reservation probe that excludes FastAPI, model loading, and expert routing.
 - [x] Confirm the worker receives a complete relay multiaddress containing `/p2p-circuit/p2p/<worker-peer-id>`.
@@ -75,7 +75,7 @@ The participant now selects the configured trusted relay statically and requests
 - [ ] Two Windows/WSL devices complete OPT-125M distributed inference across the VPS relay fallback.
 - [ ] Monitoring and node metadata report relay mode accurately.
 - [ ] Directly reachable workers still select direct mode in `auto` mode.
-- [ ] Restarting the persistent VPS service preserves the configured peer ID and restores relay operation.
+- [x] Restarting the persistent VPS service preserves the configured peer ID and restores relay operation.
 - [x] Automated tests cover the live-discovered configuration or lifecycle defect.
 - [x] Documentation contains the deployment, validation, and recovery procedure, with live-only evidence clearly identified.
 
@@ -172,3 +172,9 @@ The participant now selects the configured trusted relay statically and requests
 - What changed: upgraded the live combined VPS service to commit `3e4ad448edb5dbb546389164c06315bd3f57b27f`, captured a restart-validation failure, and compared the configured expected peer with the persistent identity file and service journal. The source default, packaged Windows launcher, active runbooks, and a literal regression assertion now use peer `QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y`.
 - Why: `/etc/distribllm/bootstrap.env` expected `QmTXjKi...`, but both managed-service restarts deterministically loaded `QmczTupu...`. The identity-file SHA-256 was `34629a9d7ec3ede4a7b12eb3f49537f172cf6f597bed0425dbd7986007a9eab3` before and after restart, proving stale configuration rather than identity rotation. Changing `12D3KooW...` journal peers are reachability-check clients, not the bootstrap relay.
 - Status: the root cause is corrected in commit `b66755fa7e7c7f31fc28af59863517ddecdb87bd`. The focused launcher/runtime/type checks and 12 bootstrap-service tests pass. The exact-commit Windows portable package passes the strict audit with 38 ASAR entries, 65 checksummed backend runtime files, no forbidden entries, manifest SHA-256 `ace61775041c876a967a6e63980c59f72c203055aec2d81ca382552c488cab70`, and acceptance identity bound. Its SHA-256 is `1aab5dc6c57b97adb1fad5cb4b3b7bc94166c6e687577d117c0406b27ac6125e` and its size is `87918472` bytes. The operator must deploy the resulting commit, explicitly reconcile the preserved `/etc/distribllm/bootstrap.env` expected-peer value, rerun restart validation, and then continue the external relay and two-device inference gates.
+
+### 2026-08-23 - Prove managed VPS restart continuity
+
+- What changed: deployed exact runtime commit `b66755fa7e7c7f31fc28af59863517ddecdb87bd` to the single project VPS, reconciled the expected peer to `QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y`, and ran the destructive-to-process restart validator. The report returned `ok: true` with no errors, valid runtime status, observed effective relay flags, and a preserved identity hash.
+- Why: the earlier failed report had proved a stale expected-peer setting but could not satisfy the persistent-service acceptance gate. The corrected run proves the combined bootstrap, DHT storage, and circuit-relay service restart on the one available VPS without changing its private identity.
+- Status: live VPS restart continuity now passes on Python `3.12.13` and Hivemind `1.1.12`; the service advertises `/ip4/178.156.212.0/tcp/7001/p2p/QmczTupuZhH2WfL7H1P1vHZnicjaEFPfBCPpN5hoZVUS1y`, with relay enabled and forced public reachability. The next gate is an external Device 1 relay probe bound to this exact report, followed by the two-device packaged-runtime tests.
