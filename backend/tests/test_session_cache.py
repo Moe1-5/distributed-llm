@@ -692,6 +692,38 @@ class RemoteSequentialSessionTests(unittest.TestCase):
             ]
             self.assertEqual(tensor_shapes, [(1, 3, 16), (1, 1, 16)])
 
+    def test_prepared_route_opens_without_a_second_topology_lookup(self) -> None:
+        """A session decision and open must use the exact same DHT snapshot."""
+        experts = {
+            "peer-one": FakeSessionExpert(),
+            "peer-two": FakeSessionExpert(),
+        }
+        discoveries = 0
+
+        def discover() -> list[dict]:
+            nonlocal discoveries
+            discoveries += 1
+            if discoveries > 1:
+                raise AssertionError("session open performed a second topology lookup")
+            return [dict(node) for node in self.route]
+
+        def resolve(_dht, _uid, peer_id, rpc_role="normal"):
+            self.assertEqual(rpc_role, "session")
+            return experts[peer_id]
+
+        self.sequential._discover_nodes = discover
+        self.sequential.start_session("session-atomic-snapshot")
+        with patch("client.sequential.get_ready_peer_expert", side_effect=resolve):
+            prepared = self.sequential.prepare_remote_session_route(16)
+            self.assertIsNotNone(prepared)
+            opened = self.sequential.open_remote_session(16, prepared_route=prepared)
+
+        self.assertEqual(discoveries, 1)
+        self.assertEqual(opened["route_id"], self.sequential._session_route_digest(self.route))
+        preparation = self.sequential.get_last_session_preparation()
+        self.assertEqual(preparation["status"], "prepared")
+        self.assertEqual(preparation["route_id"], opened["route_id"])
+
     def test_preflight_failure_is_safe_but_dispatched_failure_is_ambiguous(self) -> None:
         self.sequential.start_session("session-failure")
         with patch(
@@ -924,7 +956,68 @@ class CapturingSessionSequential:
         return None
 
 
+class AtomicCapturingSessionSequential(CapturingSessionSequential):
+    """Ensures the generator hands the prepared route to session opening."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.preparation_calls = 0
+        self.opened_prepared_route = None
+
+    def remote_sessions_available(self) -> bool:
+        raise AssertionError("generator must use atomic session preparation")
+
+    def prepare_remote_session_route(self, hidden_size: int, cancel_event=None) -> dict:
+        if hidden_size != 768:
+            raise AssertionError("wrong model hidden size")
+        self.preparation_calls += 1
+        return {"snapshot": "one-topology-read"}
+
+    def open_remote_session(
+        self,
+        hidden_size: int,
+        cancel_event=None,
+        *,
+        prepared_route=None,
+    ) -> dict:
+        self.opened_prepared_route = prepared_route
+        return super().open_remote_session(hidden_size, cancel_event)
+
+
 class GeneratorSessionIntegrationTests(unittest.TestCase):
+    def test_generator_opens_the_route_prepared_by_one_topology_read(self) -> None:
+        sequential = AtomicCapturingSessionSequential()
+        generator = DistributedGenerator(
+            "facebook/opt-125m",
+            sequential,
+            device="cpu",
+            dtype=torch.float32,
+        )
+        generator.tokenizer = FakeTokenizer()
+        generator.embed_tokens = torch.nn.Embedding(128, 768)
+        generator.norm = torch.nn.Identity()
+        generator.lm_head = torch.nn.Linear(768, 128, bias=False)
+        generator._loaded = True
+
+        async def collect():
+            return [
+                chunk
+                async for chunk in generator.generate_stream(
+                    "hello",
+                    max_new_tokens=1,
+                    do_sample=False,
+                    repetition_penalty=1.0,
+                )
+            ]
+
+        chunks = asyncio.run(collect())
+        self.assertFalse(any("error" in chunk for chunk in chunks))
+        self.assertEqual(sequential.preparation_calls, 1)
+        self.assertEqual(
+            sequential.opened_prepared_route,
+            {"snapshot": "one-topology-read"},
+        )
+
     def test_generator_prefills_once_then_sends_one_position_per_decode(self) -> None:
         sequential = CapturingSessionSequential()
         generator = DistributedGenerator(

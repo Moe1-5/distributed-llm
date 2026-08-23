@@ -556,7 +556,39 @@ The next artifact records the terminal session operation, failed hop, peer, sess
 
 A new clean-identity acceptance-candidate executable now includes freshness-gated serving recommendations and request-correlated Settings diagnostics. It embeds source commit `232acb1bdcba5c7347a8f58aba056881115a8308` and has SHA-256 `0b6121de080fb5f16df53d9f47df95d39a5ff07cd99892eef1f0e2af23de89ee`. The next run should validate the UI sequentially, dispatch only one prompt after confirming the exact adjacent route, export Diagnostics immediately after the result, and then stop. If the reset repeats, preserve the exported bundle plus Device 2 and VPS logs and run the controlled relay payload sweep followed by the identical direct comparison. The full 1,000-second lease soak and successful shadow receipt remain acceptance gates after the transport defect is isolated.
 
-## 12. Related Documentation
+## 12. Session Route-Preparation Race Found After First Complete Split Generation
+
+The current Device 1 evidence records a completed relayed session-v1 generation across
+two adjacent providers: sixteen generated tokens, one prefill, fifteen one-position
+decodes, and exact `0-6` and `6-12` hop ownership. This is the first physical proof
+that the session protocol and split route can complete through the VPS relay.
+
+The immediately following request failed before tensor dispatch with `No healthy
+complete route supports session protocol v1`, even though the same diagnostic bundle
+reported `route_ready: true`, fresh discovery, two healthy session-v1 providers, and
+the same selected route. This rules out a persistent loss of either provider at the
+time of the exported snapshot. It also distinguishes this failure from the earlier
+ambiguous relay stream reset.
+
+Source review found a time-of-check/time-of-use boundary: generation first queried
+whether session-v1 capability was available, then `open_remote_session` performed a
+second independent DHT discovery and route selection. A short-lived divergent DHT
+read could therefore make the first check true and the second one empty while the
+health monitor continued to display its last good route. The old diagnostic event did
+not retain the second selection's candidate or preflight outcome, so the underlying
+DHT difference cannot be reconstructed from this bundle alone.
+
+The follow-up implementation prepares one exact-peer session route from one topology
+snapshot, carries that opaque prepared route into session opening without another
+discovery, and records a prompt-free preparation result in a terminal failure event.
+It reports `topology_discovery_failed`, `no_compatible_complete_session_route`, or
+`exact_peer_preflight_failed` with route revisions and rejected route IDs. If no
+session route can be prepared before any session RPC dispatch, generation uses the
+already-compatible stateless path rather than presenting a contradictory session-open
+failure. This does not retry a dispatched operation and does not weaken the bounded
+exact-operation replay policy for ambiguous stream resets.
+
+## 13. Related Documentation
 
 - [Deployment and live testing](DEPLOYMENT_AND_LIVE_TESTING.md)
 - [System code analysis and finalization report](SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md)

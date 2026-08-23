@@ -329,6 +329,11 @@ class RemoteSequential:
         self._session_request_id: Optional[str] = None
         self._session_position = 0
         self._last_session_metrics: dict = {}
+        # A generation must not decide that sessions are available from one DHT
+        # observation and then open them using a second, unrelated observation.
+        # Keep a prompt-free summary for diagnostics; prepared routes themselves
+        # are short-lived opaque values passed directly to open_remote_session.
+        self._last_session_preparation: dict = {}
         self._route_quarantine: dict[tuple[str, str, int, int], float] = {}
         self._last_failover: dict = {
             "attempt_count": 0,
@@ -903,6 +908,7 @@ class RemoteSequential:
         self._session_request_id = str(uuid4())
         self._session_position = 0
         self._last_session_metrics = {}
+        self._last_session_preparation = {}
         self._route_quarantine.clear()
         return self._session_id
 
@@ -927,50 +933,27 @@ class RemoteSequential:
             expected_hidden_size = int(
                 SUPPORTED_MODELS.get(self.model_name or "", {}).get("hidden_size", 0)
             )
-            return any(
-                all(
-                    int(node.get("session_protocol_version", 0))
-                    == SESSION_PROTOCOL_VERSION
-                    and bool(str(node.get("session_rpc_uid", "")).strip())
-                    and (
-                        expected_hidden_size <= 0
-                        or int(node.get("session_hidden_size", 0))
-                        == expected_hidden_size
-                    )
-                    for node in candidate["route"]
-                )
-                for candidate in self._eligible_attempt_routes(plan)
-            )
+            return bool(self._session_route_candidates(plan, expected_hidden_size))
         except Exception:
             return False
 
-    def open_remote_session(
+    def _session_route_candidates(
         self,
+        plan: dict,
         hidden_size: int,
-        cancel_event: Optional[Event] = None,
         *,
         excluded_route_id: Optional[str] = None,
         excluded_peer_ids: Optional[set[str]] = None,
-    ) -> dict:
-        if self._session_id is None or self._session_request_id is None:
-            raise SessionRouteError("start_session must be called before open")
-        if self._remote_session_open:
-            return dict(self._last_session_metrics)
-        if self.useful_work_runtime.config.enabled:
-            raise SessionRouteError(
-                "Session protocol v1 is disabled while useful-work receipts are enabled"
-            )
-        self._raise_if_cancelled(cancel_event)
-        nodes = self._discover_nodes()
-        plan = self._build_route_plan(nodes)
-        candidates = [
+    ) -> list[dict]:
+        """Return compatible session routes from one already-built topology plan."""
+        return [
             candidate
             for candidate in self._eligible_attempt_routes(plan)
             if all(
                 int(node.get("session_protocol_version", 0))
                 == SESSION_PROTOCOL_VERSION
                 and bool(str(node.get("session_rpc_uid", "")).strip())
-                and int(node.get("session_hidden_size", 0)) == hidden_size
+                and (hidden_size <= 0 or int(node.get("session_hidden_size", 0)) == hidden_size)
                 for node in candidate["route"]
             )
             and (
@@ -985,28 +968,160 @@ class RemoteSequential:
                 )
             )
         ]
-        if not candidates:
-            raise SessionRouteError("No healthy complete route supports session protocol v1")
 
-        preflight_errors: list[str] = []
-        selected_route: Optional[list[dict]] = None
-        experts: Optional[list[RemoteExpert]] = None
+    def prepare_remote_session_route(
+        self,
+        hidden_size: int,
+        cancel_event: Optional[Event] = None,
+        *,
+        excluded_route_id: Optional[str] = None,
+        excluded_peer_ids: Optional[set[str]] = None,
+    ) -> Optional[dict]:
+        """Discover and exact-peer-preflight one session route for immediate opening.
+
+        The returned value is intentionally opaque to callers.  It captures the
+        same DHT snapshot, selected route, and exact peer clients that opening
+        will use, eliminating a topology time-of-check/time-of-use race.
+        """
+        if self._session_id is None or self._session_request_id is None:
+            raise SessionRouteError("start_session must be called before session preparation")
+        if self.useful_work_runtime.config.enabled:
+            self._last_session_preparation = {
+                "status": "disabled",
+                "reason": "useful_work_receipts_enabled",
+            }
+            return None
+        self._raise_if_cancelled(cancel_event)
+        prepared_at = time.time()
+        try:
+            nodes = self._discover_nodes()
+            plan = self._build_route_plan(nodes)
+        except Exception as exc:
+            self._last_session_preparation = {
+                "status": "unavailable",
+                "reason": "topology_discovery_failed",
+                "error": _exc_summary(exc),
+            }
+            return None
+
+        candidates = self._session_route_candidates(
+            plan,
+            hidden_size,
+            excluded_route_id=excluded_route_id,
+            excluded_peer_ids=excluded_peer_ids,
+        )
+        candidate_route_ids = [
+            self._session_route_digest(candidate["route"])
+            for candidate in candidates
+        ]
+        if not candidates:
+            self._last_session_preparation = {
+                "status": "unavailable",
+                "reason": "no_compatible_complete_session_route",
+                "coverage_revision": plan.get("coverage_revision"),
+                "health_revision": plan.get("health_revision"),
+                "candidate_route_ids": candidate_route_ids,
+            }
+            return None
+
+        preflight_errors: list[dict] = []
         for candidate in candidates:
             route = [dict(node) for node in candidate["route"]]
+            route_id = self._session_route_digest(route)
             try:
                 self._assert_route_health(route)
                 experts = self._preflight_session_route(route)
             except Exception as exc:
-                preflight_errors.append(str(exc))
+                preflight_errors.append(
+                    {
+                        "route_id": route_id,
+                        "error": _exc_summary(exc),
+                    }
+                )
                 continue
-            selected_route = route
-            break
-        if selected_route is None or experts is None:
-            raise SessionPreDispatchError(
-                "No session route passed exact-peer preflight: " + "; ".join(preflight_errors)
-            )
+            self._last_session_preparation = {
+                "status": "prepared",
+                "prepared_at": prepared_at,
+                "route_id": route_id,
+                "coverage_revision": plan.get("coverage_revision"),
+                "health_revision": plan.get("health_revision"),
+                "candidate_route_ids": candidate_route_ids,
+                "preflight_rejections": preflight_errors,
+                "route": [
+                    {
+                        "peer_id": str(node.get("peer_id", "")),
+                        "layer_start": int(node.get("layer_start", 0)),
+                        "layer_end": int(node.get("layer_end", 0)),
+                        "rpc_uid": str(node.get("session_rpc_uid", "")),
+                    }
+                    for node in route
+                ],
+            }
+            return {
+                "prepared_at": prepared_at,
+                "nodes": [dict(node) for node in nodes],
+                "coverage_revision": plan.get("coverage_revision"),
+                "health_revision": plan.get("health_revision"),
+                "route": route,
+                "route_id": route_id,
+                "experts": experts,
+            }
 
-        route_id = self._session_route_digest(selected_route)
+        self._last_session_preparation = {
+            "status": "unavailable",
+            "reason": "exact_peer_preflight_failed",
+            "coverage_revision": plan.get("coverage_revision"),
+            "health_revision": plan.get("health_revision"),
+            "candidate_route_ids": candidate_route_ids,
+            "preflight_rejections": preflight_errors,
+        }
+        return None
+
+    def open_remote_session(
+        self,
+        hidden_size: int,
+        cancel_event: Optional[Event] = None,
+        *,
+        excluded_route_id: Optional[str] = None,
+        excluded_peer_ids: Optional[set[str]] = None,
+        prepared_route: Optional[dict] = None,
+    ) -> dict:
+        if self._session_id is None or self._session_request_id is None:
+            raise SessionRouteError("start_session must be called before open")
+        if self._remote_session_open:
+            return dict(self._last_session_metrics)
+        if self.useful_work_runtime.config.enabled:
+            raise SessionRouteError(
+                "Session protocol v1 is disabled while useful-work receipts are enabled"
+            )
+        self._raise_if_cancelled(cancel_event)
+        snapshot = prepared_route or self.prepare_remote_session_route(
+            hidden_size,
+            cancel_event,
+            excluded_route_id=excluded_route_id,
+            excluded_peer_ids=excluded_peer_ids,
+        )
+        if snapshot is None:
+            preparation = self.get_last_session_preparation()
+            reason = str(preparation.get("reason", "unavailable"))
+            raise SessionPreDispatchError(
+                "No session route passed topology and exact-peer preparation: " + reason
+            )
+        selected_route = [dict(node) for node in snapshot.get("route", [])]
+        experts = list(snapshot.get("experts", []))
+        nodes = [dict(node) for node in snapshot.get("nodes", [])]
+        route_id = str(snapshot.get("route_id", ""))
+        if (
+            not selected_route
+            or len(experts) != len(selected_route)
+            or not route_id
+            or any(
+                int(node.get("session_hidden_size", 0)) != hidden_size
+                for node in selected_route
+            )
+        ):
+            raise SessionPreDispatchError("Prepared session route is invalid")
+
         logger.info(
             "Opening remote session | request=%s session=%s route=%s hops=%s",
             self._session_request_id,
@@ -1057,8 +1172,8 @@ class RemoteSequential:
         self._session_route = selected_route
         self._session_nodes = [dict(node) for node in nodes]
         self._session_snapshot_revision = (
-            plan["coverage_revision"],
-            plan["health_revision"],
+            str(snapshot.get("coverage_revision", "")),
+            str(snapshot.get("health_revision", "")),
         )
         self._session_route_id = route_id
         self._remote_session_open = True
@@ -1396,6 +1511,10 @@ class RemoteSequential:
 
     def get_last_session_metrics(self) -> dict:
         return json.loads(json.dumps(self._last_session_metrics))
+
+    def get_last_session_preparation(self) -> dict:
+        """Return the last prompt-free session route preparation outcome."""
+        return json.loads(json.dumps(self._last_session_preparation))
 
     def _preflight_session_route(self, route: list[dict]) -> list[RemoteExpert]:
         experts: list[RemoteExpert] = []

@@ -660,18 +660,60 @@ class DistributedGenerator:
                 self.tokenizer.eos_token_id,
             )
 
-            session_available = getattr(
-                self.sequential,
-                "remote_sessions_available",
-                None,
-            )
             open_remote_session = getattr(
                 self.sequential,
                 "open_remote_session",
                 None,
             )
-            if callable(session_available) and callable(open_remote_session):
-                remote_session_enabled = await asyncio.to_thread(session_available)
+            prepare_session_route = getattr(
+                self.sequential,
+                "prepare_remote_session_route",
+                None,
+            )
+            prepared_session_route = None
+            if callable(prepare_session_route) and callable(open_remote_session):
+                model_entry = SUPPORTED_MODELS.get(self.model_name, {})
+                hidden_size = int(model_entry.get("hidden_size", 0))
+                if hidden_size <= 0:
+                    raise RuntimeError(
+                        f"Session inference has no hidden-size contract for {self.model_name}"
+                    )
+                # Preparation makes one topology observation, validates the
+                # exact peers, and returns the opaque route snapshot that the
+                # immediately following open must use.  Do not re-discover
+                # between deciding sessions are available and opening them.
+                prepared_session_route = await asyncio.to_thread(
+                    prepare_session_route,
+                    hidden_size,
+                    self._stop_event,
+                )
+                remote_session_enabled = prepared_session_route is not None
+                if not remote_session_enabled:
+                    preparation_getter = getattr(
+                        self.sequential,
+                        "get_last_session_preparation",
+                        None,
+                    )
+                    preparation = (
+                        preparation_getter() if callable(preparation_getter) else {}
+                    )
+                    logger.info(
+                        "[gen] session v1 unavailable before dispatch; "
+                        "using compatible stateless route: %s",
+                        preparation.get("reason", preparation.get("status", "unknown")),
+                    )
+            else:
+                # Compatibility path for alternate sequential implementations
+                # and test doubles that have not yet adopted atomic session
+                # preparation.
+                session_available = getattr(
+                    self.sequential,
+                    "remote_sessions_available",
+                    None,
+                )
+                if callable(session_available) and callable(open_remote_session):
+                    remote_session_enabled = await asyncio.to_thread(session_available)
+
             if remote_session_enabled:
                 model_entry = SUPPORTED_MODELS.get(self.model_name, {})
                 hidden_size = int(model_entry.get("hidden_size", 0))
@@ -679,10 +721,16 @@ class DistributedGenerator:
                     raise RuntimeError(
                         f"Session inference has no hidden-size contract for {self.model_name}"
                     )
+                open_kwargs = (
+                    {"prepared_route": prepared_session_route}
+                    if prepared_session_route is not None
+                    else {}
+                )
                 await asyncio.to_thread(
                     open_remote_session,
                     hidden_size,
                     self._stop_event,
+                    **open_kwargs,
                 )
 
             for step in range(max_new_tokens):

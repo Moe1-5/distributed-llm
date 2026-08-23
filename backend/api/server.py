@@ -5998,6 +5998,21 @@ def _record_generation_failure(
                 )
         except Exception as exc:
             details["session_diagnostic_error"] = str(exc)
+    session_preparation_getter = getattr(
+        sequential,
+        "get_last_session_preparation",
+        None,
+    )
+    if callable(session_preparation_getter):
+        try:
+            preparation = session_preparation_getter()
+            if preparation:
+                # This is the decision immediately before session opening.
+                # Keep it beside a terminal error so diagnostics can separate
+                # an absent DHT route from an exact-peer preflight rejection.
+                details["session_preparation"] = preparation
+        except Exception as exc:
+            details["session_preparation_diagnostic_error"] = str(exc)
     health_getter = getattr(sequential, "get_health_readiness", None)
     if callable(health_getter):
         try:
