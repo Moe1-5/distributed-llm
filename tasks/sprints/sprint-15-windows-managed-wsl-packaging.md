@@ -169,3 +169,9 @@ This preserves the current working backend environment while giving testers a Wi
 - Why: the portable target can finish after its initial console output, so an intermediate timestamp check may still show the preceding wrapper. Distribution must use the finalized file, not that intermediate observation.
 - Verification: `DistribLLM-1.0.0-portable.exe` is 87,918,383 bytes with SHA-256 `59744c55d37cf63d4815bc0ef1997c73694360c690f768cae2f56f43bd240e36`. The audit passes for commit `05be3d6c9e5a6a3c4787d7262abec66aac21398a`, with 38 ASAR entries, 65 checksummed runtime files, manifest SHA-256 `b47178e203e5a3fda050874f334a9334bb230c5168d80e315787b679eeaf0dd3`, and zero forbidden entries.
 - Status: this is the current reviewed artifact to copy unchanged to both Windows participants before the one-prompt adjacent-session diagnostic run.
+
+### 2026-08-24 - Make Windows package audit accept Windows ASAR entry spelling
+
+- What changed: changed the package audit to locate the Electron main entry using the exact path reported by the ASAR, accepting both leading-slash Windows entries and the Linux spelling.
+- Why: a native Windows portable build correctly produced `/out/main/index.js`, but the audit hard-coded `out/main/index.js` and therefore failed to inspect the otherwise valid package.
+- Verification: the native Windows artifact for the preceding session-route commit passed the corrected audit with thirty-eight ASAR entries, sixty-five checksummed backend runtime files, no forbidden entries, and a commit-bound backend marker. A fresh artifact from this verifier commit is still required before distribution.

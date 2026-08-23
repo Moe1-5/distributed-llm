@@ -106,7 +106,17 @@ const expectedRuntimeFiles = [...checksummedFiles, '.distribllm-sha256'].sort()
 if (JSON.stringify(runtimeFiles) !== JSON.stringify(expectedRuntimeFiles)) {
   throw new Error('Packaged backend contains a file outside its checksum manifest.')
 }
-const packagedMain = asar.extractFile(asarPath, 'out/main/index.js').toString('utf8')
+// ASAR entry names are emitted with a leading slash by the Windows build
+// toolchain and without one by the Linux toolchain.  Keep the audit portable
+// by extracting the exact entry reported by the archive instead of assuming
+// one spelling.
+const packagedMainEntry = entries.find(
+  (entry) => entry.replace(/^\/+/, '') === 'out/main/index.js'
+)
+if (!packagedMainEntry) {
+  throw new Error('Packaged Electron main entry is missing from the ASAR.')
+}
+const packagedMain = asar.extractFile(asarPath, packagedMainEntry).toString('utf8')
 if (
   expectedCommit &&
   (!packagedMain.includes(sourceCommit) || !packagedMain.includes(manifestSha256))
