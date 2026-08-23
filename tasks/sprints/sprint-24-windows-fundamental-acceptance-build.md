@@ -100,3 +100,10 @@ Sprint 15 established the Electron-to-managed-WSL packaging boundary and package
 - What changed: added `docs/DEPLOYMENT_AND_LIVE_TESTING.md` and routed it through the root and docs indexes.
 - Why: executable rebuilds, WSL backend updates, VPS bootstrap launch, relay probes, and future backend-bundled packaging needed one operator-facing checklist instead of scattered chat instructions.
 - Status: documentation is ready; a new executable should be rebuilt only for latest Electron/UI/launcher behavior or final acceptance, while backend-only fixes still require updating and restarting the external WSL backend checkout.
+
+### 2026-08-23 - Rebuild after runtime presentation and architecture completion
+
+- What changed: rebuilt and audited the portable Windows application after the Sprint 27 runtime-presentation work and the Sprints 29 through 32 architecture source program were integrated; retained the existing schema-two executable/source identity contract.
+- Why: the physical matrix must use one artifact that contains the final model-availability states, staged diagnostics, provider ownership explanations, async Trace workflow, and packaged Settings configuration boundary.
+- Verification: the committed source passes 449 backend tests, 20 launcher tests, seven renderer-state tests, frontend type checking and production build, lint with zero errors, and package inspection with 36 ASAR entries and zero forbidden entries.
+- Status: a final clean-source-metadata rebuild from the evidence-record commit is required next. Two-device direct, relay, lifecycle, session, and failure-injection evidence remains open.
