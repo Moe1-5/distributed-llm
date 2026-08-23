@@ -419,6 +419,54 @@ def evaluate_candidate(
     }
 
 
+def ranges_overlap(start: int, end: int, other_start: int, other_end: int) -> bool:
+    """Return whether two half-open layer ranges overlap."""
+    return start < other_end and end > other_start
+
+
+def recommend_exclusive_range(
+    nodes: list[dict],
+    total_layers: int,
+    layer_count: int,
+) -> dict | None:
+    """Recommend a useful range that does not overlap an existing owner.
+
+    Snapshot-based serving guidance may intentionally recommend redundancy.
+    Transactional placement is different: an active reservation owns its
+    half-open range exclusively, so unavailable candidates are removed before
+    applying the same deterministic usefulness ranking as ``recommend_range``.
+    """
+    if not 1 <= layer_count <= total_layers:
+        raise ValueError("layer_count must be between 1 and the model layer count")
+    normalized = valid_nodes(nodes, total_layers)
+    candidates = [
+        evaluate_candidate(normalized, total_layers, start, start + layer_count)
+        for start in range(total_layers - layer_count + 1)
+        if not any(
+            ranges_overlap(
+                start,
+                start + layer_count,
+                int(node["layer_start"]),
+                int(node["layer_end"]),
+            )
+            for node in normalized
+        )
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda item: (
+            not item["completes_route"],
+            -item["newly_covered_layers"],
+            -item["reachable_prefix"],
+            item["provider_count_sum"],
+            item["provider_count_max"],
+            item["layer_start"],
+        ),
+    )
+
+
 def recommend_range(nodes: list[dict], total_layers: int, layer_count: int) -> dict:
     if not 1 <= layer_count <= total_layers:
         raise ValueError("layer_count must be between 1 and the model layer count")

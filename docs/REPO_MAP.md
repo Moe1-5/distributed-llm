@@ -27,7 +27,10 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `backend/node/rpc_safety.py`: typed public-expert limits, pre-execution tensor/metadata validation, bounded admission, cooperative deadline errors, and multiprocessing-safe counters.
 - `backend/node/gpu_monitor.py`: CPU, RAM, GPU, and VRAM sampling.
 - `backend/client/sequential.py`: DHT metadata validation, coverage-aware route planning, legacy/receipt RPC lookup and fail-open retry, settlement submission, and route traces.
+- `backend/client/coverage.py`: pure contiguous coverage plans plus exclusive-range recommendation used by the placement authority.
 - `backend/client/health.py`: typed provider health state, DHT/protocol/transport signals, revision snapshots, and lifecycle-owned bounded metadata probes.
+- `backend/placement/service.py`: authenticated SQLite placement authority with atomic reservations, lease transitions, expiry, revisions, idempotency, and bounded audit reads.
+- `backend/placement/client.py`: participant coordinator client, private lease ownership, heartbeats, and local pre-expiry safety shutdown.
 - `backend/client/generation.py`: tokenizer/local components, architecture preparation, distributed autoregressive generation, sampling controls, cancellation, unload cleanup, parity probes, and trace generation.
 - `backend/client/distributed_model.py`: reserved model-level facade; currently not the primary runtime path.
 - `backend/models/architecture_adapter.py`: explicit OPT and Llama-family adapter behavior used by generation/handler paths.
@@ -38,6 +41,9 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 
 - `backend/tests/test_generation_readiness.py`: consolidated regression coverage for metadata, routing, lifecycle, local imports, OAuth/downloads, model registry, parity/readiness, cleanup, and auth isolation.
 - `backend/tests/test_useful_work_incentives.py`: identity, signed receipt, abuse rejection, RPC wrapper, concurrency, durability, pagination, and rollout-mode coverage.
+- `backend/tests/test_transactional_placement.py`: coordinator concurrency, lease transition, expiry, replay, stale revision, restart, auth, and redaction coverage.
+- `backend/tests/test_placement_client.py`: authenticated client, exact online attestation, heartbeat rejection, secret hiding, and local expiry safety coverage.
+- `backend/tests/test_placement_backend_integration.py`: serving-plan authority, fail-closed startup, allocation override, and failed-load release integration.
 - `backend/pyproject.toml` and `backend/uv.lock`: Python 3.12+ dependency contract and locked environment.
 - `backend/.local_models.json`: gitignored local import registry.
 - User config Hugging Face token file: gitignored and outside the repository by default.
@@ -69,6 +75,7 @@ Generated dependency folders, caches, downloaded weights, tokens, identities, an
 - `tasks/archive/`: immutable historical sprint records.
 - `tasks/lessons.md`: active assistant corrections and internalized lessons.
 - `docs/`: architecture, flows, roadmap, validation, troubleshooting, comparison, and decisions.
+- `deploy/vps/distribllm-placement.service`, `placement.env.example`, `run-placement.sh`, and `install-placement-service.sh`: loopback placement service deployment with locked dependencies, durable state, and systemd hardening.
 
 ## Never Commit or Share
 

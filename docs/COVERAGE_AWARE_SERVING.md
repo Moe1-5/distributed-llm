@@ -57,3 +57,19 @@ Both tabs refresh every five seconds, and node start always performs one final r
 ## Incentive Boundary
 
 Only providers selected in the executable route performed useful inference work. Standby advertisements and duplicated ranges that were not called cannot earn useful-work credit. Sprint 13 receipt generation and settlement must record the selected route and actual successful RPC work rather than infer rewards from DHT coverage alone.
+
+## Transactional Placement Authority
+
+Coverage snapshots remain useful for route observation, but they no longer make
+placement correct when the coordinator is configured. Two renderers may read the
+same DHT state, so Recommended submits capacity and intent. The backend
+atomically reserves an exclusive range and uses the returned range even if the
+UI's earlier cyan indicator showed something else. Custom ranges pass through
+the same conflict and topology-revision transaction.
+
+`RESERVED` and `JOINING` ranges count as occupied so another participant cannot
+race a slow model load. Only `ONLINE` ranges count as executable route coverage.
+Abandoned starts expire on coordinator time, while healthy backends renew their
+reservation-scoped leases. The DHT still owns discovery and tensor routing. The
+backend cross-checks the granted model revision, exact worker peer, RPC UID, and
+independently verified publication before marking a reservation online.

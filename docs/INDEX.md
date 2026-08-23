@@ -6,15 +6,15 @@
 | Topic | File | What's inside |
 |-------|------|---------------|
 | Documentation landing page | `README.md` | Start-here guide, current project goal, and end vision |
-| Source file map | `REPO_MAP.md` | Responsibilities for backend, frontend, incentives, and generated artifacts |
-| Current architecture | `CURRENT_ARCHITECTURE.md` | Backend, frontend, persistent network supervisor, last-good topology, role identities, publication/recovery policy, RPC paths, generation, useful-work settlement, and limitations |
-| Runtime flows | `FLOWS.md` | Bootstrap, model access, lifecycle, routing, inference, useful-work receipts, remote workers, and cleanup |
+| Source file map | `REPO_MAP.md` | Responsibilities for backend, frontend, placement, deployment tooling, tests, incentives, and generated artifacts |
+| Current architecture | `CURRENT_ARCHITECTURE.md` | Backend, frontend, persistent network supervisor, transactional placement, role identities, publication/recovery policy, RPC paths, generation, useful-work settlement, and limitations |
+| Runtime flows | `FLOWS.md` | Bootstrap, transactional placement, model access, lifecycle, routing, inference, useful-work receipts, remote workers, and cleanup |
 | Implementation roadmap | `IMPLEMENTATION.md` | Current validation status, the Sprints 28-32 distributed-runtime architecture program, implemented reliability work, incentives, API access, and later training work |
 | Petals comparison | `PETALS_COMPARISON.md` | Similarities, differences, public-swarm positioning, and what to borrow from Petals |
 | Network reachability and relay review | `NETWORK_REACHABILITY_AND_RELAY_REVIEW.md` | Sprint 14 transport defect, Petals-derived implementation, Windows/WSL direct setup, locked VPS deployment procedure, live relay diagnosis, rollout, and acceptance criteria |
-| Coverage-aware serving | `COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, replica behavior, serving-plan API, start revalidation, desktop workflow, and incentives boundary |
+| Coverage-aware serving | `COVERAGE_AWARE_SERVING.md` | Adjacent-range route selection, atomic coordinator reservations, replica behavior, serving-plan API, desktop workflow, and incentives boundary |
 | VPS relay operations | `VPS_RELAY_OPERATIONS.md` | Manual foreground launch, persistent systemd installation, machine-readable restart evidence, relay-probe binding, upgrade, rollback, recovery, backup, and monitoring procedure |
-| Deployment and live testing | `DEPLOYMENT_AND_LIVE_TESTING.md` | EXE rebuild rules, local WSL backend updates, VPS bootstrap and shadow settlement deployment, relay probes, two-device checks, and future backend-bundled packaging |
+| Deployment and live testing | `DEPLOYMENT_AND_LIVE_TESTING.md` | EXE rebuild rules, local WSL backend updates, VPS bootstrap, transactional placement, shadow settlement deployment, relay probes, and two-device checks |
 | Current two-device live-test issues and production roadmap | `CURRENT_TWO_DEVICE_LIVE_TEST_ISSUES.md` | Timestamped lease-persistence evidence, implemented first-stage DHT/expert repair, production service architecture, packaging plan, and open physical acceptance gates |
 | Relay tensor RPC reset handoff and test chronology | `RELAY_RECEIPT_RPC_STREAM_RESET_HANDOFF.md` | Physical test steps and outcome ledger, common sustained relay-path boundary, controlled tensor-probe runbook, correlated evidence, isolation matrix, and next-agent fix decision tree |
 | System analysis and finalization | `SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md` | Full source, runtime, security, deployment, validation, incentive-outage, and final desktop readiness audit |

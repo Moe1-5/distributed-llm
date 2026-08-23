@@ -11,9 +11,12 @@ sys.path.insert(0, str(BACKEND_DIR))
 from client.coverage import (
     build_serving_plan,
     find_route_spans,
+    recommend_exclusive_range,
+    ranges_overlap,
     route_requirement_ranges,
     select_route,
 )
+from client.sequential import RemoteSequential
 
 
 def node(start: int, end: int, peer: str) -> dict:
@@ -31,6 +34,38 @@ def node(start: int, end: int, peer: str) -> dict:
 
 
 class CoveragePlannerTests(unittest.TestCase):
+    def test_generator_rejects_provider_from_another_placement_revision(self) -> None:
+        sequential = RemoteSequential(
+            dht=object(),
+            dht_prefix="distribllm",
+            num_layers=12,
+            model_name="facebook/opt-125m",
+            placement_model_revision="revision-a",
+        )
+        metadata = {
+            **node(0, 6, "provider"),
+            "placement_model_revision": "revision-b",
+        }
+
+        with self.assertRaisesRegex(ValueError, "does not match generator revision"):
+            sequential._validate_node_metadata(metadata, "provider")
+
+    def test_exclusive_recommendation_skips_reserved_ranges(self) -> None:
+        recommendation = recommend_exclusive_range(
+            [node(0, 6, "head")],
+            12,
+            6,
+        )
+
+        self.assertIsNotNone(recommendation)
+        assert recommendation is not None
+        self.assertEqual(
+            (recommendation["layer_start"], recommendation["layer_end"]),
+            (6, 12),
+        )
+        self.assertTrue(ranges_overlap(0, 6, 5, 8))
+        self.assertFalse(ranges_overlap(0, 6, 6, 12))
+
     def test_partial_head_alone_needs_tail(self) -> None:
         plan = build_serving_plan([node(0, 6, "head")], 12, 6)
 

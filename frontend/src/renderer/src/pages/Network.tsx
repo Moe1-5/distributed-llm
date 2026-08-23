@@ -418,7 +418,11 @@ export default function Network(): React.JSX.Element {
           })
           lastServingPlanStateRef.current = planState
         }
-        if (servingMode === 'recommended' && isServingPlanAuthoritative(plan)) {
+        if (
+          servingMode === 'recommended' &&
+          isServingPlanAuthoritative(plan) &&
+          plan.recommendation
+        ) {
           setLayerStart(plan.recommendation.layer_start)
           setLayerEnd(plan.recommendation.layer_end)
         }
@@ -776,6 +780,7 @@ export default function Network(): React.JSX.Element {
   )
 
   const applyRecommendation = useCallback((plan: ServingPlan) => {
+    if (!plan.recommendation) return
     setLayerCount(plan.requested_layer_count)
     setLayerStart(plan.recommendation.layer_start)
     setLayerEnd(plan.recommendation.layer_end)
@@ -817,6 +822,13 @@ export default function Network(): React.JSX.Element {
           )
           return
         }
+        if (!latestPlan.recommendation) {
+          log(
+            'The placement coordinator has no non-overlapping capacity for this request.',
+            'error'
+          )
+          return
+        }
         requestedStart = latestPlan.recommendation.layer_start
         requestedEnd = latestPlan.recommendation.layer_end
         applyRecommendation(latestPlan)
@@ -831,7 +843,11 @@ export default function Network(): React.JSX.Element {
         dht_prefix: 'distribllm',
         initial_peers: [],
         device,
-        coverage_revision: latestPlan.coverage_revision
+        coverage_revision: latestPlan.coverage_revision,
+        placement_mode: servingMode,
+        layer_capacity: requestedCount,
+        placement_revision: latestPlan.placement?.topology_revision,
+        placement_idempotency_key: window.crypto.randomUUID()
       }
 
       let previousStage = ''
@@ -950,6 +966,10 @@ export default function Network(): React.JSX.Element {
       const plan = await api.getServingPlan(selectedInferModel.id, capacity)
       if (!isServingPlanAuthoritative(plan)) {
         log('Remote coverage is still refreshing. No recommended range was selected.', 'error')
+        return
+      }
+      if (!plan.recommendation) {
+        log('The placement coordinator reports no unowned serving capacity.', 'error')
         return
       }
       setServeModel(selectedInferModel.id)
@@ -1454,11 +1474,13 @@ export default function Network(): React.JSX.Element {
                   </div>
                   <p className="font-mono text-[9px] text-text-dim">
                     REV {servingPlan.coverage_revision.slice(0, 7)} ·{' '}
-                    {servingPlan.snapshot_source === 'local_only'
-                      ? 'LOCAL-ONLY'
-                      : servingPlan.snapshot_source === 'validated_dht'
-                        ? 'VALIDATED DHT'
-                        : 'DHT CACHE'}
+                    {servingPlan.snapshot_source === 'placement_coordinator'
+                      ? 'PLACEMENT AUTHORITY'
+                      : servingPlan.snapshot_source === 'local_only'
+                        ? 'LOCAL-ONLY'
+                        : servingPlan.snapshot_source === 'validated_dht'
+                          ? 'VALIDATED DHT'
+                          : 'DHT CACHE'}
                     {servingPlanReceivedAt
                       ? ` · RECEIVED ${servingPlanReceivedAt.toLocaleTimeString()}`
                       : ''}
@@ -1477,7 +1499,7 @@ export default function Network(): React.JSX.Element {
                       <i className="mr-1 inline-block h-2 w-2 bg-amber/50" />
                       Redundant
                     </span>
-                    {servingPlanAuthoritative && (
+                    {servingPlanAuthoritative && servingPlan.recommendation && (
                       <span>
                         <i className="mr-1 inline-block h-2 w-2 border border-cyan" />
                         Recommended
@@ -1491,13 +1513,18 @@ export default function Network(): React.JSX.Element {
                       or use Custom; the backend will still validate the range before loading
                       layers.
                     </p>
-                  ) : (
+                  ) : servingPlan.recommendation ? (
                     <p className="font-mono text-[10px] leading-relaxed text-text-secondary">
                       {servingPlan.recommendation.completes_route && !servingPlan.current_runnable
                         ? `Fills ${servingPlan.recommendation.layer_start}-${servingPlan.recommendation.layer_end}; model becomes runnable.`
                         : servingPlan.recommendation.adds_missing_coverage
                           ? `Adds missing coverage at ${servingPlan.recommendation.layer_start}-${servingPlan.recommendation.layer_end}; still needs ${formatRanges(servingPlan.projected_missing_ranges)}.`
                           : `Adds redundancy at ${servingPlan.recommendation.layer_start}-${servingPlan.recommendation.layer_end}.`}
+                    </p>
+                  ) : (
+                    <p className="font-mono text-[10px] leading-relaxed text-amber">
+                      All compatible ranges are reserved. Stop an existing provider or wait for an
+                      abandoned lease to expire before starting another node.
                     </p>
                   )}
                   {servingPlanError && (
@@ -1554,11 +1581,13 @@ export default function Network(): React.JSX.Element {
                   !nodeLoading &&
                   (!serveModel ||
                     !customRangeValid ||
-                    (servingMode === 'recommended' && !servingPlanAuthoritative))
+                    (servingMode === 'recommended' &&
+                      (!servingPlanAuthoritative || !servingPlan?.recommendation)))
                 }
                 title={
-                  servingMode === 'recommended' && !servingPlanAuthoritative
-                    ? 'Wait for a fresh remote coverage snapshot or switch to Custom.'
+                  servingMode === 'recommended' &&
+                  (!servingPlanAuthoritative || !servingPlan?.recommendation)
+                    ? 'Wait for an authoritative placement with available capacity.'
                     : 'Start serving the selected layers.'
                 }
                 className={`
@@ -1569,7 +1598,8 @@ export default function Network(): React.JSX.Element {
                       ? 'cursor-pointer border-red/30 bg-red/10 text-red hover:bg-red/20'
                       : !serveModel ||
                           !customRangeValid ||
-                          (servingMode === 'recommended' && !servingPlanAuthoritative)
+                          (servingMode === 'recommended' &&
+                            (!servingPlanAuthoritative || !servingPlan?.recommendation))
                         ? 'cursor-not-allowed border-border bg-bg-surface text-text-dim opacity-50'
                         : 'cursor-pointer border-cyan/30 bg-cyan-dim text-cyan hover:bg-cyan/20'
                   }

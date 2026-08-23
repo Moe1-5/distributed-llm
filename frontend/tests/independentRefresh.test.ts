@@ -51,6 +51,21 @@ test('only a fresh completed serving-plan refresh is authoritative', () => {
   assert.equal(isServingPlanAuthoritative(planState(true, false)), false)
   assert.equal(isServingPlanAuthoritative(planState(false, true)), false)
   assert.equal(isServingPlanAuthoritative(planState(false, false)), true)
+  assert.equal(
+    isServingPlanAuthoritative({
+      ...planState(false, false),
+      placement: {
+        enabled: true,
+        authoritative: false,
+        capacity_available: false,
+        topology_revision: 4,
+        model_revision: 'main',
+        captured_at: '2026-08-23T00:00:00Z',
+        reservations: []
+      }
+    }),
+    false
+  )
   assert.equal(servingPlanStatus(planState(true, true), null, false), 'discovering')
   assert.equal(servingPlanStatus(planState(false, false), null, false), 'fresh')
   assert.equal(

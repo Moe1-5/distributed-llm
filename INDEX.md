@@ -51,7 +51,7 @@
 | Peer-addressed expert protocol            | `tasks/sprints/sprint-28-peer-addressed-expert-protocol.md` |
 | Peer-addressed expert RPC tests            | `backend/tests/test_peer_addressed_rpc.py` |
 | Persistent network supervisor implementation | `tasks/sprints/sprint-29-persistent-network-supervisor.md` |
-| Transactional layer placement plan        | `tasks/sprints/sprint-30-transactional-swarm-placement.md` |
+| Transactional layer placement implementation | `backend/placement/`, `tasks/sprints/sprint-30-transactional-swarm-placement.md` |
 | Session and KV-cache inference plan       | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` |
 | Infrastructure resilience and final architecture acceptance | `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` |
 | Continuous provider health                | `backend/client/health.py`                |
@@ -112,7 +112,7 @@
 | `tasks/sprints/sprint-27-frontend-experience-and-model-discovery.md` | Proposed sprint for remote-model discovery, role clarity, coherent runtime status, diagnostics, and desktop UI optimization. |
 | `tasks/sprints/sprint-28-peer-addressed-expert-protocol.md` | Locally implemented peer-unique expert ownership, exact peer dispatch, and Hivemind 1.1.12 compatibility; physical rollout remains open. |
 | `tasks/sprints/sprint-29-persistent-network-supervisor.md` | Implemented backend-owned discovery, explicit network state, last-good topology, publication ownership, evidence-based transport recovery, and exact-handle lifecycle ownership; physical validation remains open. |
-| `tasks/sprints/sprint-30-transactional-swarm-placement.md` | Planned sprint for authoritative layer reservations, provider lease states, and atomic placement. |
+| `tasks/sprints/sprint-30-transactional-swarm-placement.md` | Implemented source sprint for authenticated atomic layer reservations, provider lease states, expiry, and backend lifecycle integration; physical validation remains open. |
 | `tasks/sprints/sprint-31-session-aware-kv-cache-inference.md` | Planned sprint for bounded remote prefill/decode sessions, key/value caches, parity, and safe recovery. |
 | `tasks/sprints/sprint-32-infrastructure-redundancy-and-architecture-acceptance.md` | Planned sprint for separated infrastructure roles, independent redundancy, failure injection, and final architecture evidence. |
 | `tasks/archive/sprint-10-gated-model-local-import.md`          | Completed sprint for Hugging Face browser/device OAuth download of approved gated models into validated local imports, with manual folder import as fallback. |
@@ -178,6 +178,9 @@
 | `backend/network/` | Persistent control-plane discovery, immutable last-good topology, role state, publication verification, and typed publication outcomes. |
 | `backend/network/supervisor.py` | Backend-lifespan network supervisor with an independent cache-disabled DHT, passive topology snapshots, structured failures, role identities, and exact-handle cleanup/quarantine. |
 | `backend/network/publication.py` | Hivemind 1.1.12-aware publication-result classifier that separates equivalent newer records, conflicts, weak acknowledgement, and verified local transport loss. |
+| `backend/placement/` | Authenticated SQLite placement coordinator, HTTP client, reservation state machine, and backend heartbeat owner. |
+| `backend/placement/service.py` | Separately deployable atomic range allocator with revisioned durable leases, expiry, idempotency, and audit-safe diagnostics. |
+| `backend/placement/client.py` | Participant coordinator client, fail-closed errors, exact online attestation, secret-safe status, and lease heartbeats. |
 | `backend/node/`          | Serving node, layer loading, direct/relay transport, Hivemind RPC, and GPU monitoring. |
 | `backend/node/reachability.py` | Petals-derived independent direct-reachability probe with persistent stop requests and exact startup/shutdown ownership before relay fallback. |
 | `backend/node/relay_compat.py` | Hivemind 1.1.12 compatibility shim that selects configured trusted relays as static AutoRelay candidates. |
@@ -210,6 +213,9 @@
 | `backend/tests/test_network_supervisor_api.py` | Passive supervisor-backed status, node, model, and serving-plan API contract regressions. |
 | `backend/tests/test_publication_classification.py` | Ambiguous Hivemind store result, independent readback, conflict, expiration horizon, and recovery-eligibility regressions. |
 | `backend/tests/test_runtime_state_validation.py` | Generator state, tensor canary, local replica limits, route suspension, and dependent-node deletion regressions. |
+| `backend/tests/test_transactional_placement.py` | Coordinator concurrency, complementary coverage, state transition, expiry, replay, restart, auth, and conflict regressions. |
+| `backend/tests/test_placement_client.py` | Authenticated client payload, publication attestation, heartbeat ownership, and secret-safe status regressions. |
+| `backend/tests/test_placement_backend_integration.py` | Backend authoritative-plan, coordinator range override, failed-load release, and fail-closed integration regressions. |
 | `backend/tests/test_api_access.py` | Hashed API-key eligibility, revocation, shared atomic credit reservations, shadow accounting, and signed capability regressions. |
 
 ---
@@ -247,7 +253,11 @@
 
 | Path | What's inside |
 | --- | --- |
-| `deploy/vps/` | Versioned systemd templates, environment examples, locked installers, relay validation, and useful-work settlement deployment. |
+| `deploy/vps/` | Versioned systemd templates, environment examples, locked installers, relay validation, transactional placement, and useful-work settlement deployment. |
+| `deploy/vps/distribllm-placement.service` | Hardened systemd unit template for the transactional placement authority. |
+| `deploy/vps/placement.env.example` | Secret-free placement host, port, database, TTL, and placeholder-secret configuration. |
+| `deploy/vps/run-placement.sh` | Validated placement service launcher using the locked service-owned environment. |
+| `deploy/vps/install-placement-service.sh` | Root installer for the placement environment, state directories, and systemd unit. |
 
 ---
 

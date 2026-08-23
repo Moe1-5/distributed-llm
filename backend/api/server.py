@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from contextlib import aclosing, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -56,6 +56,10 @@ from client.coverage import build_serving_plan, evaluate_candidate
 from client.generation import DistributedGenerator, GeneratorOperationBusyError
 from incentives.runtime import get_useful_work_runtime
 from incentives.access import AccessError, get_api_access_manager
+from placement.client import (
+    PlacementClientError,
+    create_placement_runtime_from_env,
+)
 from api.local_models import (
     LocalModelDeletionError,
     LocalModelValidationError,
@@ -557,6 +561,73 @@ network_supervisor = NetworkSupervisor(
     identity_path=get_role_identity_path("control-plane"),
     event_sink=_record_network_event,
 )
+placement_runtime = create_placement_runtime_from_env()
+
+
+def _handle_placement_lease_lost(
+    node_id: str,
+    error: PlacementClientError,
+) -> None:
+    """Stop advertising work after the coordinator rejects exact ownership."""
+    local_node = _find_local_node(node_id)
+    if local_node is None:
+        _runtime_state.record_event(
+            kind="placement",
+            phase="lease_lost",
+            status="error",
+            message=f"Placement ownership was lost for unregistered node {node_id}: {error}",
+        )
+        return
+    operation, conflict = _begin_node_lifecycle_operation(local_node, "lease_lost")
+    if conflict is not None or operation is None:
+        _runtime_state.record_event(
+            kind="placement",
+            phase="lease_lost",
+            status="error",
+            message=(
+                f"Placement ownership was lost for node {node_id}; an existing "
+                "lifecycle owner must finish before cleanup."
+            ),
+            details={"coordinator_error": error.code, "lifecycle": conflict},
+        )
+        return
+    try:
+        dependency = _generator_dependency(local_node)
+        generator_owner = dependency.get("generator_owner")
+        if dependency.get("required") and generator_owner is not None:
+            generator_owner.request_stop()
+            _runtime_state.transition_generator(
+                "suspended",
+                model_name=generator_owner.model_name,
+                components_loaded=True,
+                route_ready=False,
+                reasons=[
+                    "A selected local provider lost authoritative placement ownership."
+                ],
+                health=dependency.get("health"),
+            )
+        stopped = local_node.turn_off()
+        local_node.placement_lease = None
+        _register_network_worker(
+            local_node,
+            "stopped" if stopped is not False else "cleanup_pending",
+        )
+        _invalidate_serving_plan_cache(local_node.model_name)
+        _runtime_state.record_event(
+            kind="placement",
+            phase="lease_lost",
+            status="error",
+            message=(
+                f"Node {node_id} stopped serving after authoritative placement "
+                f"ownership was rejected: {error}"
+            ),
+            details={"coordinator_error": error.code},
+        )
+    finally:
+        _finish_node_lifecycle_operation(operation)
+
+
+placement_runtime.set_lease_lost_callback(_handle_placement_lease_lost)
 _serving_plan_cache: dict[tuple[str, int], tuple[float, dict]] = {}
 _serving_plan_cache_lock = threading.RLock()
 _serving_plan_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
@@ -587,6 +658,15 @@ def _register_local_node(local_node: Node) -> None:
 def _unregister_local_node(local_node: Node) -> None:
     node_id = getattr(local_node, "node_id", None)
     if node_id is not None:
+        if placement_runtime.enabled:
+            try:
+                placement_runtime.release_node(node_id, "node_unregistered")
+            except PlacementClientError as exc:
+                logger.warning(
+                    "Could not release placement while unregistering %s; lease will expire: %s",
+                    node_id,
+                    exc,
+                )
         local_nodes.pop(node_id, None)
         if _supervisor_active():
             network_supervisor.unregister_role("worker", role_id=node_id)
@@ -724,6 +804,86 @@ def _network_response_fields(snapshot: Optional[dict] = None) -> dict:
         "network_revision": current.get("revision"),
         "network_topology_revision": current.get("topology_revision"),
         "network_failure": current.get("failure"),
+    }
+
+
+def _placement_participant_id(snapshot: Optional[dict] = None) -> str:
+    current = snapshot or _network_snapshot()
+    participant_id = str(current.get("control_peer_id") or "").strip()
+    if not participant_id:
+        raise PlacementClientError(
+            "placement_identity_unavailable",
+            "The persistent control-plane peer identity is not ready yet.",
+        )
+    return participant_id
+
+
+def _placement_http_error(exc: PlacementClientError) -> HTTPException:
+    status_code = (
+        exc.status_code
+        if exc.status_code is not None and 400 <= exc.status_code < 500
+        else 503
+    )
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "error": exc.code,
+            "message": str(exc),
+            **exc.details,
+            "placement": placement_runtime.status(),
+        },
+    )
+
+
+def _coordinator_serving_plan(model_id: str, placement: dict) -> dict:
+    """Translate authoritative leases into the renderer's serving-plan contract."""
+    occupancy = placement["occupancy_plan"]
+    online = placement["online_plan"]
+    recommendation = placement.get("recommendation")
+    segments = []
+    for segment in occupancy["segments"]:
+        recommended = bool(
+            recommendation is not None
+            and int(recommendation["layer_start"]) <= int(segment["start"])
+            and int(recommendation["layer_end"]) >= int(segment["end"])
+        )
+        segments.append({**segment, "recommended": recommended})
+    return {
+        "model_id": model_id,
+        "coverage_revision": f"placement:{placement['topology_revision']}",
+        "total_layers": placement["total_layers"],
+        "requested_layer_count": placement["requested_layer_count"],
+        "segments": segments,
+        "missing_ranges": online["missing_ranges"],
+        "uncovered_ranges": online["uncovered_ranges"],
+        "projected_missing_ranges": occupancy["projected_missing_ranges"],
+        "recommendation": recommendation,
+        "current_runnable": online["current_runnable"],
+        "projected_runnable": occupancy["projected_runnable"],
+        "reachable_prefix": online["reachable_prefix"],
+        "selected_route": online["selected_route"],
+        "projected_route": occupancy["projected_route"],
+        "route_kind": online["route_kind"],
+        "projected_route_kind": occupancy["projected_route_kind"],
+        "standby_ranges": online["standby_ranges"],
+        "snapshot_stale": False,
+        "refreshing": False,
+        "snapshot_source": "placement_coordinator",
+        "snapshot_age_seconds": 0.0,
+        "placement": {
+            "enabled": True,
+            "authoritative": True,
+            "capacity_available": placement["capacity_available"],
+            "topology_revision": placement["topology_revision"],
+            "model_revision": placement["model_revision"],
+            "captured_at": placement["captured_at"],
+            "reservations": placement["reservations"],
+        },
+        **{
+            key: value
+            for key, value in _network_response_fields().items()
+            if key.startswith("network_")
+        },
     }
 
 
@@ -2044,6 +2204,21 @@ async def lifespan(app: FastAPI):
             node_shutdown_results = [record_shutdown_failure("Local node cleanup", exc)]
 
         try:
+            placement_shutdown_result = placement_runtime.shutdown(
+                max(0.0, shutdown_deadline - time.monotonic())
+            )
+            if not placement_shutdown_result:
+                record_shutdown_failure(
+                    "Placement heartbeat cleanup",
+                    RuntimeError("Placement heartbeat did not stop before the deadline"),
+                )
+        except BaseException as exc:
+            placement_shutdown_result = record_shutdown_failure(
+                "Placement heartbeat cleanup",
+                exc,
+            )
+
+        try:
             supervisor_shutdown_result = network_supervisor.stop(
                 max(0.0, shutdown_deadline - time.monotonic())
             )
@@ -2137,13 +2312,14 @@ async def lifespan(app: FastAPI):
         logger.info(
             "Shutdown cleanup status | lifecycle_jobs=%s generator_start=%s "
             "node_starts=%s node_operations=%s generator=%s local_nodes=%s "
-            "supervisor=%s failures=%s",
+            "placement=%s supervisor=%s failures=%s",
             lifecycle_jobs_stopped,
             generator_start_stopped,
             node_starts_stopped,
             node_operations_stopped,
             generator_shutdown_result,
             node_shutdown_results,
+            placement_shutdown_result,
             supervisor_shutdown_result,
             shutdown_failures,
         )
@@ -2182,6 +2358,10 @@ class NodeStartRequest(BaseModel):
     initial_peers: list[str] = []
     device:        str = "cuda" if torch.cuda.is_available() else "cpu"
     coverage_revision: Optional[str] = None
+    placement_mode: Literal["recommended", "custom"] = "custom"
+    layer_capacity: Optional[int] = None
+    placement_revision: Optional[int] = None
+    placement_idempotency_key: Optional[str] = None
     confirm_redundancy: bool = False
     confirm_local_replica: bool = False
 
@@ -2807,6 +2987,11 @@ def _active_serving_nodes(
         dht_prefix=active_prefix,
         num_layers=total_layers,
         model_name=model_id,
+        **(
+            {"placement_model_revision": placement_runtime.config.model_revision}
+            if placement_runtime.enabled
+            else {}
+        ),
     )
     if use_supervisor:
         discovered = _merge_supervisor_and_local_nodes(
@@ -2872,6 +3057,16 @@ async def get_model_serving_plan(
     model_id: str,
     layer_count: int = Query(..., ge=1),
 ) -> dict:
+    if placement_runtime.enabled:
+        try:
+            placement = await asyncio.to_thread(
+                placement_runtime.plan,
+                model_id,
+                layer_count,
+            )
+        except PlacementClientError as exc:
+            raise _placement_http_error(exc) from exc
+        return _coordinator_serving_plan(model_id, placement)
     key = (model_id, layer_count)
     now = time.monotonic()
     supervisor_snapshot = _network_snapshot()
@@ -2934,6 +3129,12 @@ async def get_model_serving_plan(
         "snapshot_source": "local_only",
         "snapshot_age_seconds": 0.0,
     }
+
+
+@app.get("/placement/status")
+async def get_placement_status() -> dict:
+    """Passive diagnostics; this endpoint never mutates coordinator state."""
+    return placement_runtime.status()
 
 
 async def _refresh_serving_plan(key: tuple[str, int]) -> None:
@@ -3017,6 +3218,11 @@ def _get_model_route_status(
         dht_prefix=dht_prefix,
         num_layers=total_layers,
         model_name=model_id,
+        **(
+            {"placement_model_revision": placement_runtime.config.model_revision}
+            if placement_runtime.enabled
+            else {}
+        ),
     )
     try:
         if nodes is None:
@@ -3534,7 +3740,11 @@ async def _start_node_runtime(
         }
 
     replicas = _matching_local_replicas(req)
-    if replicas and not req.confirm_local_replica:
+    if (
+        replicas
+        and not req.confirm_local_replica
+        and (not placement_runtime.enabled or req.placement_mode == "custom")
+    ):
         replica_label = "replica" if len(replicas) == 1 else "replicas"
         raise HTTPException(
             status_code=409,
@@ -3574,6 +3784,8 @@ async def _start_node_runtime(
         **plan_network_fields,
     }
     if (
+        not placement_runtime.enabled
+        and
         req.coverage_revision is not None
         and req.coverage_revision != current_plan["coverage_revision"]
     ):
@@ -3593,6 +3805,8 @@ async def _start_node_runtime(
         req.layer_end,
     )
     if (
+        not placement_runtime.enabled
+        and
         current_plan["missing_ranges"]
         and candidate["newly_covered_layers"] == 0
         and not candidate["completes_route"]
@@ -3611,7 +3825,10 @@ async def _start_node_runtime(
         )
 
     overlapping_node = _has_overlapping_local_node(req)
-    if overlapping_node is not None:
+    if (
+        overlapping_node is not None
+        and (not placement_runtime.enabled or req.placement_mode == "custom")
+    ):
         return {
             "status": "error",
             "error": "overlapping_layer_range",
@@ -3647,11 +3864,70 @@ async def _start_node_runtime(
             ),
         }
 
+    operation_id = str(uuid4())
+    placement_reservation: Optional[dict] = None
+    placement_tracked = False
+    if placement_runtime.enabled:
+        layer_capacity = int(req.layer_capacity or (req.layer_end - req.layer_start))
+        if not 1 <= layer_capacity <= int(model_info["num_layers"]):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_layer_capacity",
+                    "message": (
+                        f"layer_capacity must be between 1 and {model_info['num_layers']}."
+                    ),
+                },
+            )
+        try:
+            placement_result = await asyncio.to_thread(
+                placement_runtime.reserve,
+                participant_id=_placement_participant_id(supervisor_snapshot),
+                idempotency_key=req.placement_idempotency_key or operation_id,
+                model_name=req.model_name,
+                layer_capacity=layer_capacity,
+                placement_mode=req.placement_mode,
+                layer_start=req.layer_start if req.placement_mode == "custom" else None,
+                layer_end=req.layer_end if req.placement_mode == "custom" else None,
+                expected_topology_revision=req.placement_revision,
+            )
+        except PlacementClientError as exc:
+            raise _placement_http_error(exc) from exc
+        placement_reservation = placement_result["reservation"]
+        req = req.model_copy(
+            update={
+                "layer_start": int(placement_reservation["layer_start"]),
+                "layer_end": int(placement_reservation["layer_end"]),
+                "layer_capacity": layer_capacity,
+                "placement_revision": int(placement_result["topology_revision"]),
+            }
+        )
+        allocated_overlap = _has_overlapping_local_node(req)
+        if allocated_overlap is not None:
+            try:
+                await asyncio.to_thread(
+                    placement_runtime.release_reservation,
+                    placement_reservation,
+                    "local_overlap_after_reservation",
+                )
+            except PlacementClientError as exc:
+                logger.warning("Could not release rejected placement reservation: %s", exc)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "overlapping_layer_range",
+                    "message": (
+                        f"Coordinator allocated {req.layer_start}-{req.layer_end}, but local "
+                        f"node {allocated_overlap.layer_start}-{allocated_overlap.layer_end} "
+                        "already owns that range. Turn off the stale local node and retry."
+                    ),
+                },
+            )
+
     # Use default peers if none provided
     peers = _role_initial_peers(req.initial_peers)
     rpc_uid_suffix = None
     local_node = None
-    operation_id = str(uuid4())
     transaction: Optional[_NodeStartTransaction] = None
 
     try:
@@ -3666,6 +3942,14 @@ async def _start_node_runtime(
             local_model_path=local_model_path,
             publication_verifier=network_supervisor.verify_publication,
         )
+        if placement_reservation is not None:
+            local_node.placement_model_revision = placement_runtime.config.model_revision
+            local_node.placement_lease = await asyncio.to_thread(
+                placement_runtime.begin_joining,
+                placement_reservation,
+                local_node.node_id,
+            )
+            placement_tracked = True
 
         with _generator_lifecycle_lock:
             if _backend_closing or not network_supervisor.accepting_roles:
@@ -3733,6 +4017,12 @@ async def _start_node_runtime(
         _raise_if_node_start_cancelled(transaction, external_cancel)
         if not local_node.is_running():
             raise RuntimeError("node.start() completed but is_running() is False")
+        if placement_reservation is not None:
+            local_node.placement_lease = await asyncio.to_thread(
+                placement_runtime.mark_online,
+                local_node.node_id,
+                local_node.get_info(),
+            )
 
         with _generator_lifecycle_lock:
             if external_cancel is not None and external_cancel.is_set():
@@ -3848,6 +4138,26 @@ async def _start_node_runtime(
             return _huggingface_reconnect_response(req.model_name)
         return {"status": "error", "error": str(e)}
     finally:
+        committed = bool(transaction is not None and transaction.committed)
+        if placement_reservation is not None and not committed:
+            try:
+                if placement_tracked and local_node is not None:
+                    await asyncio.to_thread(
+                        placement_runtime.release_node,
+                        local_node.node_id,
+                        "startup_rollback",
+                    )
+                else:
+                    await asyncio.to_thread(
+                        placement_runtime.release_reservation,
+                        placement_reservation,
+                        "startup_rollback",
+                    )
+            except PlacementClientError as exc:
+                logger.warning(
+                    "Placement release failed during startup rollback; lease will expire: %s",
+                    exc,
+                )
         if transaction is not None:
             with _generator_lifecycle_lock:
                 if _active_node_starts.get(operation_id) is transaction:
@@ -3899,13 +4209,42 @@ async def turn_on_node(node_id: Optional[str] = None) -> dict:
     if conflict is not None:
         return conflict
     assert operation is not None
+    placement_reserved = False
     try:
         if local_node.is_running():
             return {"status": "already_running", "info": local_node.get_info()}
+        if placement_runtime.enabled:
+            try:
+                placement_result = await asyncio.to_thread(
+                    placement_runtime.reserve,
+                    participant_id=_placement_participant_id(),
+                    idempotency_key=f"turn-on-{local_node.node_id}-{uuid4().hex}",
+                    model_name=local_node.model_name,
+                    layer_capacity=local_node.layer_end - local_node.layer_start,
+                    placement_mode="custom",
+                    layer_start=local_node.layer_start,
+                    layer_end=local_node.layer_end,
+                    expected_topology_revision=None,
+                )
+                reservation = placement_result["reservation"]
+                local_node.placement_lease = await asyncio.to_thread(
+                    placement_runtime.begin_joining,
+                    reservation,
+                    local_node.node_id,
+                )
+                placement_reserved = True
+            except PlacementClientError as exc:
+                raise _placement_http_error(exc) from exc
         _result, cancellation_count = await _run_node_lifecycle_operation(
             operation,
             local_node.start,
         )
+        if placement_reserved:
+            local_node.placement_lease = await asyncio.to_thread(
+                placement_runtime.mark_online,
+                local_node.node_id,
+                local_node.get_info(),
+            )
         _register_network_worker(local_node, "ready")
         _invalidate_serving_plan_cache(local_node.model_name)
         if cancellation_count:
@@ -3913,6 +4252,25 @@ async def turn_on_node(node_id: Optional[str] = None) -> dict:
         return {"status": "turned_on", "info": local_node.get_info()}
     except Exception as e:
         logger.error(f"Node turn-on failed: {e}", exc_info=True)
+        if placement_reserved:
+            try:
+                await _run_node_lifecycle_operation(operation, local_node.turn_off)
+            except Exception as cleanup_exc:
+                logger.warning("Turn-on rollback could not stop the node: %s", cleanup_exc)
+            try:
+                await asyncio.to_thread(
+                    placement_runtime.release_node,
+                    local_node.node_id,
+                    "turn_on_rollback",
+                )
+            except PlacementClientError as release_exc:
+                logger.warning(
+                    "Turn-on placement release failed; lease will expire: %s",
+                    release_exc,
+                )
+            local_node.placement_lease = None
+        if isinstance(e, HTTPException):
+            raise
         if _is_cuda_out_of_memory(e):
             return _cuda_memory_error_response(
                 local_node.model_name,
@@ -4001,6 +4359,21 @@ async def turn_off_node(node_id: Optional[str] = None) -> dict:
                 "info": local_node.get_info(),
             }
         _register_network_worker(local_node, "stopped")
+        placement_warning = None
+        if placement_runtime.enabled:
+            try:
+                await asyncio.to_thread(
+                    placement_runtime.release_node,
+                    local_node.node_id,
+                    "operator_turn_off",
+                )
+            except PlacementClientError as exc:
+                placement_warning = (
+                    "Node is off, but the coordinator could not confirm release; "
+                    "the reservation remains unavailable until its lease expires."
+                )
+                logger.warning("Turn-off placement release failed: %s", exc)
+            local_node.placement_lease = None
         _invalidate_serving_plan_cache(local_node.model_name)
         _runtime_state.record_event(
             kind="node",
@@ -4011,7 +4384,11 @@ async def turn_off_node(node_id: Optional[str] = None) -> dict:
         )
         if cancellation_count:
             raise asyncio.CancelledError
-        return {"status": "turned_off", "info": local_node.get_info()}
+        return {
+            "status": "turned_off",
+            "info": local_node.get_info(),
+            "placement_warning": placement_warning,
+        }
     except Exception as e:
         logger.error(f"Node turn-off failed: {e}", exc_info=True)
         return {"status": "error", "error": str(e)}
@@ -4333,6 +4710,10 @@ async def _start_generator_runtime(
         if "topology_provider" in sequential_parameters and _supervisor_active():
             sequential_kwargs["topology_provider"] = (
                 lambda: _generator_topology_nodes(req.model_name)
+            )
+        if "placement_model_revision" in sequential_parameters and placement_runtime.enabled:
+            sequential_kwargs["placement_model_revision"] = (
+                placement_runtime.config.model_revision
             )
         sequential = RemoteSequential(
             dht=candidate_dht,

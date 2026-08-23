@@ -13,6 +13,9 @@ Current active validation work:
 - Sprint 15: the Electron main-process managed WSL launcher, health states, persisted relay configuration, first-run Settings controls, safe PID shutdown, package auditing, and sanitized acceptance reporting are implemented; clean-Windows and two-device package validation remain open.
 - Sprint 16: persistent VPS relay service, validation tooling, public circuit reservation, expert metadata RPC, and a cross-sprint evidence manifest are implemented; the bound live two-device run remains open.
 - Sprint 17: coverage-aware routing, serving recommendations, stale-plan checks, and route/standby visibility are implemented; two-device acceptance remains open.
+- Sprint 28: peer-addressed expert ownership is implemented against Hivemind 1.1.12; packaged two-device rollout remains open.
+- Sprint 29: the persistent network supervisor and role-specific lifecycle ownership are implemented; physical recovery validation remains open.
+- Sprint 30: authenticated transactional placement, durable exclusive leases, backend lifecycle integration, and renderer authority boundaries are implemented; physical coordinator rollout remains open.
 
 Approved work that can proceed without treating the live two-device evidence as complete:
 
@@ -28,8 +31,8 @@ Sprints 18 through 21 were approved for implementation. Session/key-value cache 
 The 2026-08-23 source, Hivemind 1.1.12, and Petals comparison audit found that transformer partitioning is not the primary architectural defect. The correction program instead separates provider identity, participant network lifecycle, placement coordination, tensor sessions, and infrastructure resilience into dependency-ordered owners:
 
 1. **Sprint 28 - Peer-addressed expert protocol:** locally implemented against pinned Hivemind 1.1.12. Normal and receipt identities are peer-unique, every health/forward path binds to the selected peer, and duplicate-range, complementary-split, alternate-failover, and receipt tests pass. Packaged two-device rollout remains open.
-2. **Sprint 29 - Persistent network supervisor:** give each backend an always-on control-plane discovery owner, explicit network state, last-good topology, distinct role-specific peer runtimes, and evidence-based publication recovery.
-3. **Sprint 30 - Transactional swarm placement:** allocate ranges through authoritative expiring reservations so concurrent participants cannot act on the same snapshot recommendation.
+2. **Sprint 29 - Persistent network supervisor:** implemented in source with an always-on control-plane discovery owner, explicit network state, last-good topology, distinct role-specific peer runtimes, and evidence-based publication recovery. Physical rollout remains open.
+3. **Sprint 30 - Transactional swarm placement:** implemented in source with authenticated atomic allocation, durable expiring leases, exact online attestation, local safety deadlines, and coordinator-backed Recommended and Custom starts. Physical rollout remains open.
 4. **Sprint 31 - Session-aware KV-cache inference:** add bounded prefill and decode sessions after the direct-versus-relay stateless payload baseline is known.
 5. **Sprint 32 - Infrastructure redundancy and architecture acceptance:** separate bootstrap/DHT, relay, coordinator, and settlement roles, add independent redundancy, and run the final failure matrix.
 
@@ -349,7 +352,7 @@ This is intentionally last because training is harder than inference. It require
 6. Implement Sprint 19 continuous health and Sprint 20 RPC resource safety.
 7. Implement Sprint 21 health-aware route failover after Sprints 19 and 20 are accepted.
 8. Complete Sprint 28 peer-addressed expert ownership and Sprint 29 persistent network lifecycle.
-9. Add Sprint 30 transactional placement after peer and network state are authoritative.
+9. Physically validate the implemented Sprint 30 transactional placement service after peer and network state are authoritative.
 10. Implement Sprint 31 stable session routing and distributed KV cache after the stateless payload baseline.
 11. Complete Sprint 32 infrastructure separation, redundancy, and architecture acceptance.
 12. Validate Sprint 26 API-key access against the accepted runtime architecture.

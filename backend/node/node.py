@@ -70,6 +70,7 @@ _NODE_PUBLICATION_FIELDS = (
     "receipt_rpc_uid",
     "application_public_key",
     "model_revision",
+    "placement_model_revision",
 )
 
 
@@ -102,6 +103,7 @@ class Node:
         local_model_path: Optional[str] = None,
         node_id:       Optional[str] = None,
         rpc_uid_suffix: Optional[int] = None,
+        placement_model_revision: Optional[str] = None,
         p2p_config: Optional[P2PNetworkConfig] = None,
         p2p_identity_dir: Optional[Path | str] = None,
         publication_verifier: Optional[PublicationVerifier] = None,
@@ -138,6 +140,8 @@ class Node:
                 "or hyphens and must not exceed 128 characters"
             )
         self.rpc_uid_suffix = rpc_uid_suffix
+        self.placement_model_revision = placement_model_revision
+        self.placement_lease: Optional[dict[str, Any]] = None
         self.p2p_config = p2p_config or get_p2p_network_config()
         self.p2p_identity_dir = (
             Path(p2p_identity_dir).expanduser()
@@ -800,6 +804,7 @@ class Node:
                     "peer_id": peer_id,
                     "node_id": self.node_id,
                     "model_name": self.model_name,
+                    "placement_model_revision": self.placement_model_revision,
                     "layer_start": self.layer_start,
                     "layer_end": self.layer_end,
                     "device": self.device,
@@ -1348,6 +1353,7 @@ class Node:
                 "rpc_uid_schema_version": EXPERT_RPC_UID_SCHEMA_VERSION,
                 "rpc_peer_id": peer_id,
                 "model_name": self.model_name,
+                "placement_model_revision": self.placement_model_revision,
                 "layer_start": self.layer_start,
                 "layer_end": self.layer_end,
                 "device": self.device,
@@ -1366,6 +1372,7 @@ class Node:
                 "rpc_safety": rpc_safety,
                 "rpc_publication": rpc_publication,
                 "announcement": announcement,
+                "placement": dict(self.placement_lease) if self.placement_lease else None,
                 "accounting": self._get_accounting_snapshot_owned(peer_id),
                 **(receipt_capability or {}),
             }

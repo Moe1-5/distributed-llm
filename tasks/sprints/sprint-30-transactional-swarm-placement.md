@@ -3,7 +3,7 @@
 **Goal:** Replace snapshot-based Recommended placement with authoritative, expiring, atomic provider reservations.
 **Start:** 2026-08-23
 **End:** TBD
-**Status:** Planned behind Sprints 28 and 29.
+**Status:** Implemented in source; physical two-device coordinator rollout and acceptance remain open.
 
 ---
 
@@ -23,16 +23,16 @@ For the current two-device product, placement correctness needs an explicit cont
 
 ## Work Plan
 
-- [ ] Add a separately deployed swarm coordination service with durable, revisioned lease state.
-- [ ] Model provider placement as `RESERVED`, `JOINING`, `ONLINE`, `OFFLINE`, and `EXPIRED` states.
-- [ ] Accept model revision and layer capacity and allocate a useful range atomically.
-- [ ] Return a reservation token, topology revision, range, and expiry.
-- [ ] Confirm `ONLINE` only after layers load and the exact peer-addressed expert passes readiness.
-- [ ] Renew leases from authenticated backend heartbeats and expire abandoned starts.
-- [ ] Route custom ranges through the same server-side conflict and revision validation.
-- [ ] Cross-check coordinator ownership, Hivemind advertisement, and RPC readiness without using the UI as authority.
-- [ ] Fail closed for new Recommended placement when coordination is unavailable while preserving documented behavior for existing online workers.
-- [ ] Add signed or authenticated participant mutations, bounded clocks, idempotency, and audit-safe diagnostics.
+- [x] Add a separately deployed swarm coordination service with durable, revisioned lease state.
+- [x] Model provider placement as `RESERVED`, `JOINING`, `ONLINE`, `OFFLINE`, and `EXPIRED` states.
+- [x] Accept model revision and layer capacity and allocate a useful range atomically.
+- [x] Return a reservation token, topology revision, range, and expiry.
+- [x] Confirm `ONLINE` only after layers load and the exact peer-addressed expert passes readiness.
+- [x] Renew leases from authenticated backend heartbeats and expire abandoned starts.
+- [x] Route custom ranges through the same server-side conflict and revision validation.
+- [x] Cross-check coordinator ownership, Hivemind advertisement, and RPC readiness without using the UI as authority.
+- [x] Fail closed for new Recommended placement when coordination is unavailable while preserving documented behavior for existing online workers.
+- [x] Add signed or authenticated participant mutations, bounded clocks, idempotency, and audit-safe diagnostics.
 
 ## Test Plan
 
@@ -46,13 +46,18 @@ For the current two-device product, placement correctness needs an explicit cont
 
 ## Acceptance Criteria
 
-- [ ] Simultaneous capacity requests cannot receive conflicting exclusive reservations.
-- [ ] Normal sequential requests produce complementary useful coverage.
-- [ ] Failed or abandoned startup releases or expires its reservation.
-- [ ] An old UI revision cannot commit stale placement.
-- [ ] Coordinator, DHT advertisement, and RPC readiness are cross-validated.
-- [ ] Restart recovery cannot create two active owners for one reservation.
-- [ ] The frontend does not calculate placement correctness.
+- [x] Simultaneous capacity requests cannot receive conflicting exclusive reservations.
+- [x] Normal sequential requests produce complementary useful coverage.
+- [x] Failed or abandoned startup releases or expires its reservation.
+- [x] An old UI revision cannot commit stale placement.
+- [x] Coordinator, DHT advertisement, and RPC readiness are cross-validated.
+- [x] Restart recovery cannot create two active owners for one reservation.
+- [x] The frontend does not calculate placement correctness.
+
+Source acceptance is complete. Physical acceptance still requires deploying the
+coordinator, configuring the same pinned placement revision on both packaged
+participants, racing two six-layer starts, and observing heartbeat expiry and
+coordinator restart behavior on the real relay topology.
 
 ---
 
@@ -63,3 +68,9 @@ For the current two-device product, placement correctness needs an explicit cont
 - What changed: created the sprint for a separate authoritative coordinator, atomic range reservations, explicit provider lease states, authenticated heartbeats, and stale-revision protection.
 - Why: physical testing proved that even a correctly labeled fresh recommendation remains a snapshot and cannot prevent concurrent devices from choosing the same missing range.
 - Status: planning is complete and depends on Sprints 28 and 29; no service or runtime source changed in this session.
+
+### 2026-08-23 - Implement and verify authoritative placement
+
+- What changed: added the authenticated SQLite placement service and VPS unit; atomic Recommended and Custom reservations; explicit lease states, tokens, revisions, expiry, idempotency, and safe audit output; backend reserve, joining, online, heartbeat, release, and fail-closed lifecycle integration; exact DHT and RPC readiness attestation; generator placement-revision filtering; renderer authority/capacity handling; deployment documentation; and source regressions for concurrency, complementarity, stale revisions, failed starts, replay, restart, authentication, outages, and secret redaction.
+- Why: eventually consistent DHT snapshots cannot prevent two participants from selecting the same missing range, and a worker must stop before an expired lease can be reassigned after a coordinator outage.
+- Status: all source acceptance criteria pass. The complete backend suite passes 419 tests; the focused placement suite passes 33 tests; renderer flow passes 4 tests; launcher passes 20 tests; frontend lint, typecheck/build, deployment shell syntax, and diff checks pass. Physical two-device deployment, allocation race, expiry, and restart evidence remain open, so the sprint stays active and is not archived.

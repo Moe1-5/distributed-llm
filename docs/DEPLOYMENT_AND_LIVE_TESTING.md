@@ -230,6 +230,57 @@ Expected result:
 
 If this passes, bootstrap and relay reservation are working. A later `No healthy complete route` error is then a route, provider health, RPC, model compatibility, or generator readiness problem rather than a basic VPS bootstrap problem.
 
+## VPS Transactional Placement Service
+
+Placement is separate from bootstrap/relay and settlement. It defaults to VPS
+loopback port `7200`, stores revisioned leases in SQLite WAL, and must use an
+authenticated HTTPS reverse proxy in production. A second SSH loopback tunnel
+is acceptable for a controlled two-device test.
+
+On the VPS, copy `deploy/vps/placement.env.example` to
+`/etc/distribllm/placement.env`, replace both placeholders with distinct random
+values of at least 32 characters, then install and verify:
+
+```bash
+cd /opt/distribllm
+UV_PATH="$(command -v uv)"
+sudo env UV_BIN="$UV_PATH" \
+  /opt/distribllm/deploy/vps/install-placement-service.sh /opt/distribllm
+sudo systemctl is-active distribllm-placement.service
+curl -fsS http://127.0.0.1:7200/health
+sudo journalctl -u distribllm-placement.service -n 100 --no-pager
+```
+
+For a loopback-only physical test, keep this tunnel open in each participant's
+backend WSL distro:
+
+```bash
+ssh -N \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:7200:127.0.0.1:7200 \
+  mohammed@178.156.212.0
+```
+
+Configure the same auth token and pinned logical model revision on both devices:
+
+```text
+DISTRIBLLM_PLACEMENT_URL=http://127.0.0.1:7200
+DISTRIBLLM_PLACEMENT_AUTH_TOKEN=<same coordinator bearer token>
+DISTRIBLLM_PLACEMENT_MODEL_REVISION=main
+DISTRIBLLM_PLACEMENT_HEARTBEAT_INTERVAL_SECONDS=20
+```
+
+Do not copy `DISTRIBLLM_PLACEMENT_TOKEN_SECRET` to participants; only the
+coordinator uses it. `placement_unavailable` on a plan or new start is an
+intentional fail-closed result. Existing online workers continue serving during
+a short outage, while diagnostics show missed renewal. Each participant also
+uses a monotonic local safety deadline, shortened by one heartbeat interval, so
+it stops serving before the coordinator can reallocate an expired lease. A
+coordinator rejection likewise stops the affected worker and suspends any
+dependent local generator.
+
 ## VPS Incentive Settlement In Shadow Mode
 
 The bootstrap relay and incentive settlement are separate services. The relay listens publicly on TCP port `7001`. Settlement defaults to `127.0.0.1:7101` and must remain in shadow mode until the two-device receipt evidence is reviewed. Do not enable credit mode yet.

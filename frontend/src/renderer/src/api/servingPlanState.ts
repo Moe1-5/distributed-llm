@@ -1,7 +1,12 @@
 import type { ServingPlan } from './client'
 
 export function isServingPlanAuthoritative(plan: ServingPlan | null): plan is ServingPlan {
-  return Boolean(plan && plan.snapshot_stale === false && plan.refreshing === false)
+  return Boolean(
+    plan &&
+      plan.snapshot_stale === false &&
+      plan.refreshing === false &&
+      (plan.placement?.enabled !== true || plan.placement.authoritative === true)
+  )
 }
 
 export function servingPlanStatus(

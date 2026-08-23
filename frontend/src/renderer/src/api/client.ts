@@ -166,7 +166,7 @@ export interface ServingPlan {
   missing_ranges: CoverageRange[]
   uncovered_ranges: CoverageRange[]
   projected_missing_ranges: CoverageRange[]
-  recommendation: ServingRecommendation
+  recommendation: ServingRecommendation | null
   current_runnable: boolean
   projected_runnable: boolean
   reachable_prefix: number
@@ -177,12 +177,21 @@ export interface ServingPlan {
   standby_ranges: ServingRouteNode[]
   snapshot_stale: boolean
   refreshing: boolean
-  snapshot_source: 'dht_cache' | 'local_only' | 'validated_dht'
+  snapshot_source: 'dht_cache' | 'local_only' | 'validated_dht' | 'placement_coordinator'
   snapshot_age_seconds: number
   network_state?: NetworkLifecycleState
   network_revision?: number
   network_topology_revision?: string | null
   network_failure?: NetworkFailure | null
+  placement?: {
+    enabled: boolean
+    authoritative: boolean
+    capacity_available: boolean
+    topology_revision: number
+    model_revision: string
+    captured_at: string
+    reservations: Array<Record<string, unknown>>
+  }
 }
 
 export type NetworkLifecycleState = 'disconnected' | 'syncing' | 'ready' | 'degraded'
@@ -599,6 +608,10 @@ export interface NodeStartParams {
   initial_peers: string[]
   device: string
   coverage_revision?: string
+  placement_mode?: 'recommended' | 'custom'
+  layer_capacity?: number
+  placement_revision?: number
+  placement_idempotency_key?: string
   confirm_redundancy?: boolean
   confirm_local_replica?: boolean
 }

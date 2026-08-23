@@ -10,6 +10,7 @@ The target network is a project-owned public/discoverable swarm. External device
 
 - Bootstrap node: stable discovery entry point only; never serves transformer layers.
 - Network supervisor: owns the backend's persistent discovery-only DHT, last-good topology snapshot, role registry, publication verification, and exact-handle network shutdown/quarantine.
+- Placement coordinator: a separately deployed authenticated SQLite service that atomically leases exclusive model-layer ranges and owns placement topology revisions.
 - Serving node: owns a contiguous model layer range and exposes it through Hivemind RPC.
 - Generator client: keeps tokenizer, embeddings, final normalization, and LM head locally, then routes hidden states through serving nodes.
 - Electron/FastAPI client: controls local serving, generator startup, inference, monitoring, settings, OAuth, and managed model downloads.
@@ -43,9 +44,22 @@ generator: Optional[DistributedGenerator]
 client_dht: Optional[hivemind.DHT]
 client_dht_prefix: str
 network_supervisor: NetworkSupervisor
+placement_runtime: PlacementRuntime
 _lifecycle_jobs: LifecycleJobStore
 _runtime_state: RuntimeStateStore
 ```
+
+When `DISTRIBLLM_PLACEMENT_URL` is configured, renderer coverage is
+informational rather than authoritative. The backend sends model revision,
+capacity, placement mode, idempotency key, and the last coordinator topology
+revision to the placement service. A SQLite `BEGIN IMMEDIATE` transaction either
+grants one exclusive half-open range or rejects the request. Reservations move
+through `RESERVED`, `JOINING`, `ONLINE`, `OFFLINE`, and `EXPIRED`. New
+Recommended and Custom starts fail closed when coordination is unavailable;
+already-online workers keep serving and report degraded placement connectivity.
+If a later authenticated renewal says the lease is no longer active, the
+backend stops that worker and suspends a dependent local generator before the
+range can be treated as safely reusable.
 
 The supervisor starts with the FastAPI lifespan before any worker or generator. It exposes `disconnected`, `syncing`, `ready`, and `degraded` states, keeps immutable validated topology snapshots, and retains the last-good snapshot with its real age and failure stage when refresh fails. Production node, model, route, and serving-plan APIs read this state passively instead of starting request-owned DHT discovery.
 
@@ -87,6 +101,14 @@ OAuth credentials are stored outside the repository by default under the user co
 5. Announce validated model and transport metadata and periodically refresh it.
 
 Nodes support pause, resume, and delete/unload as distinct operations. Failed startup calls cleanup so partial DHT, RPC, handler, and CUDA state are released.
+
+A coordinated node becomes `JOINING` before model loading and becomes `ONLINE`
+only after its exact peer-owned RPC UID, model deployment revision, expert
+publication, and project metadata publication are ready. Startup failure, Turn
+Off, Delete, and backend shutdown release the lease. An unreachable coordinator
+leaves the range unavailable only until its server-controlled TTL expires.
+Generator route validation rejects workers advertising another placement model
+revision.
 
 The Hivemind server is the sole publisher of expert UID leases. DistribLLM does not run a competing manual writer for the same expert keys; its worker heartbeat owns only project metadata and membership records. When a project-record store is ambiguous, the supervisor independently reads it back without local DHT caching and classifies accepted, equivalent-newer, conflicting, short-horizon, unverified, and local-transport-failed outcomes. Because Hivemind 1.1.12 defines `DHT.store(False)` as either no acknowledgement or a newer existing record, that boolean alone never restarts a healthy worker.
 
@@ -130,6 +152,7 @@ There is no distributed KV cache or multi-generator registry yet. Health-aware f
 
 ## Current Validation State
 
+- Sprint 30 source validation covers simultaneous six-layer allocation, complementary route completion, expiry/release, mutation replay, stale revisions, coordinator restart, Custom conflict rejection, authenticated APIs, backend fail-closed behavior, participant-side pre-expiry safety shutdown, and renderer authority boundaries. Physical two-device coordinator deployment remains pending.
 - Sprint 29 implementation is complete in source: tests cover asynchronous clean start, last-good retention, authoritative local overlays, role identity separation, publication-result classification, passive supervisor-backed APIs, admission closure, cancellation races, exact streaming-request ownership, atomic Turn Off admission, delayed reachability startup, bounded shutdown responses, and idempotent exact-handle cleanup/quarantine. Physical packaged two-device validation is still pending.
 - Backend regression suite: 400 tests passing as of 2026-08-23, including adversarial RPC admission, deterministic stream-disconnect cleanup, cancellable provider-health probes, supervisor/DHT ownership races, selective layer parity, and independent-peer Hivemind normal and receipt RPC integration.
 - Frontend TypeScript checks, 20 managed-launcher tests, four renderer-flow tests, production build, and lint with zero errors pass. The repository still has 78 formatting warnings in pre-existing frontend files.

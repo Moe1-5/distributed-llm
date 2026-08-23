@@ -29,6 +29,26 @@ Network -> Serve Layers
 
 Public loading uses `token=False`, so expired OAuth or Hugging Face CLI credentials cannot turn a public request into a 401 failure.
 
+## 2A. Transactional Layer Placement
+
+```text
+Network -> Recommended or Custom
+  -> backend submits participant identity, model revision, and capacity
+  -> coordinator serializes allocation in one SQLite write transaction
+  -> reservation returns exact range, token, topology revision, and expiry
+  -> backend marks JOINING before model load
+  -> worker loads layers, starts its peer-addressed RPC, and publishes metadata
+  -> backend cross-checks exact peer, RPC UID, model revision, and fresh publications
+  -> coordinator marks the lease ONLINE
+  -> authenticated heartbeats renew the lease
+  -> stop/delete releases it; crash or abandoned startup expires it
+```
+
+The renderer displays the coordinator decision but never calculates ownership.
+New starts fail closed when the authority is unavailable. An existing online
+worker can survive a short outage, but its local safety deadline stops service
+before the coordinator may reallocate the expired range.
+
 ## 3. Gated Model Connection and Download
 
 ```text
@@ -93,17 +113,19 @@ This allows offline startup after a successful download/import. OAuth expiry aff
 
 ```text
 start
-  -> direct probe -> direct DHT or relay reservation -> layer load -> RPC -> announce
+  -> reserve placement -> direct probe -> direct DHT or relay reservation
+  -> layer load -> RPC -> announce -> exact readiness attestation -> ONLINE lease
 
 turn off
-  -> stop announcing/RPC/DHT serving handles
+  -> stop announcing/RPC/DHT serving handles -> release placement
   -> preserve loaded layers
 
 turn on
-  -> reconnect DHT/RPC and reannounce preserved layers
+  -> reserve the preserved custom range -> reconnect DHT/RPC and reannounce
+  -> attest exact readiness -> ONLINE lease
 
 delete
-  -> stop RPC/DHT -> unload layers -> remove local replica
+  -> stop RPC/DHT -> release placement -> unload layers -> remove local replica
 ```
 
 Multiple local nodes may serve non-overlapping ranges under one prefix. Overlapping local ranges and mixed local prefixes are rejected. Failed startup cleans partial resources before returning an actionable error.

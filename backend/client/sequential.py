@@ -262,6 +262,7 @@ class RemoteSequential:
         health_config: Optional[ProviderHealthConfig] = None,
         failover_config: Optional[RouteFailoverConfig] = None,
         topology_provider: Optional[Callable[[], list[dict] | dict[str, Any]]] = None,
+        placement_model_revision: Optional[str] = None,
     ):
         if dht is None:
             raise ValueError("dht must not be None")
@@ -279,6 +280,9 @@ class RemoteSequential:
         self.health_config = health_config or get_provider_health_config()
         self.failover_config = failover_config or get_route_failover_config()
         self.topology_provider = topology_provider
+        self.placement_model_revision = (
+            placement_model_revision.strip() if placement_model_revision else None
+        )
         self.health_registry = ProviderHealthRegistry(self.health_config)
         self.health_monitor: Optional[ProviderHealthMonitor] = None
         self._replica_cursors: dict[tuple[int, int], int] = {}
@@ -640,6 +644,20 @@ class RemoteSequential:
                 f"Node {metadata_peer_id[:8]} model_name {model_name!r} "
                 f"does not match generator model {self.model_name!r}"
             )
+        placement_model_revision = str(
+            info.get("placement_model_revision", "")
+        ).strip()
+        if self.placement_model_revision is not None:
+            if not placement_model_revision:
+                raise ValueError(
+                    f"Node {metadata_peer_id[:8]} has no authoritative placement model revision"
+                )
+            if placement_model_revision != self.placement_model_revision:
+                raise ValueError(
+                    f"Node {metadata_peer_id[:8]} placement model revision "
+                    f"{placement_model_revision!r} does not match generator revision "
+                    f"{self.placement_model_revision!r}"
+                )
 
         try:
             layer_start = int(info["layer_start"])
