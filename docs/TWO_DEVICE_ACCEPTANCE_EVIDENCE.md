@@ -52,10 +52,12 @@ uv run --python 3.12 python -m acceptance_evidence validate \
   --model facebook/opt-125m \
   --expected-mode relay \
   --expected-incentives off \
+  --min-generated-tokens 8 \
+  --require-session \
   --output ~/distribllm-evidence/relay-off-report.json
 ```
 
-A successful incentives-off report has `ok: true`, two adjacent selected ranges, at least two distinct selected peer IDs and participant owners, verified relay transport, matching per-hop timing, generated tokens, and no receipt submissions. Preserve it as the base inference result. Only after that report passes should both repository-root `.env` files be changed to `DISTRIBLLM_INCENTIVES_MODE=shadow`, the managed backends restarted, and the relay capture repeated. The shadow report additionally requires zero pending submissions and an increase in accepted shadow receipts during generation.
+A successful incentives-off report has `ok: true`, two adjacent selected ranges, at least two distinct selected peer IDs and participant owners, verified relay transport, matching per-hop timing, at least eight generated tokens, session protocol version one, positive prefill/decode/cache metrics, and no receipt submissions. This single bound run supplies the complementary relay and Sprint 31 session baseline. Preserve it as the base inference result. Only after that report passes should both repository-root `.env` files be changed to `DISTRIBLLM_INCENTIVES_MODE=shadow`, the managed backends restarted, and the relay capture repeated. The shadow report additionally requires zero pending submissions and an increase in accepted shadow receipts during generation.
 
 Hash the preserved report and put that exact digest in
 `topologies.incentives_off.evidence_sha256` in the Sprint 32 architecture

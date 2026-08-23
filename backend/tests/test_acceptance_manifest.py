@@ -117,7 +117,7 @@ def relay_probe() -> dict:
 
 
 def inference_report(mode: str, incentives_mode: str = "shadow") -> dict:
-    return {
+    report = {
         "schema_version": 1,
         "validated_at": (
             "2026-08-13T00:00:00+00:00"
@@ -146,6 +146,28 @@ def inference_report(mode: str, incentives_mode: str = "shadow") -> dict:
         "standby_nonpayment_verified": [],
         "errors": [],
     }
+    if incentives_mode == "off":
+        report.update(
+            {
+                "min_generated_tokens": 8,
+                "session_required": True,
+                "session_evidence": [
+                    {
+                        "participant": "device-b",
+                        "session_protocol_version": 1,
+                        "session_prefill_bytes": 4096,
+                        "session_decode_bytes": 7168,
+                        "session_prefill_duration_ms": 10.0,
+                        "session_decode_duration_ms_total": 70.0,
+                        "session_average_decode_ms": 10.0,
+                        "session_decode_calls": 7,
+                        "session_peak_provider_cache_bytes": 8192,
+                        "session_rebuilds": 0,
+                    }
+                ],
+            }
+        )
+    return report
 
 
 def validate(**overrides) -> dict:
@@ -315,6 +337,19 @@ class AcceptanceManifestTests(unittest.TestCase):
         self.assertIn(
             "Incentives-off relay evidence was not validated before shadow relay evidence",
             rejected_order["errors"],
+        )
+
+        missing_session = inference_report("relay", "off")
+        missing_session["session_evidence"] = []
+        rejected_session = validate(
+            architecture_report=architecture,
+            incentives_off_report=missing_session,
+            incentives_off_report_sha256="b" * 64,
+        )
+        self.assertFalse(rejected_session["ok"])
+        self.assertIn(
+            "Incentives-off relay report has no session evidence",
+            rejected_session["errors"],
         )
 
     def test_malformed_numeric_evidence_becomes_errors_instead_of_exceptions(self) -> None:

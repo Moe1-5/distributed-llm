@@ -198,7 +198,7 @@
 | `backend/architecture_acceptance.py` | Validates redundant infrastructure, controlled failures, protocol revisions, topology evidence, and rollout ordering. |
 | `backend/control_service_validate.py` | Validates coordinator/settlement component health, revisions, failure domain, logs, and restart evidence. |
 | `backend/acceptance_evidence.py` | Captures sanitized participant evidence and validates two-device route, transport, timing, receipts, ownership, and optional standby non-payment. |
-| `backend/acceptance_manifest.py` | Cross-validates packaged Windows, VPS restart, bound relay probe, relay/direct inference, hash-bound incentives-off ordering, and architecture artifacts while preserving manual approval gates. |
+| `backend/acceptance_manifest.py` | Cross-validates packaged Windows, VPS restart, bound relay probe, relay/direct inference, hash-bound incentives-off session ordering, and architecture artifacts while preserving manual approval gates. |
 | `backend/local_split_probe.py` | Runs cached-model local split inference through two real Hivemind serving peers and records parity, accounting, and cleanup evidence. |
 | `backend/tinyllama_performance_probe.py` | Runs a bounded cached TinyLlama distributed timing, accounting, resource, and cleanup baseline. |
 | `backend/relay_probe.py` | Minimal Hivemind-only circuit-relay reservation probe for Sprint 16 diagnostics.     |
@@ -212,7 +212,7 @@
 | `backend/tests/test_sprint14_output_and_visibility.py` | Sprint 14 chat-template, context-aware streaming, and local lifecycle visibility regressions. |
 | `backend/tests/test_useful_work_incentives.py` | Receipt signatures and commitments, RPC wrapper, settlement abuse rejection, durability, concurrency, pagination, and rollout-mode regressions. |
 | `backend/tests/test_acceptance_evidence.py` | Evidence sanitization, route ownership, relay validation, replica selection, receipt deltas, and standby non-payment regressions. |
-| `backend/tests/test_acceptance_manifest.py` | Cross-sprint artifact compatibility, VPS/probe binding, off-mode evidence binding, version mismatch, manual-gate, and private-output regressions. |
+| `backend/tests/test_acceptance_manifest.py` | Cross-sprint artifact compatibility, VPS/probe binding, off-mode session evidence binding, version mismatch, manual-gate, and private-output regressions. |
 | `backend/tests/test_architecture_acceptance.py` | Independent failure-domain, protocol-binding, topology-redundancy, rollout-order, and private evidence regressions. |
 | `backend/tests/test_infrastructure_config.py` | Ordered and duplicate participant infrastructure configuration state regressions. |
 | `backend/tests/test_control_service_validate.py` | Coordinator/settlement health, protocol drift, log, and restart evidence regressions. |

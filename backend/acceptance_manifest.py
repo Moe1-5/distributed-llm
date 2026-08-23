@@ -53,6 +53,15 @@ def _valid_sha256(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
+def _positive_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and value > 0
+    )
+
+
 def _utc_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -245,6 +254,7 @@ def _validate_inference_report(
     model_name: str,
     expected_mode: str,
     expected_incentives: str = "shadow",
+    require_session: bool = False,
 ) -> tuple[list[str], dict[str, Any]]:
     errors: list[str] = []
     if report.get("schema_version") != 1:
@@ -259,6 +269,45 @@ def _validate_inference_report(
         errors.append(
             f"{label} report does not validate {expected_incentives} incentives"
         )
+    raw_session_evidence = report.get("session_evidence")
+    session_evidence = (
+        [dict(item) for item in raw_session_evidence if isinstance(item, Mapping)]
+        if isinstance(raw_session_evidence, list)
+        else []
+    )
+    if require_session:
+        if report.get("session_required") is not True:
+            errors.append(f"{label} report did not require session evidence")
+        if _integer(report.get("min_generated_tokens")) is None or _integer(
+            report.get("min_generated_tokens")
+        ) < 8:
+            errors.append(f"{label} report did not require at least eight tokens")
+        if not session_evidence:
+            errors.append(f"{label} report has no session evidence")
+        for item in session_evidence:
+            participant = str(item.get("participant", "unknown"))
+            if item.get("session_protocol_version") != 1:
+                errors.append(
+                    f"{label} session for {participant} did not use protocol version one"
+                )
+            for field in (
+                "session_prefill_bytes",
+                "session_decode_bytes",
+                "session_prefill_duration_ms",
+                "session_decode_duration_ms_total",
+                "session_average_decode_ms",
+                "session_decode_calls",
+                "session_peak_provider_cache_bytes",
+            ):
+                if not _positive_number(item.get(field)):
+                    errors.append(
+                        f"{label} session for {participant} has invalid {field}"
+                    )
+            rebuilds = _integer(item.get("session_rebuilds"))
+            if rebuilds is None or rebuilds < 0:
+                errors.append(
+                    f"{label} session for {participant} has invalid session_rebuilds"
+                )
 
     participants = _string_list(report.get("participants"))
     if len(set(participants)) < 2:
@@ -289,6 +338,9 @@ def _validate_inference_report(
     return errors, {
         "participants": participants,
         "expected_incentives": report.get("expected_incentives"),
+        "session_required": report.get("session_required") is True,
+        "min_generated_tokens": _integer(report.get("min_generated_tokens")),
+        "session_evidence": session_evidence,
         "selected_route": [
             {
                 "peer_id": item.get("peer_id"),
@@ -364,6 +416,7 @@ def validate_acceptance_set(
                 model_name=model_name,
                 expected_mode="relay",
                 expected_incentives="off",
+                require_session=True,
             )
             errors.extend(off_errors)
             if set(incentives_off_summary["participants"]) != set(

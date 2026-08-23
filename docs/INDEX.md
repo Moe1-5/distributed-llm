@@ -22,7 +22,7 @@
 | System analysis and finalization | `SYSTEM_CODE_ANALYSIS_AND_FINALIZATION_REPORT.md` | Full source, runtime, security, deployment, validation, incentive-outage, and final desktop readiness audit |
 | Windows managed WSL packaging | `WINDOWS_MANAGED_WSL_PACKAGING.md` | Sprint 15 packaging boundary, managed distro strategy, launcher contract, sanitized acceptance report, and clean-Windows runbook |
 | Useful-work incentives | `USEFUL_WORK_INCENTIVES.md` | Signed receipt protocol, SQLite settlement rules, read-only credits, VPS rollout, and remaining two-device acceptance |
-| Two-device acceptance evidence | `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized incentives-off-first relay/direct captures, Windows and VPS artifact assembly, hash-bound off-to-shadow validation, complete-route checks, standby non-payment, and manual gates |
+| Two-device acceptance evidence | `TWO_DEVICE_ACCEPTANCE_EVIDENCE.md` | Sanitized incentives-off-first relay/direct captures, Windows and VPS artifact assembly, hash-bound session and off-to-shadow validation, complete-route checks, standby non-payment, and manual gates |
 | Local split acceptance | `LOCAL_SPLIT_ACCEPTANCE.md` | One-command real two-peer OPT split inference, parity, accounting, cleanup, and recorded evidence |
 | TinyLlama performance baseline | `TINYLLAMA_PERFORMANCE_BASELINE.md` | Bounded real distributed timing probe and the current Transformers chat-template compatibility blocker |
 | Errors and debugging | `ERRORS_AND_DEBUGGING.md` | Current OAuth, model access, CUDA/RAM, bootstrap, bounded RPC/reset diagnosis, route, and trace troubleshooting |

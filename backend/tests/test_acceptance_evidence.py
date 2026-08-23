@@ -288,6 +288,52 @@ class ValidateEvidenceTests(unittest.TestCase):
             [(0, 6), (6, 12)],
         )
 
+    def test_required_session_evidence_is_preserved_and_validated(self) -> None:
+        first = evidence("device-a")
+        second = evidence("device-b", run_generation=True)
+        second["generation"]["performance"].update(
+            {
+                "session_protocol_version": 1,
+                "session_prefill_bytes": 4096,
+                "session_decode_bytes": 2048,
+                "session_prefill_duration_ms": 10.0,
+                "session_decode_duration_ms_total": 20.0,
+                "session_average_decode_ms": 10.0,
+                "session_decode_calls": 2,
+                "session_peak_provider_cache_bytes": 8192,
+                "session_rebuilds": 0,
+            }
+        )
+
+        report = validate_evidence(
+            [first, second],
+            model_name="facebook/opt-125m",
+            expected_mode="relay",
+            expected_incentives="shadow",
+            min_generated_tokens=2,
+            require_session=True,
+        )
+
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertTrue(report["session_required"])
+        self.assertEqual(report["min_generated_tokens"], 2)
+        self.assertEqual(report["session_evidence"][0]["session_decode_calls"], 2)
+
+        second["generation"]["performance"]["session_protocol_version"] = None
+        rejected = validate_evidence(
+            [first, second],
+            model_name="facebook/opt-125m",
+            expected_mode="relay",
+            expected_incentives="shadow",
+            min_generated_tokens=2,
+            require_session=True,
+        )
+        self.assertFalse(rejected["ok"])
+        self.assertIn(
+            "session protocol version one was not used",
+            "\n".join(rejected["errors"]),
+        )
+
     def test_incomplete_wrong_mode_and_unsettled_evidence_fails(self) -> None:
         first = evidence("device-a")
         second = evidence("device-b", run_generation=True)

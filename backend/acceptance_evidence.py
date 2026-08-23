@@ -624,6 +624,8 @@ def validate_evidence(
     expected_mode: str,
     expected_incentives: str,
     min_route_peers: int = 2,
+    min_generated_tokens: int = 1,
+    require_session: bool = False,
     standby_before: Mapping[str, Any] | None = None,
     standby_after: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -633,6 +635,8 @@ def validate_evidence(
         raise EvidenceError("expected_incentives is invalid")
     if min_route_peers <= 0:
         raise EvidenceError("min_route_peers must be positive")
+    if min_generated_tokens <= 0:
+        raise EvidenceError("min_generated_tokens must be positive")
     if (standby_before is None) != (standby_after is None):
         raise EvidenceError("Both standby before and after evidence are required")
     errors: list[str] = []
@@ -642,6 +646,7 @@ def validate_evidence(
     generation_documents: list[Mapping[str, Any]] = []
     local_owners: dict[str, set[str]] = {}
     serving_plans: list[Mapping[str, Any]] = []
+    session_evidence: list[dict[str, Any]] = []
 
     if len(documents) < 2:
         errors.append("At least two participant evidence files are required")
@@ -822,8 +827,12 @@ def validate_evidence(
             continue
         if generation.get("error"):
             errors.append(f"{label}: generation returned an error")
-        if not _positive_number(generation.get("tokens_generated")):
-            errors.append(f"{label}: generation produced no tokens")
+        generated_tokens = _integer(generation.get("tokens_generated"))
+        if generated_tokens < min_generated_tokens:
+            errors.append(
+                f"{label}: generation produced {generated_tokens} tokens; "
+                f"requires at least {min_generated_tokens}"
+            )
         if not isinstance(generation.get("node_trace"), list) or not generation.get("node_trace"):
             errors.append(f"{label}: generation route trace is empty")
         performance = generation.get("performance")
@@ -835,6 +844,38 @@ def validate_evidence(
                 errors.append(f"{label}: {field} is missing or non-positive")
         if performance.get("time_to_first_token_ms") is None:
             errors.append(f"{label}: time_to_first_token_ms is missing")
+        if require_session:
+            session = _pick(
+                performance,
+                (
+                    "session_protocol_version",
+                    "session_prefill_bytes",
+                    "session_decode_bytes",
+                    "session_prefill_duration_ms",
+                    "session_decode_duration_ms_total",
+                    "session_average_decode_ms",
+                    "session_decode_calls",
+                    "session_peak_provider_cache_bytes",
+                    "session_rebuilds",
+                ),
+            )
+            session["participant"] = label
+            session_evidence.append(session)
+            if session.get("session_protocol_version") != 1:
+                errors.append(f"{label}: session protocol version one was not used")
+            for field in (
+                "session_prefill_bytes",
+                "session_decode_bytes",
+                "session_prefill_duration_ms",
+                "session_decode_duration_ms_total",
+                "session_average_decode_ms",
+                "session_decode_calls",
+                "session_peak_provider_cache_bytes",
+            ):
+                if not _positive_number(session.get(field)):
+                    errors.append(f"{label}: {field} is missing or non-positive")
+            if _integer(session.get("session_rebuilds"), -1) < 0:
+                errors.append(f"{label}: session_rebuilds is missing or negative")
         hops = performance.get("hop_metrics")
         if not isinstance(hops, list) or len(hops) < len(route):
             errors.append(f"{label}: per-hop timing evidence is incomplete")
@@ -901,6 +942,9 @@ def validate_evidence(
         "model_name": model_name,
         "expected_mode": expected_mode,
         "expected_incentives": expected_incentives,
+        "min_generated_tokens": min_generated_tokens,
+        "session_required": require_session,
+        "session_evidence": session_evidence,
         "participants": participants,
         "selected_route": [
             _pick(node, ("peer_id", "layer_start", "layer_end", "connection_mode"))
@@ -949,6 +993,8 @@ def _parser() -> argparse.ArgumentParser:
         default="any",
     )
     validate.add_argument("--min-route-peers", type=int, default=2)
+    validate.add_argument("--min-generated-tokens", type=int, default=1)
+    validate.add_argument("--require-session", action="store_true")
     validate.add_argument("--standby-before", type=Path)
     validate.add_argument("--standby-after", type=Path)
     validate.add_argument("--output", type=Path)
@@ -988,6 +1034,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_mode=args.expected_mode,
             expected_incentives=args.expected_incentives,
             min_route_peers=args.min_route_peers,
+            min_generated_tokens=args.min_generated_tokens,
+            require_session=args.require_session,
             standby_before=standby_documents[0] if standby_documents else None,
             standby_after=standby_documents[1] if standby_documents else None,
         )

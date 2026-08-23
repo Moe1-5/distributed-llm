@@ -85,3 +85,9 @@ Run this only after both devices and the VPS use the same committed source and t
 - Observability: correlated client/provider logs and Monitoring now show protocol version, prefill/decode bytes and duration, average decode latency, peak provider cache use, active sessions, evictions, admission rejections, and rebuild count. Acceptance artifacts whitelist these metrics.
 - Verification: 432 backend tests pass, including OPT cached/stateless output parity, constant decode input size, limits, expiry/eviction, unload, exact route lifecycle, safe rebuild, ambiguous no-replay, generator integration, and a real local Hivemind 1.1.12 session RPC. Frontend type checks, 20 launcher tests, four renderer-flow tests, production build, and lint with zero errors also pass; 81 pre-existing formatting warnings remain. The packaged physical test is still open.
 - Status: source implementation is complete; do not close this sprint until the two-device relayed gate above passes and the user explicitly requests closure.
+
+### 2026-08-23 - Make physical session evidence machine-verifiable
+
+- What changed: added an acceptance validator mode that requires a minimum generated-token count and preserves and validates session protocol version, prefill bytes and duration, decode bytes, duration, average latency and call count, peak provider cache bytes, and rebuild count; made the final architecture manifest require this session evidence in the hash-bound incentives-off relay report.
+- Why: diagnostics captured the session fields, but the prior combined report discarded them and allowed the Sprint 31 topology gate to rely only on an operator-entered matrix hash.
+- Status: twenty-two focused evidence and manifest tests and all 451 backend tests pass. The validator now rejects missing or invalid session metrics; a real two-device relayed session is still required before this sprint can close.
