@@ -724,6 +724,32 @@ class RemoteSequentialSessionTests(unittest.TestCase):
         self.assertEqual(preparation["status"], "prepared")
         self.assertEqual(preparation["route_id"], opened["route_id"])
 
+    def test_missing_session_capability_records_the_rejected_hop(self) -> None:
+        """A physical capability mismatch must be diagnosable without prompt data."""
+        incomplete = [dict(node) for node in self.route]
+        incomplete[1].pop("session_rpc_uid")
+        self.sequential._discover_nodes = lambda: [dict(node) for node in incomplete]
+        self.sequential._eligible_attempt_routes = lambda _plan: [
+            {"route": [dict(node) for node in incomplete]}
+        ]
+        self.sequential.start_session("session-capability-diagnostic")
+
+        prepared = self.sequential.prepare_remote_session_route(16)
+
+        self.assertIsNone(prepared)
+        preparation = self.sequential.get_last_session_preparation()
+        self.assertEqual(
+            preparation["reason"], "no_compatible_complete_session_route"
+        )
+        self.assertEqual(preparation["topology_source"], "direct_dht")
+        self.assertEqual(preparation["discovered_provider_count"], 2)
+        evaluation = preparation["candidate_evaluations"][0]
+        self.assertFalse(evaluation["eligible"])
+        self.assertEqual(evaluation["hops"][1]["layer_start"], 1)
+        self.assertEqual(
+            evaluation["hops"][1]["rejection_reasons"], ["session_rpc_uid"]
+        )
+
     def test_preflight_failure_is_safe_but_dispatched_failure_is_ambiguous(self) -> None:
         self.sequential.start_session("session-failure")
         with patch(

@@ -949,13 +949,7 @@ class RemoteSequential:
         return [
             candidate
             for candidate in self._eligible_attempt_routes(plan)
-            if all(
-                int(node.get("session_protocol_version", 0))
-                == SESSION_PROTOCOL_VERSION
-                and bool(str(node.get("session_rpc_uid", "")).strip())
-                and (hidden_size <= 0 or int(node.get("session_hidden_size", 0)) == hidden_size)
-                for node in candidate["route"]
-            )
+            if self._session_route_evaluation(candidate["route"], hidden_size)["eligible"]
             and (
                 excluded_route_id is None
                 or self._session_route_digest(candidate["route"]) != excluded_route_id
@@ -968,6 +962,54 @@ class RemoteSequential:
                 )
             )
         ]
+
+    def _session_route_evaluation(self, route: list[dict], hidden_size: int) -> dict:
+        """Describe session-v1 eligibility without hiding a rejected hop.
+
+        A complete tensor route and a complete session route have distinct
+        contracts.  Retain this prompt-free evaluation in diagnostics so an
+        operator can see whether a candidate was absent, missing a session
+        endpoint, or advertised an incompatible tensor shape.
+        """
+        hops: list[dict] = []
+        eligible = True
+        for node in route:
+            protocol_value = node.get("session_protocol_version")
+            hidden_value = node.get("session_hidden_size")
+            try:
+                protocol_version = int(protocol_value)
+            except (TypeError, ValueError):
+                protocol_version = None
+            try:
+                session_hidden_size = int(hidden_value)
+            except (TypeError, ValueError):
+                session_hidden_size = None
+            has_session_rpc = bool(str(node.get("session_rpc_uid", "")).strip())
+            reasons: list[str] = []
+            if protocol_version != SESSION_PROTOCOL_VERSION:
+                reasons.append("session_protocol_version")
+            if not has_session_rpc:
+                reasons.append("session_rpc_uid")
+            if hidden_size > 0 and session_hidden_size != hidden_size:
+                reasons.append("session_hidden_size")
+            if reasons:
+                eligible = False
+            hops.append(
+                {
+                    "peer_id": str(node.get("peer_id", "")),
+                    "layer_start": int(node.get("layer_start", 0)),
+                    "layer_end": int(node.get("layer_end", 0)),
+                    "session_protocol_version": protocol_version,
+                    "session_rpc_uid_present": has_session_rpc,
+                    "session_hidden_size": session_hidden_size,
+                    "rejection_reasons": reasons,
+                }
+            )
+        return {
+            "route_id": self._session_route_digest(route),
+            "eligible": eligible,
+            "hops": hops,
+        }
 
     def prepare_remote_session_route(
         self,
@@ -1004,12 +1046,27 @@ class RemoteSequential:
             }
             return None
 
-        candidates = self._session_route_candidates(
-            plan,
-            hidden_size,
-            excluded_route_id=excluded_route_id,
-            excluded_peer_ids=excluded_peer_ids,
-        )
+        eligible_attempts = self._eligible_attempt_routes(plan)
+        candidate_evaluations = [
+            self._session_route_evaluation(candidate["route"], hidden_size)
+            for candidate in eligible_attempts
+        ]
+        candidates = [
+            candidate
+            for candidate, evaluation in zip(eligible_attempts, candidate_evaluations)
+            if evaluation["eligible"]
+            and (
+                excluded_route_id is None
+                or evaluation["route_id"] != excluded_route_id
+            )
+            and not (
+                excluded_peer_ids
+                and any(
+                    str(node.get("peer_id", "")) in excluded_peer_ids
+                    for node in candidate["route"]
+                )
+            )
+        ]
         candidate_route_ids = [
             self._session_route_digest(candidate["route"])
             for candidate in candidates
@@ -1021,6 +1078,13 @@ class RemoteSequential:
                 "coverage_revision": plan.get("coverage_revision"),
                 "health_revision": plan.get("health_revision"),
                 "candidate_route_ids": candidate_route_ids,
+                "candidate_evaluations": candidate_evaluations,
+                "topology_source": (
+                    "supervisor_snapshot"
+                    if self.topology_provider is not None
+                    else "direct_dht"
+                ),
+                "discovered_provider_count": len(nodes),
             }
             return None
 
@@ -1046,6 +1110,13 @@ class RemoteSequential:
                 "coverage_revision": plan.get("coverage_revision"),
                 "health_revision": plan.get("health_revision"),
                 "candidate_route_ids": candidate_route_ids,
+                "candidate_evaluations": candidate_evaluations,
+                "topology_source": (
+                    "supervisor_snapshot"
+                    if self.topology_provider is not None
+                    else "direct_dht"
+                ),
+                "discovered_provider_count": len(nodes),
                 "preflight_rejections": preflight_errors,
                 "route": [
                     {
@@ -1073,6 +1144,13 @@ class RemoteSequential:
             "coverage_revision": plan.get("coverage_revision"),
             "health_revision": plan.get("health_revision"),
             "candidate_route_ids": candidate_route_ids,
+            "candidate_evaluations": candidate_evaluations,
+            "topology_source": (
+                "supervisor_snapshot"
+                if self.topology_provider is not None
+                else "direct_dht"
+            ),
+            "discovered_provider_count": len(nodes),
             "preflight_rejections": preflight_errors,
         }
         return None
@@ -1581,10 +1659,13 @@ class RemoteSequential:
     def _session_route_digest(route: list[dict]) -> str:
         payload = [
             {
-                "peer_id": str(node["peer_id"]),
-                "rpc_uid": str(node["session_rpc_uid"]),
-                "layer_start": int(node["layer_start"]),
-                "layer_end": int(node["layer_end"]),
+                # Keep the digest total for diagnostics too: an incomplete
+                # DHT advertisement must produce an actionable rejection, not
+                # fail while trying to fingerprint its route.
+                "peer_id": str(node.get("peer_id", "")),
+                "rpc_uid": str(node.get("session_rpc_uid", "")),
+                "layer_start": int(node.get("layer_start", 0)),
+                "layer_end": int(node.get("layer_end", 0)),
             }
             for node in route
         ]
