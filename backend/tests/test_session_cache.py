@@ -881,6 +881,79 @@ class RemoteSequentialSessionTests(unittest.TestCase):
                 [call["operation"] for call in experts[node["peer_id"]].calls],
             )
 
+    def test_rebuild_reopens_only_route_after_confirmed_cleanup(self) -> None:
+        """A clean cancel permits fresh clients to reuse a sole complete route."""
+        experts = {
+            node["peer_id"]: FakeSessionExpert()
+            for node in self.route
+        }
+
+        def resolve(_dht, _uid, peer_id, rpc_role="normal"):
+            self.assertEqual(rpc_role, "session")
+            return experts[peer_id]
+
+        self.sequential.start_session("session-single-route-rebuild")
+        with patch("client.sequential.get_ready_peer_expert", side_effect=resolve):
+            opened = self.sequential.open_remote_session(16)
+            rebuilt, _trace = self.sequential.rebuild_remote_session(
+                torch.zeros((1, 4, 16)),
+                hidden_size=16,
+                attention_mask=torch.ones((1, 4), dtype=torch.bool),
+                position_ids=torch.arange(4).unsqueeze(0),
+            )
+
+        metrics = self.sequential.get_last_session_metrics()
+        self.assertEqual(opened["route_id"], metrics["route_id"])
+        self.assertTrue(metrics["rebuilt"])
+        self.assertTrue(metrics["cleanup_complete"])
+        self.assertTrue(metrics["reused_previous_route"])
+        self.assertTrue(torch.equal(rebuilt, torch.full_like(rebuilt, 2)))
+        for node in self.route:
+            operations = [
+                call["operation"] for call in experts[node["peer_id"]].calls
+            ]
+            self.assertEqual(operations.count("open"), 2)
+            self.assertIn("cancel", operations)
+            self.assertIn("prefill", operations)
+
+    def test_rebuild_does_not_reuse_route_after_incomplete_cleanup(self) -> None:
+        """A failed cancel keeps a sole previous route excluded."""
+        experts = {
+            node["peer_id"]: FakeSessionExpert()
+            for node in self.route
+        }
+
+        def resolve(_dht, _uid, peer_id, rpc_role="normal"):
+            self.assertEqual(rpc_role, "session")
+            return experts[peer_id]
+
+        self.sequential.start_session("session-incomplete-cleanup")
+        with patch("client.sequential.get_ready_peer_expert", side_effect=resolve):
+            self.sequential.open_remote_session(16)
+
+            def incomplete_cleanup(*, cancelled=False):
+                self.sequential._remote_session_open = False
+                return {"closed": False, "cancelled": cancelled, "errors": ["reset"]}
+
+            with patch.object(
+                self.sequential,
+                "close_remote_session",
+                side_effect=incomplete_cleanup,
+            ):
+                with self.assertRaises(SessionPreDispatchError):
+                    self.sequential.rebuild_remote_session(
+                        torch.zeros((1, 4, 16)),
+                        hidden_size=16,
+                        attention_mask=torch.ones((1, 4), dtype=torch.bool),
+                        position_ids=torch.arange(4).unsqueeze(0),
+                    )
+
+        for node in self.route:
+            operations = [
+                call["operation"] for call in experts[node["peer_id"]].calls
+            ]
+            self.assertEqual(operations, ["open"])
+
 
 class FakeTokenizer:
     eos_token_id = 999

@@ -1518,12 +1518,30 @@ class RemoteSequential:
         self._session_route_id = None
         self._session_position = 0
         self._last_session_metrics = {}
-        self.open_remote_session(
-            hidden_size,
-            cancel_event,
-            excluded_route_id=previous_route_id,
-            excluded_peer_ids=excluded_peers,
-        )
+        cleanup_complete = bool(cleanup.get("closed", False))
+        try:
+            # Prefer a genuinely different route after a pre-dispatch failure.
+            # If none exists, a fully cancelled old session makes it safe to
+            # create fresh exact-peer clients and reopen the same route.  Never
+            # reuse it when cleanup is incomplete: a provider may still retain
+            # ambiguous session state in that case.
+            self.open_remote_session(
+                hidden_size,
+                cancel_event,
+                excluded_route_id=previous_route_id,
+                excluded_peer_ids=excluded_peers,
+            )
+        except SessionPreDispatchError:
+            if not cleanup_complete:
+                raise
+            logger.warning(
+                "No alternate session route is ready after clean cancellation; "
+                "retrying the previous exact route | request=%s session=%s route=%s",
+                self._session_request_id,
+                self._session_id,
+                previous_route_id,
+            )
+            self.open_remote_session(hidden_size, cancel_event)
         logger.warning(
             "Rebuilding remote session from known history | request=%s session=%s "
             "previous_route=%s positions=%s cleanup_complete=%s",
@@ -1544,7 +1562,8 @@ class RemoteSequential:
             **self._last_session_metrics,
             "rebuilt": True,
             "previous_route_id": previous_route_id,
-            "cleanup_complete": bool(cleanup.get("closed", False)),
+            "cleanup_complete": cleanup_complete,
+            "reused_previous_route": self._session_route_id == previous_route_id,
         }
         return output, trace
 
