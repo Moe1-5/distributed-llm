@@ -724,6 +724,41 @@ class RemoteSequentialSessionTests(unittest.TestCase):
         self.assertEqual(preparation["status"], "prepared")
         self.assertEqual(preparation["route_id"], opened["route_id"])
 
+    def test_session_reuses_opened_exact_experts_for_every_decode(self) -> None:
+        """Per-token forwarding must not repeat exact-peer discovery or rpc_info."""
+        experts = {
+            "peer-one": FakeSessionExpert(),
+            "peer-two": FakeSessionExpert(),
+        }
+        resolutions: list[str] = []
+
+        def resolve(_dht, _uid, peer_id, rpc_role="normal"):
+            self.assertEqual(rpc_role, "session")
+            resolutions.append(peer_id)
+            return experts[peer_id]
+
+        self.sequential.start_session("session-retained-experts")
+        with patch("client.sequential.get_ready_peer_expert", side_effect=resolve):
+            self.sequential.open_remote_session(16)
+            self.sequential.session_forward(
+                torch.zeros((1, 3, 16)),
+                operation="prefill",
+                attention_mask=torch.ones((1, 3), dtype=torch.bool),
+                position_ids=torch.arange(3).unsqueeze(0),
+            )
+            for position in range(3, 8):
+                self.sequential.session_forward(
+                    torch.zeros((1, 1, 16)),
+                    operation="decode",
+                    attention_mask=torch.ones((1, 1), dtype=torch.bool),
+                    position_ids=torch.tensor([[position]]),
+                )
+            closed = self.sequential.close_remote_session()
+
+        self.assertTrue(closed["closed"])
+        self.assertEqual(resolutions, ["peer-one", "peer-two"])
+        self.assertIsNone(self.sequential._session_experts)
+
     def test_missing_session_capability_records_the_rejected_hop(self) -> None:
         """A physical capability mismatch must be diagnosable without prompt data."""
         incomplete = [dict(node) for node in self.route]

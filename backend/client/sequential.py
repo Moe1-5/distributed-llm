@@ -322,6 +322,7 @@ class RemoteSequential:
         self._last_forward_metrics: dict = {}
         self._session_id: Optional[str] = None
         self._session_route: Optional[list[dict]] = None
+        self._session_experts: Optional[list[RemoteExpert]] = None
         self._session_snapshot_revision: Optional[tuple[str, str]] = None
         self._session_nodes: Optional[list[dict]] = None
         self._remote_session_open = False
@@ -901,6 +902,7 @@ class RemoteSequential:
     def start_session(self, session_id: Optional[str] = None) -> str:
         self._session_id = session_id or str(uuid4())
         self._session_route = None
+        self._session_experts = None
         self._session_snapshot_revision = None
         self._session_nodes = None
         self._remote_session_open = False
@@ -915,6 +917,7 @@ class RemoteSequential:
     def end_session(self) -> None:
         self._session_id = None
         self._session_route = None
+        self._session_experts = None
         self._session_snapshot_revision = None
         self._session_nodes = None
         self._remote_session_open = False
@@ -1248,6 +1251,7 @@ class RemoteSequential:
             ) from exc
 
         self._session_route = selected_route
+        self._session_experts = experts
         self._session_nodes = [dict(node) for node in nodes]
         self._session_snapshot_revision = (
             str(snapshot.get("coverage_revision", "")),
@@ -1293,12 +1297,11 @@ class RemoteSequential:
         token_count = int(hidden_states.shape[1])
         operation_id = f"{operation}-{self._session_position}-{uuid4().hex}"
         self._raise_if_cancelled(cancel_event)
-        try:
-            experts = self._preflight_session_route(self._session_route)
-        except Exception as exc:
+        experts = list(self._session_experts or [])
+        if len(experts) != len(self._session_route):
             raise SessionPreDispatchError(
-                f"Session route failed before {operation} dispatch: {exc}"
-            ) from exc
+                f"Session route lost its exact-peer handles before {operation} dispatch"
+            )
 
         started_at = time.perf_counter()
         initial_bytes = sum(
@@ -1381,6 +1384,8 @@ class RemoteSequential:
                             }
                         )
                     else:
+                        if self._session_experts is not None:
+                            self._session_experts[hop_index] = replay_expert
                         recovery.update(
                             {
                                 "succeeded": True,
@@ -1513,6 +1518,7 @@ class RemoteSequential:
             else None
         )
         self._session_route = None
+        self._session_experts = None
         self._session_nodes = None
         self._session_snapshot_revision = None
         self._session_route_id = None
@@ -1569,18 +1575,24 @@ class RemoteSequential:
 
     def close_remote_session(self, *, cancelled: bool = False) -> dict:
         if not self._remote_session_open or self._session_route is None:
+            self._session_experts = None
             return {"closed": True, "idempotent_replay": True}
         route = [dict(node) for node in self._session_route]
+        retained_experts = list(self._session_experts or [])
         route_id = self._session_route_id
         results: list[dict] = []
         errors: list[str] = []
         for hop_index, node in enumerate(route):
             try:
-                expert = get_ready_peer_expert(
-                    self.dht,
-                    str(node["session_rpc_uid"]),
-                    str(node["peer_id"]),
-                    rpc_role="session",
+                expert = (
+                    retained_experts[hop_index]
+                    if hop_index < len(retained_experts)
+                    else get_ready_peer_expert(
+                        self.dht,
+                        str(node["session_rpc_uid"]),
+                        str(node["peer_id"]),
+                        rpc_role="session",
+                    )
                 )
                 hidden_size = int(node["session_hidden_size"])
                 hidden = torch.zeros((1, 1, hidden_size), dtype=torch.float32)
@@ -1599,6 +1611,7 @@ class RemoteSequential:
             except Exception as exc:
                 errors.append(f"{str(node.get('peer_id', 'unknown'))[:8]}: {exc}")
         self._remote_session_open = False
+        self._session_experts = None
         return {
             "closed": not errors,
             "cancelled": cancelled,
