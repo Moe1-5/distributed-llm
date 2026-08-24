@@ -1,13 +1,21 @@
 # Current Two-Device Live-Test Issues And Production Roadmap
 
-**Report updated:** 2026-08-23
-**Latest physical evidence:** 2026-08-23
+**Report updated:** 2026-08-25
+**Latest physical evidence:** 2026-08-24
 **Branch:** `feature/distributed-runtime-architecture`
-**Latest physically tested source baseline:** `b468185d87cb2884497b177e84f761478406b9af`
+**Latest operator-reported physically tested source baseline:** `81a768a60f42c0a951e4c7ef78b7085d8a16a1bd`
 **Topology:** Windows Electron clients, WSL 2 participant backends, a public VPS bootstrap/circuit relay, and, for shadow runs, a loopback-only VPS settlement service reached through per-device SSH tunnels
-**Latest controlled test mode:** `off` for legacy Test A; deployment rollout remains `shadow`
+**Latest controlled test mode:** `off` for bidirectional session-v1 acceptance; deployment rollout remains `shadow`
 
 ## 1. Plain-Language Summary
+
+The latest incentives-off adjacent split test passed bidirectionally through the VPS relay after the session client began retaining its already validated exact-peer handles. Device 1 peer `QmT5GHzmzhfzN8z82jGx4CQqQebWMhaTYg6uSfTTNQrf4o` served `0-6`; Device 2 peer `QmUnY3NPijDnPzZeKgQcmMMbyyVfcXWsTLBp8gSqiMkDz3` served `6-12`. Device 1 and then Device 2 each generated 200 tokens through that route with session protocol version one.
+
+The direction-specific timing is physical ownership evidence. With Device 1 generating, local `0-6` averaged 28.54 milliseconds and remote `6-12` averaged 758.03 milliseconds. With Device 2 generating, remote `0-6` averaged 760.42 milliseconds and local `6-12` averaged 33.58 milliseconds. Both providers finished with five opened and five closed sessions, zero active sessions, five prefills, 586 decodes, and no RPC failures, rejections, or timeouts.
+
+Three ambiguous operation responses were recovered from the provider-retained exact-operation result: two at `0-6` and one at `6-12`. No session rebuild was required. This closes the repeated per-decode expert-resolution defect for the tested relayed session path; it does not yet prove incentives-shadow receipt settlement or a manually injected disjoint-standby failure.
+
+The rest of this report preserves the historical failures that led to the repair. Startup still produced recoverable renderer polling timeouts for serving plans, models, status, and generator status. Those are separate responsiveness/diagnostic findings under Sprints 23 and 27, not failures of the accepted session execution. The four schema-one diagnostic bundles do not themselves embed the packaged source commit or executable hash, so machine-verifiable artifact binding still requires the separate launcher acceptance report from Sprint 24.
 
 The latest retest proved that the independent observer could retrieve Device 2's complete `facebook/opt-125m` worker and both expert UIDs, and that Device 1 could validate the `0-12` route and complete a tensor canary through the VPS relay. The generator genuinely reached ready.
 
@@ -204,6 +212,14 @@ This is not a missing-coverage or discovery failure. Visible streamed output mea
 
 The same run exposed a separate serving-plan UI defect. Both devices could display `0-6` because the API intentionally returns an immediate local-only provisional plan while DHT discovery refreshes in the background, but the renderer ignored the existing stale/refreshing flags and drew that provisional recommendation as live. Repeated eight-second serving-plan request timeouts made the misleading range persist. The source implementation now marks snapshot source and age, hides and disables stale recommendations, records refresh failures, and requires a fresh completed DHT snapshot before Recommended can start a node. This prevents the observed stale-guidance path, but simultaneous participants can still choose the same fresh range before either publishes; sequential startup remains required until distributed range reservations exist.
 
+### 3.9 Retained session handles pass in both generator directions
+
+Four diagnostic bundles captured the repaired `0-6 -> 6-12` route before and after reversing the generator machine. The first direction completed two generation streams; the reverse direction completed three. Each final recorded generation produced 200 tokens with one prefill plus 199 one-position decode calls and no route rebuild.
+
+The provider counters are consistent across both machines: five sessions opened, five closed, none remained active, and both providers executed five prefills plus 586 decodes. The `6-12` provider served one retained exact-operation result during the first direction; after reversing the generator, the `0-6` provider had served two. Zero RPC requests failed, were rejected, or timed out at either selected provider.
+
+This outcome confirms that retaining the exact `RemoteExpert` objects established during session preparation removes the repeated per-token `rpc_info` discovery that had intermittently reset before decode dispatch. A fresh exact-peer handle remains limited to the fingerprint-bound ambiguous-operation recovery path.
+
 ## 4. What The Current Screens Mean
 
 ### Device 1 Nodes: `0 online`
@@ -230,25 +246,40 @@ Device 2 has no local generator, so it has no generator-side provider health mon
 
 | ID | Severity | Issue | Effect | Status |
 |---|---|---|---|---|
-| LT-01 | Critical | Generator-only discovery/start circular dependency | The UI disabled generator start before the generator DHT existed | Fix implemented; physical validation pending |
+| LT-01 | Critical | Generator-only discovery/start circular dependency | The UI disabled generator start before the generator DHT existed | Fix physically validated with generators on both devices |
 | LT-02 | Critical | Remote DHT and expert lease persistence failure | A valid route disappeared after approximately five minutes while the worker reported fresh local publication | Repair remained visible during the corrected failure window; full ten-window soak remains open |
 | LT-03 | High | Local publication success was treated as remote availability | Device 2 could present a healthy worker while Device 1 could not retrieve it | Remote acknowledgement and independent observer passed; managed production observation remains open |
 | LT-04 | High | Shared members index retained expired peers | Discovery saw member IDs whose per-peer metadata was already gone | Per-peer v2 leases implemented with legacy fallback |
 | LT-05 | High | Monitoring combined incompatible snapshots | It could show `100%` raw coverage and `Missing: 0-12` simultaneously | UI calculation fixed; physical validation pending |
 | LT-06 | Medium | Worker-only health said `RPC HEALTH UNKNOWN` | Operators could mistake “not probed” for RPC failure | Relabeled as lease state plus `NOT PROBED` |
-| LT-07 | Critical | A complete user generation is not accepted yet | Tensor canaries pass, but both shadow receipt generation and the controlled incentives-off legacy prompt end with an ambiguous stream reset | Confirmed common sustained relay-path blocker |
+| LT-07 | Critical | A complete user generation was not accepted | Earlier tensor canaries passed while sustained prompts reset | Resolved for incentives-off session-v1 relay generation; five bidirectional sessions completed |
 | LT-08 | High | Latest-run shadow receipt acceptance is not proven | No successful prompt means no final selected-work receipt | Open acceptance gate |
 | LT-09 | High | Settlement access uses manual participant SSH tunnels | Closing the tunnel makes local settlement unavailable | Test-only deployment limitation |
-| LT-10 | High | Portable EXE does not provision its backend | Every device still needs manual WSL, checkout, dependencies, configuration, and model setup | Packaging limitation |
+| LT-10 | High | Portable EXE did not provision its backend | Earlier devices needed a manual checkout and environment | Resolved with checksum-bound bundled runtime and isolated managed WSL environment |
 | LT-11 | Medium | Blank API database configuration can cause HTTP 500 | An empty path can resolve to a directory rather than a SQLite file | Workaround known; code/template fix open |
-| LT-12 | Medium | Runtime failure details were split across local and remote views | One machine alone could not distinguish local success from global visibility | Bounded renderer/backend diagnostic export implemented; packaged validation pending |
+| LT-12 | Medium | Runtime failure details were split across local and remote views | One machine alone could not distinguish local success from global visibility | Diagnostic export physically validated with four correlated bundles |
 | LT-13 | Critical | Worker transport recovery rotated its public peer ID | Loaded layers survived, but the generator's selected peer was replaced by a new identity | Peer remained stable during the latest failure; injected-recovery acceptance remains open |
 | LT-14 | High | Inference and Trace present contradictory or misleading state | READY/READY could coexist with stale route-waiting text, while Trace runs a legacy diagnostic behind an eight-second HTTP timeout and does not reproduce shadow chat's receipt RPC | Stale route text fixed in source; Trace redesign remains open in Sprint 27 |
 | LT-15 | High | Provisional serving plans were presented as live recommendations | Two devices could both auto-select `0-6` while remote discovery was refreshing or timing out | Freshness gate, source label, timeout retention, and disabled stale recommendation implemented; packaged validation pending |
+| LT-16 | Medium | Renderer polling requests time out during startup and sustained work | Serving-plan, model, status, and generator-status calls can show transient errors despite eventual recovery | Open responsiveness/diagnostic follow-up in Sprints 23 and 27 |
+| LT-17 | Medium | Runtime diagnostic bundles omit package identity | A successful runtime bundle cannot independently prove which executable and embedded commit produced it | Pair with the schema-four launcher acceptance report under Sprint 24 |
 
 ## 6. Confirmed Failure Boundary And Remaining Root-Cause Questions
 
 ### Current confirmed boundary
+
+The latest session-v1 build moves the accepted boundary through sustained bidirectional relay execution:
+
+```text
+both adjacent workers publish exact session experts
+  -> both generators discover the same complete 0-6 -> 6-12 route
+  -> exact-peer preparation opens one session per provider
+  -> retained peer handles carry prefill and bounded one-position decodes
+  -> fingerprint-bound retained results recover three ambiguous responses
+  -> five sessions close with zero active caches and no provider RPC failures
+```
+
+The older incentives-off stateless boundary below is retained as historical evidence. Shadow receipt settlement, startup polling responsiveness, direct-mode comparison, and manually injected alternate-route recovery remain separate gates.
 
 The incentives-off baseline moved the open failure beyond discovery, metadata health, and a one-position legacy canary:
 

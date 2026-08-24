@@ -1,12 +1,16 @@
 # Relay Receipt RPC Stream Reset Handoff
 
-**Date:** 2026-08-22
+**Date:** 2026-08-22; resolution evidence added 2026-08-25
 
 **Owner:** Sprint 22, with runtime-state follow-up in Sprint 25 and UI follow-up in Sprint 27
 
-**Status:** Full-provider and adjacent split generation both reset during sustained execution; the common transport path remains the primary boundary
+**Status:** Historical reset analysis retained; incentives-off session-v1 adjacent split now passes bidirectionally after exact-peer handle retention. Shadow receipt acceptance remains open.
 
 ## 1. Executive Summary
+
+Resolution update: source commit `81a768a60f42c0a951e4c7ef78b7085d8a16a1bd` retains the exact-peer `RemoteExpert` handles that prepared and opened a session instead of repeating expert discovery and `rpc_info` resolution before every prefill and decode. Four physical diagnostic bundles now prove five complete sessions through the relayed adjacent route in both generator directions. Both providers ended with five opens, five closes, zero active sessions, five prefills, 586 decodes, and zero RPC failures, rejections, or timeouts. Three ambiguous responses were recovered through the provider-retained, fingerprint-bound exact-operation result.
+
+Device 1 generated 200 tokens with its local `0-6` hop averaging 28.54 milliseconds and remote `6-12` averaging 758.03 milliseconds. Device 2 generated 200 tokens with remote `0-6` averaging 760.42 milliseconds and local `6-12` averaging 33.58 milliseconds. This inversion confirms that the generator role really moved between machines and both relay directions executed. The historical stateless and receipt failures below remain useful chronology; they are no longer the latest session-path result.
 
 The current two-device failure is no longer a discovery, DHT lease, clock, or worker-identity failure.
 
@@ -34,7 +38,9 @@ No speculative receipt-only change should be merged. The next isolation target i
 
 ## 2. Physical Topology And Tested Artifact
 
-The next untested acceptance candidate embeds source commit `232acb1bdcba5c7347a8f58aba056881115a8308` with a clean source flag. The portable EXE is 87,663,434 bytes with SHA-256 `0b6121de080fb5f16df53d9f47df95d39a5ff07cd99892eef1f0e2af23de89ee`; its package audit reports 36 ASAR entries and zero forbidden entries. Do not describe it as physically accepted until both devices run the procedure below.
+The operator reports that the accepted session-v1 candidate embeds source commit `81a768a60f42c0a951e4c7ef78b7085d8a16a1bd`. Its audited portable executable is 87,848,603 bytes with SHA-256 `67eccff5aae01905c57f2df1832ace2a623a13258fcacda3d0ece3c31c4f3c91`; the package audit found 38 ASAR entries, 65 manifest-bound backend runtime files, no forbidden entries, and embedded backend manifest SHA-256 `6d33ac0fa756ff71f0714e0bcb2ec2aea94722527392e1044cfa9b34c6683c7b`. The four runtime diagnostic bundles do not contain this commit or executable hash, so a separate schema-four launcher acceptance report is still required for independent package-to-run binding.
+
+An earlier untested acceptance candidate embedded source commit `232acb1bdcba5c7347a8f58aba056881115a8308` with a clean source flag. Its portable EXE was 87,663,434 bytes with SHA-256 `0b6121de080fb5f16df53d9f47df95d39a5ff07cd99892eef1f0e2af23de89ee`; its package audit reported 36 ASAR entries and zero forbidden entries. It was superseded by the accepted session-v1 candidate above.
 
 ```text
 Device 1: generator and Electron UI
@@ -233,8 +239,11 @@ The Test A Device 2 snapshot and VPS relay journal for the exact failure window 
 | One-position tensor canary | Passed | Legacy canary completed in approximately 2.26 seconds in Test A |
 | Real shadow prompt | Failed | Receipt expert ended in ambiguous `stream reset` |
 | Real incentives-off prompt | Failed | Legacy expert ended in ambiguous `stream reset` |
+| Session-v1 split, Device 1 generating | Passed | Two completed streams; final 200-token generation used exact `0-6 -> 6-12` peers with 199 bounded decodes |
+| Session-v1 split, Device 2 generating | Passed | Three completed streams; final 200-token generation used the same peers in the reverse relay direction |
+| Exact-operation retained-result recovery | Passed | Three physical retained results served across both providers with no duplicate positions or provider RPC failure |
 | Trace diagnostic | Failed at renderer boundary | Generic 8-second HTTP timeout; not equivalent to shadow chat |
-| Complete user-visible inference | Not achieved | No real relayed prompt has completed in the latest artifact |
+| Complete user-visible inference | Passed for incentives-off session v1 | Five real relayed generation streams completed across both generator directions |
 | Correlated Device 2 and VPS failure logs | Incomplete | Still required for the Test A request window |
 | Direct-versus-relayed comparison | Not run | This is the next transport isolation gate |
 | Controlled physical payload sweep | Harness implemented; not physically run | Needed to locate the size, duration, or lifecycle threshold |
@@ -502,6 +511,8 @@ Sprint 27 should:
 - either make Trace explicitly legacy-only or add a separately named receipt-path diagnostic.
 
 ## 14. Completion Criteria
+
+The common sustained session-over-relay defect is complete for the tested incentives-off adjacent route. The following list is intentionally broader because it also covers the still-open incentives-shadow receipt and end-to-end settlement gate.
 
 The relay stream defect is not complete until all of these are recorded from one artifact:
 

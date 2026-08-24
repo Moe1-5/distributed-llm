@@ -3,7 +3,7 @@
 **Goal:** Replace full-sequence retransmission per token with bounded prefill and decode sessions while preserving parity, cancellation, accounting, and safe recovery.
 **Start:** 2026-08-23
 **End:** TBD
-**Status:** Implemented in source on `feature/distributed-runtime-architecture`; physical direct and relayed two-device acceptance remains open.
+**Status:** Source and bidirectional two-device relayed session acceptance passed on `feature/distributed-runtime-architecture`; sprint remains active until the user explicitly closes it.
 
 ---
 
@@ -51,7 +51,7 @@ This is a protocol change, not a performance flag. Cache ownership, model semant
 - [x] Cache memory and concurrency are bounded and observable.
 - [x] Cancellation, timeout, unload, and peer loss have bounded release through cancel, runtime expiry, and shutdown cleanup.
 - [x] Safe alternate recovery rebuilds once; ambiguous execution never changes route or replays blindly. One reset may retry the exact fingerprint-bound operation once when the provider can return its retained completion.
-- [ ] One real two-device relayed session completes with correlated prefill and decode evidence.
+- [x] One real two-device relayed session completes with correlated prefill and decode evidence.
 
 ## Physical Test Gate
 
@@ -127,3 +127,12 @@ Run this only after both devices and the VPS use the same committed source and t
 - Safety: every retained handle is created by exact-peer preparation for its immutable route position and is cleared on start, end, close, cancel, and rebuild. Dispatch stops if the retained handle count no longer matches the selected route. No alternate provider or changed operation identity is introduced after dispatch.
 - Verification: all 487 backend tests pass, including a new regression proving that one open, one prefill, five decodes, and close resolve exactly two experts total. Frontend type checks, 29 launcher tests, the packaged-backend payload test, and seven renderer-flow tests also pass. A newly packaged two-device relayed run is still required for physical acceptance.
 - Package: commit `81a768a60f42c0a951e4c7ef78b7085d8a16a1bd` was built natively on Windows and audited with 65 manifest-bound backend files, zero forbidden application or backend entries, and embedded manifest SHA-256 `6d33ac0fa756ff71f0714e0bcb2ec2aea94722527392e1044cfa9b34c6683c7b`. The distributed portable artifact SHA-256 is `67eccff5aae01905c57f2df1832ace2a623a13258fcacda3d0ece3c31c4f3c91`.
+
+### 2026-08-25 - Pass bidirectional physical relay acceptance
+
+- Evidence: four independent diagnostic bundles captured the same adjacent relay route, with Device 1 peer `QmT5GHzmzhfzN8z82jGx4CQqQebWMhaTYg6uSfTTNQrf4o` owning `0-6` and Device 2 peer `QmUnY3NPijDnPzZeKgQcmMMbyyVfcXWsTLBp8gSqiMkDz3` owning `6-12`. Bundle SHA-256 values are `8fd42e22a36290132e3482c113efb469c32670759b570fb65386061a807c787c`, `693d30bca9cc4be642d9953d3a9c9a44bddb86ab63c48b853ba6ca7bca4805ed`, `f53a8fbf77edf95faf63950a3f8862f58b22c6e667565e43668be54ef9f8bc2d`, and `c758fb596dc2149b04a660ad7b0fd3332710c3ed9c2bf6de000a014b2d9caa9a`.
+- Bidirectional proof: Device 1 generated 200 tokens with local `0-6` averaging 28.54 milliseconds and remote `6-12` averaging 758.03 milliseconds. Device 2 generated 200 tokens with remote `0-6` averaging 760.42 milliseconds and local `6-12` averaging 33.58 milliseconds. This latency inversion proves that the generator role changed machines and that both remote relay directions executed the exact selected peers.
+- Session proof: both providers ended with five opened sessions, five closed sessions, zero active sessions, five prefills, and 586 decodes. Decode traffic remained bounded at 614,910 bytes for 199 one-position calls in each final 200-token generation. Both directions used session protocol version one, reported zero rebuilds, and retained about 3.7 megabytes of peak provider cache.
+- Recovery and safety: the providers served three retained exact-operation results during the full run, two on `0-6` and one on `6-12`, without duplicate session positions. All selected-provider RPC snapshots reported zero failed, rejected, or timed-out requests, and the final topology was fresh with two providers, no validation errors, and no network failure.
+- Remaining non-session findings: renderer history contains recoverable serving-plan, model, status, and generator-status polling timeouts during startup. They did not prevent fresh topology or generation and remain responsiveness/diagnostic work under Sprints 23 and 27. The schema-one diagnostic bundles do not embed the packaged source commit or executable hash, so the session result is correlated but not independently artifact-bound without the separate launcher acceptance report owned by Sprint 24. No manual disjoint-standby outage was injected in this run, and incentives-shadow receipt acceptance remains a separate gate.
+- Status: the Sprint 31 real two-device relayed session acceptance criterion is satisfied. Do not archive the sprint until the user explicitly requests closure.
